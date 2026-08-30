@@ -1,6 +1,6 @@
 {
-  "version": "1.07",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.07/CFRP_Router_CAM.exe",
-  "sha256": "a316ccf61a5a4fca19c238b4157590d89cb993543d31d7afc7b805ba90810f4e",
-  "message": "GitHub 업데이트 확인과 SHA-256 검증 후 기존 EXE 자동 교체 기능을 추가했습니다."
+  "version": "1.09",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.09/CFRP_Router_CAM.exe",
+  "sha256": "8baafcef72f4e0cb1fc4bdccc6c1fa776c9e5df7e2c63663e80ecd2dd023e474",
+  "message": "첫 실행 언어 선택, 영어 UI, NC 영문 전체 가공조건 헤더, 탭 설정 버튼 재배치를 추가했습니다."
 }
