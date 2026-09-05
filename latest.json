@@ -1,6 +1,6 @@
 {
-  "version": "1.10",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.10/CFRP_Router_CAM.exe",
-  "sha256": "ef4201508dbac809d48f1d306e5123e76822df361d45d8af43c2a05092e2f4fc",
-  "message": "첫 실행 언어 선택창 숨김 문제 수정, NC 파일명 판재 두께(T) 추가, 실제 소스 코드와 검사/빌드 파일 공개."
+  "version": "1.11",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.11/CFRP_Router_CAM.exe",
+  "sha256": "6d4953bf2fddbc75547651443e8d59eaa9771c94fc31fee90009414d1c079175",
+  "message": "배열 가공 순서 복사와 누적 거리 기반 공구 마모 보정을 추가했습니다."
 }
