@@ -1,5 +1,14 @@
 # Changes
 
+## V1.11 — 2026-09-05
+
+- Preserved user-assigned contour cut orders when creating automatic or manual arrays. Repeated order values across array instances act as array-wide machining stages; duplicate-order warnings remain limited to duplicates inside the same part instance.
+- Added optional distance-based cutter-wear compensation. The assumed diameter decreases linearly from the nominal tool diameter using the previous accumulated cutting distance plus the current job distance, with a user-defined diameter loss per 100 m and minimum diameter.
+- Applied one stable wear-adjusted diameter at each contour's estimated cutting-distance midpoint to avoid a changing offset distorting a single closed contour.
+- Recorded wear settings and estimated job-start/job-end diameters in the ASCII NC header and each contour's applied diameter in its NC comment.
+- Fixed source-name extraction for Windows paths when tests or project files are processed on another operating system.
+- Verification: 28 unit tests, including array-order preservation, wear-rate/minimum calculations, and progressive G-code diameters.
+
 ## V1.10 — 2026-09-01
 
 - Fixed the first-run language dialog being hidden behind a withdrawn main window on Windows. The language dialog is now a standalone, centered window that is shown before grabbing input.

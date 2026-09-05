@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.10"
+APP_VERSION = "1.11"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -96,6 +96,9 @@ _UI_EN_EXACT = {
     "측정 지우기": "Clear Measurement",
     "그리드": "Grid",
     "공구 지름 (mm)": "Tool Diameter (mm)",
+    "거리 기반 공구 마모 보정": "Distance-based Tool Wear Compensation",
+    "100m당 지름 감소 (mm)": "Diameter Loss per 100 m (mm)",
+    "최소 가정 지름 (mm)": "Minimum Assumed Diameter (mm)",
     "판 두께 (mm)": "Stock Thickness (mm)",
     "관통 여유 (mm)": "Through Allowance (mm)",
     "안전 Z (mm)": "Safe Z (mm)",
@@ -1074,7 +1077,6 @@ def oriented_contour_group(source:Sequence[Contour],angle_deg:float)->Tuple[List
     for c in group:
         c.points=[move(p) for p in c.points]
         c.bridges=[(move(a),move(b)) for a,b in c.bridges]
-        c.cut_order=None
     return group,maxx-minx,maxy-miny
 
 
@@ -1183,7 +1185,6 @@ def normalized_contour_group(source:Sequence[Contour])->Tuple[List[Contour],floa
     for c in group:
         c.points=[move(p) for p in c.points]
         c.bridges=[(move(a),move(b)) for a,b in c.bridges]
-        c.cut_order=None
     return group,maxx-minx,maxy-miny,(minx,miny)
 
 
@@ -2036,23 +2037,74 @@ def rough_target_for(target:float,stock:float,cfg:dict,use_onion_skin:bool)->flo
     return max(.01,stock-float(cfg.get("onion_skin",0.0))) if use_onion_skin else target
 
 
-def _gcode_route_worker(task)->Tuple[int,float,List[Point],int]:
+def effective_tool_diameter(cfg:dict,accumulated_cut_m:float)->float:
+    """Return the assumed cutter diameter after linear distance-based wear."""
+    nominal=max(float(cfg["tool_d"]),EPS)
+    if not cfg.get("tool_wear_enabled"):return nominal
+    loss_per_100m=max(0.0,float(cfg.get("tool_wear_loss_per_100m",0.0)))
+    minimum=max(EPS,min(nominal,float(cfg.get("tool_wear_min_d",nominal))))
+    return max(minimum,nominal-loss_per_100m*max(0.0,float(accumulated_cut_m))/100.0)
+
+
+def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
+                        )->Tuple[float,float,float]:
+    """Return cutting millimetres, XY cutting minutes, and plunge minutes."""
+    passes=1 if cfg["full_depth"] else max(1,cfg["passes"])
+    target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
+    if c.closed and len(c.points)>=3:
+        route,_,_=compensated_route(c,tool_d,cfg.get("auto_trim",False));route_len=path_length(route,True)
+        plan=lead_plan(c,route,cfg["lead"])
+        lead_one=(math.pi*.5*dist(plan.entry,plan.center)) if plan.center is not None else dist(plan.entry,route[0])
+    else:
+        route=list(c.points);route_len=c.length;lead_one=0.0
+    wall_finish=wall_finish_for(c,target,stock,cfg);use_onion=onion_skin_for(c,target,stock,cfg)
+    if wall_finish or use_onion:
+        rough,_=rough_route_for(c,route,cfg) if wall_finish else (list(route),0.0)
+        rough_len=path_length(rough,True)
+        rough_plan=lead_plan(c,rough,cfg["lead"])
+        rough_lead=(math.pi*.5*dist(rough_plan.entry,rough_plan.center)) if rough_plan.center is not None else dist(rough_plan.entry,rough[0])
+        rough_mm=rough_len*passes+rough_lead*(passes+1);finish_mm=route_len+lead_one*2
+        cut_mm=rough_mm+finish_mm
+        cut_min=rough_mm/max(cfg["feed"],EPS)+finish_mm/max(cfg["feed"]*cfg["finish_feed_pct"]/100.0,EPS)
+        rough_target=rough_target_for(target,stock,cfg,use_onion)
+        plunge_min=sum(cfg["safe_z"]+rough_target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
+        plunge_min+=(cfg["safe_z"]+target)/max(cfg["plunge"],EPS)
+    else:
+        cut_mm=route_len*passes+lead_one*(passes+1)
+        cut_min=cut_mm/max(cfg["feed"],EPS)
+        plunge_min=sum(cfg["safe_z"]+target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
+    return cut_mm,cut_min,plunge_min
+
+
+def contour_wear_plan(c:Contour,cfg:dict,stock:float,extra:float,distance_before_m:float
+                      )->Tuple[float,Tuple[float,float,float]]:
+    """Choose one stable diameter per contour using its estimated distance midpoint."""
+    start_d=effective_tool_diameter(cfg,distance_before_m)
+    first=contour_cut_metrics(c,cfg,stock,extra,start_d)
+    midpoint_d=effective_tool_diameter(cfg,distance_before_m+first[0]/2000.0)
+    return midpoint_d,contour_cut_metrics(c,cfg,stock,extra,midpoint_d)
+
+
+def _gcode_route_worker(task)->Tuple[int,float,List[Point],int,float]:
     """CPU-heavy compensation stage; safe to run outside the Tk process."""
-    ci,c,cfg,stock,extra=task
+    ci,c,cfg,stock,extra,tool_d=task
     target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
     pts=list(c.points);removed_count=0
     if c.closed:
         want_ccw=(c.role=="inner") if cfg["climb"] else (c.role!="inner")
         pts=reverse_if_needed(pts,want_ccw)
-        pts,removed_loops,_=compensated_route(c,cfg["tool_d"],cfg.get("auto_trim",False),pts)
+        pts,removed_loops,_=compensated_route(c,tool_d,cfg.get("auto_trim",False),pts)
         removed_count=len(removed_loops)
-    return ci,target,pts,removed_count
+    return ci,target,pts,removed_count,tool_d
 
 
 def prepare_gcode_routes(ordered:Sequence[Contour],cfg:dict,stock:float,extra:float,
                          progress:Optional[Callable[[float,str],None]]=None
-                         )->List[Tuple[int,float,List[Point],int]]:
-    tasks=[(ci,c,cfg,stock,extra) for ci,c in enumerate(ordered,1)]
+                         )->List[Tuple[int,float,List[Point],int,float]]:
+    tasks=[];distance_m=float(cfg.get("accum_distance_m",0.0))
+    for ci,c in enumerate(ordered,1):
+        tool_d,metrics=contour_wear_plan(c,cfg,stock,extra,distance_m)
+        tasks.append((ci,c,cfg,stock,extra,tool_d));distance_m+=metrics[0]/1000.0
     workers=_route_parallel_workers(ordered,bool(cfg.get("auto_trim",False)));results=[]
     if workers>1:
         try:
@@ -2123,14 +2175,18 @@ def stock_thickness_name(stock:float)->str:
 
 
 def loaded_source_name(part_objects:Sequence[PartObject],filename:str)->str:
+    def source_stem(path:str)->str:
+        # Accept both Windows and POSIX paths so saved jobs and tests remain
+        # portable even when a project is moved between computers.
+        return os.path.splitext(re.split(r"[\\/]",str(path))[-1])[0]
     unique:Dict[str,str]={}
     for part in part_objects:
         if not part.source_path:continue
         key=os.path.normcase(os.path.abspath(part.source_path))
-        unique.setdefault(key,os.path.splitext(os.path.basename(part.source_path))[0])
+        unique.setdefault(key,source_stem(part.source_path))
     if len(unique)>1:return "multi"
     if len(unique)==1:return filename_component(next(iter(unique.values())))
-    stem=os.path.splitext(os.path.basename(filename or "job"))[0]
+    stem=source_stem(filename or "job")
     if stem.lower() in ("multi","multi_job"):return "multi"
     return filename_component(stem)
 
@@ -2312,7 +2368,7 @@ def nc_yes_no(value) -> str:
 
 
 def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
-                          safe_machine_z:float,actual_passes:int) -> List[str]:
+                          safe_machine_z:float,actual_passes:int,job_cut_m:float=0.0) -> List[str]:
     stock=float(cfg["stock"]);extra=float(cfg["extra"])
     bottom_zero=cfg.get("z_origin")=="Bottom"
     final_through_z=-extra if bottom_zero else -(stock+extra)
@@ -2320,12 +2376,20 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
     custom_text=",".join(fmt(value) for value in custom_depths) if custom_depths else "NONE"
     closed_count=sum(bool(c.closed) for c in active)
     safety_excluded=sum(bool(c.safety_excluded) for c in active)
+    accumulated=float(cfg.get("accum_distance_m",0.0))
+    wear_start=effective_tool_diameter(cfg,accumulated)
+    wear_end=effective_tool_diameter(cfg,accumulated+max(0.0,float(job_cut_m)))
     return [
         "(----- CAM SETTINGS BEGIN -----)",
         f"(UNITS: MM)",
         f"(ACTIVE_CONTOURS: {len(active)} CLOSED: {closed_count} OPEN: {len(active)-closed_count})",
         f"(SAFETY_CHECK_EXCLUDED: {safety_excluded})",
         f"(TOOL_DIAMETER_MM: {fmt(float(cfg['tool_d']))})",
+        f"(TOOL_WEAR_COMPENSATION: {nc_yes_no(cfg.get('tool_wear_enabled'))})",
+        f"(TOOL_WEAR_LOSS_PER_100M_MM: {fmt(float(cfg.get('tool_wear_loss_per_100m',0.0)))})",
+        f"(TOOL_WEAR_MIN_DIAMETER_MM: {fmt(float(cfg.get('tool_wear_min_d',cfg['tool_d'])))})",
+        f"(TOOL_DIAMETER_JOB_START_MM: {fmt(wear_start)})",
+        f"(TOOL_DIAMETER_JOB_END_MM: {fmt(wear_end)})",
         f"(SPINDLE_RPM: {int(round(float(cfg['rpm'])))})",
         f"(FEED_XY_MM_MIN: {fmt(float(cfg['feed']))})",
         f"(PLUNGE_MM_MIN: {fmt(float(cfg['plunge']))})",
@@ -2430,7 +2494,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     job_label=nc_ascii_text(cfg.get("_job_label",""))
     job_note=nc_ascii_text(cfg.get("_job_note",""))
     job_header=([f"(Job part: {job_label})"] if job_label else [])+([f"({job_note})"] if job_note else [])
-    settings_header=gcode_settings_header(cfg,active,(origin_x,origin_y),safe_machine_z,passes)
+    settings_header=gcode_settings_header(cfg,active,(origin_x,origin_y),safe_machine_z,passes,metres)
     out = program_header+[f"(CFRP Router CAM V{APP_VERSION} - Mach3 post)", f"(XY origin mode: {nc_ascii_text(origin_mode)})"]+job_header+settings_header+[
            f"(This job cutting distance: {fmt(metres)} m)",
            f"(This job estimated cutting time: {fmt(minutes)} min)",
@@ -2505,7 +2569,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     finish_tasks=[]
     if any(staged_finish_for(c,min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra),stock,cfg) for c in ordered):
         out.append("(Stage 1: complete internal features before outer-profile cutting)")
-    for (ci,target,pts,removed_count),c in zip(prepared_routes,ordered):
+    for (ci,target,pts,removed_count,effective_d),c in zip(prepared_routes,ordered):
         report(38+42*ci/max(len(ordered),1),f"G-code 조립 {ci}/{len(ordered)}")
         if c.closed:
             if c.start_s>EPS:
@@ -2523,7 +2587,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         finish=wall_finish or use_onion
         order_note=str(c.cut_order) if c.cut_order is not None else "auto"
         object_note=f", object={nc_ascii_text(c.object_name)}, instance={c.instance_id}" if c.object_name else ""
-        out.append(f"(Contour {ci}: {c.role}, order={order_note}, layer={nc_ascii_text(c.layer)}, depth={fmt(target)}, tabs={len(tabs)}, safety_check={'excluded' if c.safety_excluded else 'enabled'}, wall_finish={'yes' if wall_finish else 'no'}, onion_skin={'yes' if use_onion else 'no'}, trimmed={removed_count}{object_note})")
+        out.append(f"(Contour {ci}: {c.role}, order={order_note}, tool_d={fmt(effective_d)}, layer={nc_ascii_text(c.layer)}, depth={fmt(target)}, tabs={len(tabs)}, safety_check={'excluded' if c.safety_excluded else 'enabled'}, wall_finish={'yes' if wall_finish else 'no'}, onion_skin={'yes' if use_onion else 'no'}, trimmed={removed_count}{object_note})")
         if finish:
             rough,actual_allowance=rough_route_for(c,pts,cfg) if wall_finish else (list(pts),0.0)
             if cfg.get("auto_trim") and self_intersection_count(rough):rough,_,_=trim_small_self_loops(rough)
@@ -2556,33 +2620,18 @@ def machining_report(contours: List[Contour], cfg: dict,
                      progress:Optional[Callable[[float,str],None]]=None
                      ) -> Tuple[float, float, float, float]:
     """Return job metres/minutes and accumulated metres/minutes after this job."""
-    passes=1 if cfg["full_depth"] else max(1,cfg["passes"]);cut_mm=0.0;cut_min=0.0;plunge_min=0.0
-    stock=cfg["stock"]
+    cut_mm=0.0;cut_min=0.0;plunge_min=0.0;stock=cfg["stock"]
     active=[x for x in contours if x.enabled]
-    for report_index,c in enumerate(active,1):
+    override=cfg.get("_xy_origin_override")
+    origin=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
+    ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin)
+    distance_m=float(cfg.get("accum_distance_m",0.0))
+    for report_index,c in enumerate(ordered,1):
         if progress:progress(report_index/max(len(active),1)*100.0,
                              f"가공 거리 계산 {report_index}/{len(active)}")
-        target=min(max(c.target_depth if c.target_depth is not None else stock+cfg["extra"],.01),stock+cfg["extra"])
-        if c.closed and len(c.points)>=3:
-            route,_,_=compensated_route(c,cfg["tool_d"],cfg.get("auto_trim",False));route_len=path_length(route,True)
-            plan=lead_plan(c,route,cfg["lead"])
-            lead_one=(math.pi*.5*dist(plan.entry,plan.center)) if plan.center is not None else dist(plan.entry,route[0])
-        else:route=list(c.points);route_len=c.length;lead_one=0.0
-        wall_finish=wall_finish_for(c,target,stock,cfg);use_onion=onion_skin_for(c,target,stock,cfg)
-        if wall_finish or use_onion:
-            rough,_=rough_route_for(c,route,cfg) if wall_finish else (list(route),0.0);rough_len=path_length(rough,True)
-            rough_plan=lead_plan(c,rough,cfg["lead"])
-            rough_lead=(math.pi*.5*dist(rough_plan.entry,rough_plan.center)) if rough_plan.center is not None else dist(rough_plan.entry,rough[0])
-            rough_mm=rough_len*passes+rough_lead*(passes+1);finish_mm=route_len+lead_one*2
-            cut_mm+=rough_mm+finish_mm
-            cut_min+=rough_mm/max(cfg["feed"],EPS)+finish_mm/max(cfg["feed"]*cfg["finish_feed_pct"]/100.0,EPS)
-            rough_target=rough_target_for(target,stock,cfg,use_onion)
-            plunge_min+=sum(cfg["safe_z"]+rough_target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
-            plunge_min+=(cfg["safe_z"]+target)/max(cfg["plunge"],EPS)
-        else:
-            phase_mm=route_len*passes+lead_one*(passes+1);cut_mm+=phase_mm
-            cut_min+=phase_mm/max(cfg["feed"],EPS)
-            plunge_min+=sum(cfg["safe_z"]+target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
+        _,metrics=contour_wear_plan(c,cfg,stock,cfg["extra"],distance_m)
+        cut_mm+=metrics[0];cut_min+=metrics[1];plunge_min+=metrics[2]
+        distance_m+=metrics[0]/1000.0
     cut_min+=plunge_min;job_m=cut_mm/1000.0
     return (job_m,cut_min,cfg.get("accum_distance_m",0.0)+job_m,cfg.get("accum_time_min",0.0)+cut_min)
 
@@ -3983,6 +4032,13 @@ class App(tk.Tk):
             cls = tk.IntVar if key in ("passes", "tab_count") else tk.DoubleVar
             ttk.Entry(controls, width=12, textvariable=self.var(key, val, cls)).grid(row=r, column=1, padx=5)
         r = len(rows)
+        self.var("tool_wear_enabled",False,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="거리 기반 공구 마모 보정",variable=self.vars["tool_wear_enabled"],
+                        command=self.redraw).grid(row=r,columnspan=2,sticky="w",pady=(4,1));r+=1
+        for label,key,val in (("100m당 지름 감소 (mm)","tool_wear_loss_per_100m",0.0),
+                              ("최소 가정 지름 (mm)","tool_wear_min_d",1.0)):
+            ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w",pady=2)
+            ttk.Entry(controls,width=12,textvariable=self.var(key,val)).grid(row=r,column=1,padx=5);r+=1
         ttk.Separator(controls).grid(row=r,columnspan=2,sticky="ew",pady=(7,5));r+=1
         ttk.Label(controls,text="탭 설정 / 배치").grid(row=r,columnspan=2,sticky="w");r+=1
         for label,key,val,cls in (("탭 개수/외곽","tab_count",3,tk.IntVar),
@@ -4272,6 +4328,10 @@ class App(tk.Tk):
             raise ValueError("어니언스킨 잔여량과 황삭 측면 여유 값을 확인하세요.")
         if cfg["finish_feed_pct"]<=0 or cfg["finish_feed_pct"]>100:
             raise ValueError("정삭 Feed는 0 초과 100% 이하로 설정하세요.")
+        if cfg["tool_wear_loss_per_100m"]<0 or cfg["tool_wear_min_d"]<=0:
+            raise ValueError("공구 마모 감소량과 최소 가정 지름을 확인하세요.")
+        if cfg["tool_wear_enabled"] and (cfg["tool_wear_loss_per_100m"]<=0 or cfg["tool_wear_min_d"]>cfg["tool_d"]):
+            raise ValueError("공구 마모 보정 사용 시 감소량은 0보다 크게, 최소 지름은 공구 지름 이하로 입력하세요.")
         if cfg["accum_distance_m"] < 0 or cfg["accum_time_min"] < 0:
             raise ValueError("누적 거리와 누적 시간은 음수가 될 수 없습니다.")
         if cfg["gap_tol"] < 0:
@@ -4283,7 +4343,8 @@ class App(tk.Tk):
         return cfg
 
     def job_signature(self,cfg:dict):
-        machining_keys=("tool_d","rpm","feed","plunge","stock","extra","safe_z","lead","passes",
+        machining_keys=("tool_d","tool_wear_enabled","tool_wear_loss_per_100m","tool_wear_min_d",
+                        "rpm","feed","plunge","stock","extra","safe_z","lead","passes",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
                         "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim","accum_distance_m",
@@ -4544,7 +4605,7 @@ class App(tk.Tk):
             for c in group:
                 c.points=[(x+dx,y+dy) for x,y in c.points]
                 c.bridges=[((a[0]+dx,a[1]+dy),(b[0]+dx,b[1]+dy)) for a,b in c.bridges]
-                c.object_id=part.object_id;c.object_name=part.name;c.instance_id=1;c.cut_order=None
+                c.object_id=part.object_id;c.object_name=part.name;c.instance_id=1
             nested.extend(group)
         self.contours=nested;classify_contours(self.contours);self.preview_cache.clear()
         self.sheet_size=None;self.nest_active=False;self.nest_source=None;self.view_only=None
@@ -4777,7 +4838,7 @@ class App(tk.Tk):
             for c in group:
                 c.points=[(x+placement.x,y+placement.y) for x,y in c.points]
                 c.bridges=[((a[0]+placement.x,a[1]+placement.y),(b[0]+placement.x,b[1]+placement.y)) for a,b in c.bridges]
-                c.cut_order=None;c.object_id=part.object_id;c.object_name=part.name;c.instance_id=placement.instance_id
+                c.object_id=part.object_id;c.object_name=part.name;c.instance_id=placement.instance_id
                 c.name=f"{c.name} · {part.name} #{placement.instance_id}"
             nested.extend(group)
         # Every template was classified before duplication.  Reclassifying all
@@ -4826,7 +4887,7 @@ class App(tk.Tk):
                 for c in group:
                     c.points=[(px+x,py+y) for px,py in c.points]
                     c.bridges=[((a[0]+x,a[1]+y),(b[0]+x,b[1]+y)) for a,b in c.bridges]
-                    c.cut_order=None;c.object_id=part.object_id;c.object_name=part.name;c.instance_id=instance_id
+                    c.object_id=part.object_id;c.object_name=part.name;c.instance_id=instance_id
                     c.name=f"{c.name} · {part.name} #{instance_id}"
                 nested.extend(group);x+=w+gap;row_h=max(row_h,h)
         # Each source part is already classified before duplication. Re-running
@@ -5523,7 +5584,15 @@ class App(tk.Tk):
         self.canvas.addtag_all("view_live")
         detail_marker=self.canvas_item_marker()
         if not self.manual_array_mode and self.vars.get("show_toolpath") and self.vars["show_toolpath"].get():
-            try: preview_radius = self.vars["tool_d"].get()/2
+            try:
+                preview_cfg={
+                    "tool_d":self.vars["tool_d"].get(),
+                    "tool_wear_enabled":self.vars["tool_wear_enabled"].get(),
+                    "tool_wear_loss_per_100m":self.vars["tool_wear_loss_per_100m"].get(),
+                    "tool_wear_min_d":self.vars["tool_wear_min_d"].get(),
+                }
+                preview_radius=effective_tool_diameter(
+                    preview_cfg,self.vars["accum_distance_m"].get())/2
             except (tk.TclError, ValueError): preview_radius = 1.0
             auto_trim_value=bool(self.vars.get("auto_trim") and self.vars["auto_trim"].get())
             geometry_signature=hash(tuple((id(c),c.enabled,c.safety_excluded,c.closed,c.role,c.target_depth,
@@ -5758,9 +5827,12 @@ class App(tk.Tk):
             first_outer=next((i for i,c in enumerate(sequence) if c.closed and c.role=="outer"),None)
             if first_outer is not None and any(c.role=="inner" for c in sequence[first_outer+1:]):
                 warnings.append("수동 순번 때문에 외곽이 일부 내부 형상보다 먼저 가공됩니다. 부품 고정을 확인하세요.")
-            manual_orders=[c.cut_order for c in active if c.cut_order is not None]
-            if len(manual_orders)!=len(set(manual_orders)):
-                warnings.append("같은 수동 가공 순번이 중복되었습니다. 같은 번호 안에서는 자동 안전 순서를 사용합니다.")
+            manual_orders:Dict[Tuple[int,int],List[int]]={}
+            for c in active:
+                if c.cut_order is None:continue
+                manual_orders.setdefault(contour_group_key(c),[]).append(c.cut_order)
+            if any(len(values)!=len(set(values)) for values in manual_orders.values()):
+                warnings.append("한 객체 안에서 같은 수동 가공 순번이 중복되었습니다. 같은 번호 안에서는 자동 안전 순서를 사용합니다.")
             if split_selected:
                 conflicts=split_outer_inner_conflicts(part1,part2)
                 if conflicts:

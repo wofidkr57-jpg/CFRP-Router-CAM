@@ -1,0 +1,136 @@
+name: Build and release Windows application
+
+on:
+  push:
+    branches: [main]
+    paths:
+      - cfrp_router_cam.py
+      - requirements.txt
+      - build_windows.ps1
+      - verification/**
+      - .github/workflows/release-windows.yml
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+concurrency:
+  group: windows-release
+  cancel-in-progress: false
+
+jobs:
+  build-release:
+    runs-on: windows-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+          architecture: x64
+          cache: pip
+
+      - name: Read application version
+        id: app
+        shell: pwsh
+        run: |
+          $source = Get-Content cfrp_router_cam.py -Raw
+          if ($source -notmatch 'APP_VERSION\s*=\s*"([^"]+)"') {
+            throw "APP_VERSION was not found"
+          }
+          "version=$($Matches[1])" >> $env:GITHUB_OUTPUT
+
+      - name: Skip an existing release
+        id: release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v${{ steps.app.outputs.version }}"
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            "exists=true" >> $env:GITHUB_OUTPUT
+          } else {
+            "exists=false" >> $env:GITHUB_OUTPUT
+          }
+          exit 0
+
+      - name: Install pinned dependencies
+        if: steps.release.outputs.exists != 'true'
+        run: python -m pip install -r requirements.txt
+
+      - name: Run regression tests
+        if: steps.release.outputs.exists != 'true'
+        run: python -m unittest discover -s verification -p "test_*.py"
+
+      - name: Run Windows GUI smoke tests
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          python verification/gui_smoke_v108.py
+          python verification/gui_smoke_v110_first_run.py ko
+          python verification/gui_smoke_v110_first_run.py en
+          python verification/gui_smoke_v110_first_run.py close
+
+      - name: Build executable
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        run: ./build_windows.ps1 -Python ((Get-Command python).Source)
+
+      - name: Prepare release files and update manifest
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          $version = "${{ steps.app.outputs.version }}"
+          $releaseDir = Join-Path $PWD "release"
+          $sourceName = "CFRP_Router_CAM_V${version}_source"
+          $sourceDir = Join-Path $releaseDir $sourceName
+          New-Item -ItemType Directory -Force $sourceDir | Out-Null
+          New-Item -ItemType Directory -Force (Join-Path $sourceDir "verification") | Out-Null
+
+          Copy-Item dist/CFRP_Router_CAM.exe (Join-Path $releaseDir "CFRP_Router_CAM.exe")
+          Copy-Item dist/CFRP_Router_CAM.exe (Join-Path $releaseDir "CFRP_Router_CAM_V${version}.exe")
+          Copy-Item cfrp_router_cam.py, README.md, CHANGELOG.md, requirements.txt, build_windows.ps1 $sourceDir
+          Copy-Item verification/*.py (Join-Path $sourceDir "verification")
+
+          $zip = Join-Path $releaseDir "${sourceName}.zip"
+          Compress-Archive -Path $sourceDir -DestinationPath $zip -Force
+          $hash = (Get-FileHash (Join-Path $releaseDir "CFRP_Router_CAM.exe") -Algorithm SHA256).Hash.ToLowerInvariant()
+          $manifest = [ordered]@{
+            version = $version
+            download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
+            sha256 = $hash
+            message = "배열 가공 순서 복사와 누적 거리 기반 공구 마모 보정을 추가했습니다."
+          }
+          $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
+
+      - name: Commit verified update manifest
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add latest.json
+          if (-not (git diff --cached --quiet)) {
+            git commit -m "Point automatic updates to verified V${{ steps.app.outputs.version }} release"
+            git push origin HEAD:main
+          }
+
+      - name: Create GitHub release
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $version = "${{ steps.app.outputs.version }}"
+          $tag = "v${version}"
+          git tag -a $tag -m "CFRP Router CAM V${version}"
+          git push origin $tag
+          gh release create $tag `
+            "release/CFRP_Router_CAM.exe" `
+            "release/CFRP_Router_CAM_V${version}.exe" `
+            "release/CFRP_Router_CAM_V${version}_source.zip" `
+            --title "CFRP Router CAM V${version}" `
+            --notes-file CHANGELOG.md

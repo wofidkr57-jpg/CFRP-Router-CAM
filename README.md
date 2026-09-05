@@ -6,8 +6,11 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.10**입니다.
+현재 최신 버전은 **V1.11**입니다.
 
+- 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
+- 거리 기반 공구 마모 보정 추가: 기존 누적거리와 작업 중 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소
+- `100m당 지름 감소량`과 `최소 가정 지름` 설정 및 NC 헤더 기록
 - 설정 파일 없는 첫 실행에서 언어 선택창이 숨는 문제 수정
 - NC 파일명에 판재 두께 추가: `260831_2.0endmill_T3.0_panel_12_35min.nc`
 - 두 파일로 나누면 `..._PART1.nc`, `..._PART2.nc`로 저장
@@ -25,7 +28,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.10 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.10/CFRP_Router_CAM_V1.10_source.zip)
+- [V1.11 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.11/CFRP_Router_CAM_V1.11_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
