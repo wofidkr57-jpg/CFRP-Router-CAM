@@ -1,6 +1,6 @@
 {
-  "version": "1.15",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.15/CFRP_Router_CAM.exe",
-  "sha256": "f1a194abae02a76c83e04f3e17845f5ca75e02dd2cba73a9a95a68f3f6e83da1",
-  "message": "STEP 회전·원점 이동 시 외곽 투영 오류를 수정했습니다."
+  "version": "1.16",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.16/CFRP_Router_CAM.exe",
+  "sha256": "871cf65ffc4fb3ed72711200331e69b508fe83c1978ada421fbdfb3390a99436",
+  "message": "G코드 저장 완료 알림창을 추가했습니다."
 }
