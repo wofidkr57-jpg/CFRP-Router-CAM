@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.13"
+APP_VERSION = "1.14"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -107,6 +107,9 @@ _UI_EN_EXACT = {
     "프리뷰 속도 (mm/min)": "Preview feed (mm/min)",
     "단차 면을 아일랜드 포켓으로 가져오기": "Import step floors as island pockets",
     "아일랜드 포켓": "Island pocket",
+    "가공 여부": "Machining",
+    "적용": "Include",
+    "‘윤곽’ / ‘가공 여부’ 셀 클릭: 판정 또는 적용/제외 선택": "Click Type / Machining cells to change role or Include / Exclude",
     "포켓 스텝오버 (%)": "Pocket stepover (%)",
     "포켓 패스 깊이 (mm)": "Pocket stepdown (mm)",
     "포켓 정삭 여유 (mm)": "Pocket finish stock (mm)",
@@ -4472,11 +4475,11 @@ class App(tk.Tk):
         ttk.Button(order_buttons,text="전체 보기",command=self.show_all_contours).pack(side="left",fill="x",expand=True,padx=(4,0))
         ttk.Button(order_frame,text="선택→PART1 / 나머지→PART2 G-code 생성",
                    command=lambda:self.make_gcode(split_selected=True),style="Accent.TButton").pack(fill="x",pady=(4,0))
-        ttk.Label(order_frame,text="‘윤곽’ 셀 클릭: 자동/내부/외부 바로 선택",foreground="#91a0b8").pack(anchor="w",pady=(4,3))
+        ttk.Label(order_frame,text="‘윤곽’ / ‘가공 여부’ 셀 클릭: 판정 또는 적용/제외 선택",foreground="#91a0b8").pack(anchor="w",pady=(4,3))
         self.tree_role_var=tk.StringVar(value="자동")
-        columns=("seq","manual","type","layer","depth","safety")
+        columns=("seq","manual","type","enabled","layer","depth","safety")
         self.order_tree=ttk.Treeview(order_frame,columns=columns,show="headings",selectmode="extended",height=7)
-        for col,title,width in (("seq","순서",45),("manual","지정",45),("type","윤곽",55),("layer","Layer",90),("depth","깊이",55),("safety","검사",48)):
+        for col,title,width in (("seq","순서",45),("manual","지정",45),("type","윤곽",85),("enabled","가공 여부",65),("layer","Layer",90),("depth","깊이",55),("safety","검사",48)):
             self.order_tree.heading(col,text=title,command=lambda c=col:self.sort_order_tree(c)); self.order_tree.column(col,width=width,anchor="center",stretch=False)
         order_scroll=ttk.Scrollbar(order_frame,orient="vertical",command=self.order_tree.yview)
         self.order_tree.configure(yscrollcommand=order_scroll.set)
@@ -5537,6 +5540,7 @@ class App(tk.Tk):
                 if self.tree_sort_col=="layer":return c.layer.lower()
                 if self.tree_sort_col=="depth":return c.target_depth if c.target_depth is not None else 10**9
                 if self.tree_sort_col=="safety":return c.safety_excluded
+                if self.tree_sort_col=="enabled":return not c.enabled
                 return 0
             display.sort(key=sort_key,reverse=self.tree_sort_reverse)
         index_by_id={id(c):i for i,c in enumerate(self.contours)}
@@ -5551,7 +5555,7 @@ class App(tk.Tk):
             if not c.enabled:tags.append("disabled")
             elif c.safety_excluded:tags.append("safety_excluded")
             self.order_tree.insert("", "end", iid=iid,
-                                   values=(seq,ui_text(manual),ui_text(typ),c.layer,ui_text(depth),
+                                   values=(seq,ui_text(manual),ui_text(typ),ui_text("적용" if c.enabled else "제외"),c.layer,ui_text(depth),
                                            ui_text("제외" if c.safety_excluded else "검사")),tags=tuple(tags))
             if id(c) in selected_ids:self.order_tree.selection_add(iid)
         self.order_tree.tag_configure("disabled",foreground="#888888")
@@ -5581,9 +5585,56 @@ class App(tk.Tk):
 
     def tree_cell_click(self,event):
         if self.order_tree.identify_region(event.x,event.y)!="cell":return
-        if self.order_tree.identify_column(event.x)!="#3":return
+        column=self.order_tree.identify_column(event.x)
         item=self.order_tree.identify_row(event.y)
-        if item:self.after_idle(lambda i=item:self.open_tree_role_editor(i))
+        if not item:return
+        if column=="#4":
+            # Ctrl/Shift are selection gestures. An ordinary click on an already
+            # selected row keeps the full selection for a batch Include/Exclude.
+            if event.state & 0x0005:return
+            if item not in self.order_tree.selection():self.order_tree.selection_set(item)
+            self.order_tree.focus(item);self.tree_select()
+            self.after_idle(lambda i=item:self.open_tree_enabled_editor(i))
+            return "break"
+        if column=="#3":self.after_idle(lambda i=item:self.open_tree_role_editor(i))
+
+    def open_tree_enabled_editor(self,item):
+        if not self.order_tree.exists(item):return
+        bbox=self.order_tree.bbox(item,"enabled")
+        if not bbox:return
+        previous=getattr(self,"tree_role_editor",None)
+        if previous is not None and previous.winfo_exists():previous.destroy()
+        idx=int(item[1:])
+        if not 0<=idx<len(self.contours):return
+        value=tk.StringVar(value=ui_text("적용" if self.contours[idx].enabled else "제외"))
+        editor=ttk.Combobox(self.order_tree,state="readonly",values=(ui_text("적용"),ui_text("제외")),textvariable=value)
+        self.tree_role_editor=editor
+        editor.place(x=bbox[0],y=bbox[1],width=bbox[2],height=bbox[3]);editor.focus_set()
+        editor.bind("<<ComboboxSelected>>",lambda e:self.commit_tree_enabled_editor(item,value.get()))
+        editor.bind("<Escape>",lambda e:editor.destroy())
+        def post_list():
+            if not editor.winfo_exists():return
+            try:editor.tk.call("ttk::combobox::Post",editor._w)
+            except tk.TclError:pass
+        editor.after_idle(post_list)
+
+    def commit_tree_enabled_editor(self,item,label):
+        mapping={"적용":True,"제외":False,"Include":True,"Exclude":False,"Excluded":False}
+        if label not in mapping:return
+        items=list(self.order_tree.selection())
+        if item not in items:items=[item]
+        targets=[self.contours[int(i[1:])] for i in items
+                 if i.startswith("c") and i[1:].isdigit() and int(i[1:])<len(self.contours)]
+        if not targets:return
+        enabled=mapping[label]
+        if any(c.enabled!=enabled for c in targets):
+            self.push_undo("목록 가공 여부 변경")
+            for c in targets:c.enabled=enabled
+        self.set_contour_selection(targets,targets[0])
+        self.sel_enabled.set(enabled)
+        self.preview_cache.clear();self.collision_cache_key=None
+        self.redraw()
+        self.status.set(f"Machining: {label} ({len(targets)})")
 
     def toggle_selected_safety(self):
         items=list(self.order_tree.selection())
