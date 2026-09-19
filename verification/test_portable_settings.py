@@ -40,6 +40,7 @@ class FakeText:
 
 class SettingsHarness:
     settings_path = cam.App.settings_path
+    sync_safe_z = cam.App.sync_safe_z
     load_settings = cam.App.load_settings
     save_settings = cam.App.save_settings
     write_settings_file = cam.App.write_settings_file
@@ -152,3 +153,4 @@ class PortableSettingsTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+

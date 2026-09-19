@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.17"
+APP_VERSION = "1.18"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -86,6 +86,7 @@ _UI_EN_EXACT = {
     "예제 사각형": "Example Rectangle",
     "G-code 생성": "Generate G-code",
     "G-code 저장": "Save G-code",
+    "안전 Z 자동: 판 두께 × 2": "Auto Safe Z: stock thickness x 2",
     "급속 접근 여유 (mm)": "Rapid approach clearance (mm)",
     "급속 접근 여유는 0보다 크고 안전 Z 이하여야 합니다.": "Rapid approach clearance must be positive and no greater than Safe Z.",
     "저장 완료": "Save complete",
@@ -2270,6 +2271,13 @@ def effective_tool_diameter(cfg:dict,accumulated_cut_m:float)->float:
     return max(minimum,nominal-loss_per_100m*max(0.0,float(accumulated_cut_m))/100.0)
 
 
+def resolved_z_config(cfg:dict) -> dict:
+    result=dict(cfg)
+    if result.get("safe_z_auto",False):
+        result["safe_z"]=float(result["stock"])*2.0
+    return result
+
+
 def rapid_approach_clearance(cfg:dict) -> float:
     value=float(cfg.get("approach_z",min(1.0,float(cfg["safe_z"]))))
     safe=float(cfg["safe_z"])
@@ -2649,6 +2657,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(XY_ORIGIN_MODE: {nc_ascii_text(cfg.get('xy_origin','DXF origin')).upper()})",
         f"(XY_ORIGIN_SOURCE_X_MM: {fmt(float(origin[0]))})",
         f"(XY_ORIGIN_SOURCE_Y_MM: {fmt(float(origin[1]))})",
+        f"(SAFE_Z_AUTO_STOCK_X2: {nc_yes_no(cfg.get('safe_z_auto',False))})",
         f"(RAPID_APPROACH_CLEARANCE_MM: {fmt(rapid_approach_clearance(cfg))})",
         f"(SAFE_Z_CLEARANCE_MM: {fmt(float(cfg['safe_z']))})",
         f"(PREFLIGHT_ENABLED: {nc_yes_no(cfg.get('preflight_enabled',False))})",
@@ -2731,6 +2740,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     def report(value:float,message:str):
         if progress:progress(value,message)
     report(2,"G-code 설정 준비 중")
+    cfg=resolved_z_config(cfg)
     validate_preflight(cfg)
     pocket_errors=pocket_job_issues(contours,cfg)
     if pocket_errors:raise ValueError("\n".join(pocket_errors))
@@ -4344,15 +4354,22 @@ class App(tk.Tk):
             ("공구 지름 (mm)", "tool_d", 2.0), ("RPM", "rpm", 22000.0),
             ("Feed XY (mm/min)", "feed", 800.0), ("Plunge (mm/min)", "plunge", 200.0),
             ("판 두께 (mm)", "stock", 3.0), ("관통 여유 (mm)", "extra", 0.1),
-            ("안전 Z (mm)", "safe_z", 10.0), ("Lead in/out (mm)", "lead", 1.0),
+            ("안전 Z (mm)", "safe_z", 6.0), ("Lead in/out (mm)", "lead", 1.0),
             ("급속 접근 여유 (mm)", "approach_z", 1.0),
             ("패스 수", "passes", 1),
         ]
         for r, (label, key, val) in enumerate(rows):
             ttk.Label(controls, text=label).grid(row=r, column=0, sticky="w", pady=2)
             cls = tk.IntVar if key in ("passes", "tab_count") else tk.DoubleVar
-            ttk.Entry(controls, width=12, textvariable=self.var(key, val, cls)).grid(row=r, column=1, padx=5)
+            entry=ttk.Entry(controls, width=12, textvariable=self.var(key, val, cls))
+            entry.grid(row=r, column=1, padx=5)
+            if key=="safe_z":self.safe_z_entry=entry
         r = len(rows)
+        self.var("safe_z_auto",True,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="안전 Z 자동: 판 두께 × 2",variable=self.vars["safe_z_auto"]).grid(row=r,columnspan=2,sticky="w");r+=1
+        self.vars["stock"].trace_add("write",self.sync_safe_z)
+        self.vars["safe_z_auto"].trace_add("write",self.sync_safe_z)
+        self.sync_safe_z()
         self.var("preflight_enabled",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="가공 전 외곽 프리뷰 1회",variable=self.vars["preflight_enabled"]).grid(row=r,columnspan=2,sticky="w");r+=1
         for label,key,value in (("프리뷰 높이 (mm)","preflight_z",30.0),
@@ -4643,8 +4660,17 @@ class App(tk.Tk):
             messagebox.showerror("설정 오류",str(exc));return
         messagebox.showinfo("언어 설정","재시작 후 적용됩니다.")
 
+    def sync_safe_z(self,*_):
+        if "safe_z_auto" not in self.vars:return
+        try:
+            automatic=bool(self.vars["safe_z_auto"].get())
+            if hasattr(self,"safe_z_entry"):
+                self.safe_z_entry.configure(state="readonly" if automatic else "normal")
+            if automatic:self.vars["safe_z"].set(float(self.vars["stock"].get())*2.0)
+        except (ValueError,tk.TclError):pass
+
     def config(self) -> dict:
-        cfg = {k: v.get() for k, v in self.vars.items()}
+        cfg = resolved_z_config({k: v.get() for k, v in self.vars.items()})
         cfg["start_code"] = self.start_text.get("1.0", "end").strip()
         cfg["end_code"] = self.end_text.get("1.0", "end").strip()
         if (cfg["tool_d"] <= 0 or cfg["stock"] <= 0 or cfg["feed"] <= 0 or
@@ -4681,7 +4707,7 @@ class App(tk.Tk):
 
     def job_signature(self,cfg:dict):
         machining_keys=("tool_d","tool_wear_enabled","tool_wear_loss_per_100m","tool_wear_min_d",
-                        "rpm","feed","plunge","stock","extra","safe_z","approach_z","lead","passes",
+                        "rpm","feed","plunge","stock","extra","safe_z","safe_z_auto","approach_z","lead","passes",
                         "preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
                         "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
@@ -4729,6 +4755,7 @@ class App(tk.Tk):
                     start_code=DEFAULT_START_CODE
                     if abs(float(data.get("vars",{}).get("safe_z",10.0))-3.0)<EPS:self.vars["safe_z"].set(10.0)
                 self.start_text.delete("1.0","end");self.start_text.insert("1.0",start_code)
+            self.sync_safe_z()
             if "end_code" in data:
                 end_code=str(data["end_code"]).strip()
                 if end_code==LEGACY_DEFAULT_END_CODE:end_code=DEFAULT_END_CODE

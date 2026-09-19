@@ -4,7 +4,7 @@
 - 저장소: `wofidkr57-jpg/CFRP-Router-CAM`
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
-- 현재 애플리케이션 소스 버전: **V1.17**
+- 현재 애플리케이션 소스 버전: **V1.18**
 - 배포 상태: V1.17 Windows 회귀59개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료. 사용자 PC의 백신 탐지 여부는 별도 확인 필요.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
@@ -261,3 +261,10 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - Defender 실제 로그 `found no threats`, 매니페스트와 두 EXE SHA-256 일치 `ccacbc6f2882f32581be0ce3388d771933244b4d3c14172d5995eb24b0ca5c94`.
 - 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.17
 - 다음 작업: 사용자 PC에서 안전Z10/접근1로 NC 재생성 후 시뮬레이션·공중 운전 확인. 실제 CNC 검증 전.
+
+## 16. V1.18 — 기본 안전 높이 자동 계산
+- safe_z_auto 기본ON: 소재 윗면 기준 stock*2. stock 변경 trace와 load_settings 마지막 동기화로 표시 갱신. config/generate_gcode에서도 계산 보장.
+- 급속 접근 기본1mm 유지. 자동 OFF이면 수동 안전 Z 유지. 설정 저장/작업 서명/NC 헤더 반영.
+- TOP/BOTTOM stock1/2/3/5의 NC XY 높이, 수동 유지, 얇은 판의 접근 높이 충돌 검증 추가.
+- Windows GUI에 두께 변경/자동·수동 전환/설정 복원 검사 추가. Windows/백신/릴리스 결과 대기.
+- 다음 작업: 검사·배포 후 사용자 PC NC 재생성과 공중운전. 실가공 미검증.

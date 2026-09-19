@@ -11,6 +11,17 @@ with tempfile.TemporaryDirectory() as folder:
     cam.App.executable_dir=lambda self:folder
     cam.App.appdata_settings_path=lambda self:str(Path(folder)/'fallback.json')
     app=cam.App();app.update()
+    assert app.vars['safe_z_auto'].get()
+    assert app.vars['approach_z'].get()==1
+    assert app.vars['safe_z'].get()==2*app.vars['stock'].get()
+    app.vars['stock'].set(2);assert app.vars['safe_z'].get()==4
+    app.vars['safe_z_auto'].set(False);app.vars['safe_z'].set(10)
+    app.vars['stock'].set(4);assert app.config()['safe_z']==10
+    app.vars['safe_z_auto'].set(True);assert app.config()['safe_z']==8
+    app.save_settings();app.vars['safe_z'].set(99);app.load_settings()
+    assert app.vars['safe_z'].get()==8
+    app.vars['stock'].set(3)
+
     contours=[cam.Contour([(x,0),(x+10,0),(x+10,10),(x,10)],forced_role='outer',layer=f'TEST_{i}') for i,x in enumerate((0,30,60))]
     app.set_single_part(contours,'synthetic',3);app.update()
     app.order_tree.selection_set(('c1','c2'));app.order_tree.focus('c1');app.tree_select();app.update()
