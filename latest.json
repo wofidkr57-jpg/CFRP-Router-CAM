@@ -1,6 +1,6 @@
 {
-  "version": "1.13",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.13/CFRP_Router_CAM.exe",
-  "sha256": "f46ac387c1379298367c819ad8a75067c33119c50d78ad3f7f94f21667ad0aca",
-  "message": "양각을 보존하는 STEP 아일랜드 포켓 가공과 스텝오버·패스 깊이·정삭 여유 설정을 추가했습니다."
+  "version": "1.14",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.14/CFRP_Router_CAM.exe",
+  "sha256": "b32e1b48297cc457d8931375a4eeeb807e4db3c70053f0d1785ce8aa33b1b061",
+  "message": "윤곽 목록에 가공 여부 적용/제외 선택과 다중 선택 변경을 추가했습니다."
 }
