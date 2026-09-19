@@ -5,7 +5,7 @@
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
 - 현재 애플리케이션 소스 버전: **V1.14**
-- 배포 상태: V1.14 소스 구현 완료, Windows 검증/빌드 대기. 자동 업데이트는 검증된 V1.13 유지.
+- 배포 상태: V1.14 Windows 검증·EXE 빌드·릴리스 완료. 자동 업데이트 매니페스트 V1.14 확인.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
 - 이 문서는 클라우드 채팅과 여러 로컬 PC가 같은 작업 상태를 이어받기 위한 정본이다.
@@ -192,3 +192,14 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - 공구경로 알고리즘 및 안전검사 제외 설정 변경 없음.
 - Python 문법 및 diff 검사 완료. 기존 단위49개와 Windows 새 셀 편집 GUI 회귀는 배포 절차에서 확인.
 - 다음 작업: Windows 단위/GUI 검사·EXE 빌드 후 릴리스/매니페스트 확인. 실제 PC에서 셀 클릭과 다중 제외 확인.
+
+### V1.14 배포 확인 — 2026-09-19
+- 소스 커밋 `4089621adac9365c8b5feaa93ec9738782a59ce7`, 매니페스트 커밋 `6410269fc22c45d38b757371b8f1b1305f5d5edc`.
+- Windows 실행 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/actions/runs/35444132158 전체 성공.
+- 단위49개, GUI6회(새 가공 여부 셀/다중 선택/제외 NC/Undo·Redo·복원, 포켓, 기존 GUI), EXE 빌드 및 릴리스 생성 통과.
+- 원격/로컬 소스 blob 일치 `b2f754eb7ea1e42f0589e7c07f68e5216c6f6882`.
+- V1.14 매니페스트 SHA-256와 릴리스 두 EXE digest 일치: `b32e1b48297cc457d8931375a4eeeb807e4db3c70053f0d1785ce8aa33b1b061`.
+- 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.14
+- GUI 검사는 Python소스 기준. 실제 사용자 PC EXE 실행 및 Mach3/시험절삭은 미검증.
+- 릴리스 ZIP 상태문서는 빌드 직전 기록이며 배포 완료 기록은 main 정본에 후속 반영.
+- 다음 작업: 사용자 PC에서 가공 여부 셀의 적용/제외와 다중 선택 확인.
