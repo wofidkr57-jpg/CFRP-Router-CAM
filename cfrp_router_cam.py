@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.12"
+APP_VERSION = "1.13"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -105,7 +105,12 @@ _UI_EN_EXACT = {
     "가공 전 외곽 프리뷰 1회": "Trace outlines once before cutting",
     "프리뷰 높이 (mm)": "Preview clearance (mm)",
     "프리뷰 속도 (mm/min)": "Preview feed (mm/min)",
-    "전체 바디 외곽과 홀을 가져왔습니다. Z0은 바디 최상단입니다.\n양각 주변 면을 깎는 포켓 가공은 자동 생성하지 않습니다.": "Imported body outline and holes. Z0 is the highest point of the body.\nPocket clearing around raised features is not generated automatically.",
+    "단차 면을 아일랜드 포켓으로 가져오기": "Import step floors as island pockets",
+    "아일랜드 포켓": "Island pocket",
+    "포켓 스텝오버 (%)": "Pocket stepover (%)",
+    "포켓 패스 깊이 (mm)": "Pocket stepdown (mm)",
+    "포켓 정삭 여유 (mm)": "Pocket finish stock (mm)",
+    "전체 바디 외곽과 홀을 가져왔습니다. Z0은 바디 최상단입니다.\n포켓 옵션을 켜면 단차 면이 추가됩니다. 경로와 깊이를 확인하세요.": "Imported body outline and holes. Z0 is the highest point of the body.\nWhen enabled, step floors are added as pockets. Inspect paths and depths.",
     "패스 수": "Pass Count",
     "탭 개수/외곽": "Tabs per Outer Contour",
     "마이크로탭 길이 (mm)": "Microtab Length (mm)",
@@ -556,6 +561,10 @@ class Contour:
     # Distinguish an intentional zero-tab choice from a newly-created contour
     # whose automatic tabs have not been populated yet.
     tabs_cleared: bool = False
+    operation: str = "profile"
+    pocket_holes: List[List[Point]] = field(default_factory=list)
+    pocket_stock: List[Point] = field(default_factory=list)
+    pocket_max_depth: Optional[float] = None
 
     @property
     def area(self) -> float:
@@ -1080,6 +1089,7 @@ def oriented_contour_group(source:Sequence[Contour],angle_deg:float)->Tuple[List
         q=rot(p);return q[0]-minx,q[1]-miny
     for c in group:
         c.points=[move(p) for p in c.points]
+        transform_pocket(c,move)
         c.bridges=[(move(a),move(b)) for a,b in c.bridges]
     return group,maxx-minx,maxy-miny
 
@@ -1111,6 +1121,7 @@ def move_contour_group(contours:Sequence[Contour],key:Tuple[int,int],dx:float,dy
     for c in contours:
         if contour_group_key(c)!=key:continue
         c.points=[(x+dx,y+dy) for x,y in c.points]
+        transform_pocket(c,lambda p:(p[0]+dx,p[1]+dy))
         c.bridges=[((a[0]+dx,a[1]+dy),(b[0]+dx,b[1]+dy)) for a,b in c.bridges]
         changed+=1
     return changed
@@ -1128,6 +1139,7 @@ def rotate_contour_group(contours:Sequence[Contour],key:Tuple[int,int],degrees:f
     for c in contours:
         if contour_group_key(c)!=key:continue
         c.points=[rot(p) for p in c.points]
+        transform_pocket(c,rot)
         c.bridges=[(rot(a),rot(b)) for a,b in c.bridges]
         changed+=1
     return changed
@@ -1188,6 +1200,7 @@ def normalized_contour_group(source:Sequence[Contour])->Tuple[List[Contour],floa
     def move(p:Point)->Point:return p[0]-minx,p[1]-miny
     for c in group:
         c.points=[move(p) for p in c.points]
+        transform_pocket(c,move)
         c.bridges=[(move(a),move(b)) for a,b in c.bridges]
     return group,maxx-minx,maxy-miny,(minx,miny)
 
@@ -1360,9 +1373,144 @@ def step_component_projection(model: StepModel, component: int,
     return loops
 
 
+def polygon_parts(shape):
+    if shape.is_empty:return []
+    if shape.geom_type=="Polygon":return [shape]
+    return [p for g in getattr(shape,"geoms",[]) for p in polygon_parts(g)]
+
+
+def transform_pocket(c:Contour,transform) -> None:
+    c.pocket_holes=[[transform(p) for p in ring] for ring in c.pocket_holes]
+    c.pocket_stock=[transform(p) for p in c.pocket_stock]
+
+
+def step_pocket_features(model:StepModel,component:int,matrix,top_z:float,stock:float,
+                         outer:List[Point],part_no:int) -> List[Contour]:
+    """Level clearing for horizontal floors in vertical-wall, prismatic STEP bodies."""
+    from shapely.geometry import Polygon
+    from shapely import union_all
+    faces=[];levels={}
+    for fi,face in enumerate(model.faces):
+        if model.face_components[fi]!=component:continue
+        v=[mat_apply(matrix,p) for p in face.vertices]
+        faces.append((face,v))
+        if not v or mat_apply(matrix,face.normal,vector=True)[2]<STEP_FACE_NORMAL_DOT:continue
+        if max(p[2] for p in v)-min(p[2] for p in v)>.0001:continue
+        z=sum(p[2] for p in v)/len(v);depth=top_z-z
+        if depth<=.04 or depth>=stock-.04:continue
+        for tri in face.triangles:
+            q=Polygon([(v[i][0],v[i][1]) for i in tri])
+            if q.area>EPS:levels.setdefault(round(z,5),[]).append(q)
+    footprint=Polygon(outer);result=[]
+    for z,floors in sorted(levels.items(),reverse=True):
+        higher=[]
+        for face,v in faces:
+            for tri in face.triangles:
+                pts=[v[i] for i in tri]
+                if max(p[2] for p in pts)<=z+.0001:continue
+                q=Polygon([(p[0],p[1]) for p in pts])
+                if q.area<=EPS:continue
+                # A sloping wall would require a 3D strategy, not a 2.5D pocket.
+                if max(p[2] for p in pts)-min(p[2] for p in pts)>.0001:
+                    raise ValueError("STEP pocket requires horizontal floors and vertical walls; sloped surfaces detected.")
+                higher.append(q)
+        protected=union_all(higher) if higher else Polygon()
+        floor=union_all(floors)
+        for region in polygon_parts(footprint.difference(protected)):
+            if region.intersection(floor).area<.001:continue
+            depth=top_z-z
+            result.append(Contour(list(region.exterior.coords)[:-1],True,
+                f"STEP part {part_no} island pocket Z-{depth:.3f}",role="pocket",
+                layer=f"STEP_P{part_no}_POCKET_{depth:.3f}",target_depth=depth,
+                tabs_enabled=False,operation="pocket",
+                pocket_holes=[list(r.coords)[:-1] for r in region.interiors],
+                pocket_stock=list(outer),pocket_max_depth=depth))
+    return result
+
+
+def validate_pocket(c:Contour,cfg:dict) -> None:
+    depth=c.target_depth
+    if depth is None or not math.isfinite(depth) or depth<=0 or c.pocket_max_depth is None or depth>c.pocket_max_depth+EPS:
+        raise ValueError("Pocket depth must be positive and cannot exceed the imported STEP floor.")
+    if "stock" in cfg and depth>=cfg["stock"]:
+        raise ValueError("Pocket depth must be less than stock thickness.")
+    for key,default,lo,hi in (("pocket_stepover",40.0,1,50),("pocket_stepdown",.25,.001,1000),
+                              ("pocket_finish",.1,0,1000)):
+        value=float(cfg.get(key,default))
+        if not math.isfinite(value) or not lo<=value<=hi:raise ValueError(f"Invalid {key}.")
+    if cfg.get("tool_wear_enabled"):
+        raise ValueError("Disable tool wear compensation for island pocket jobs in V1.13.")
+
+
+def pocket_plan(c:Contour,tool_d:float,cfg:dict):
+    """Independent closed offsets; every connection retracts above stock."""
+    from shapely.geometry import Polygon,LineString
+    from shapely import union_all
+    validate_pocket(c,cfg)
+    if not math.isfinite(tool_d) or tool_d<=0:raise ValueError("Invalid pocket tool diameter.")
+    area=Polygon(c.points,c.pocket_holes);stock=Polygon(c.pocket_stock)
+    if not area.is_valid or area.is_empty or not stock.is_valid:
+        raise ValueError("Invalid island pocket boundary.")
+    r=tool_d/2;guard=.001+r*.0013
+    # Only the stock boundary is open. All island/cavity walls remain protected.
+    free=area.union(stock.buffer(tool_d,quad_segs=32).difference(stock))
+    center=free.buffer(-r-guard,quad_segs=32).intersection(area.buffer(r,quad_segs=32))
+    center=union_all([g for g in polygon_parts(center) if g.intersection(area).area>EPS])
+    if center.is_empty:raise ValueError("Tool cannot enter this pocket; use a smaller tool.")
+    allowance=float(cfg.get("pocket_finish",.1));step=tool_d*float(cfg.get("pocket_stepover",40))/100
+    def boundaries(shape):
+        paths=[]
+        for poly in polygon_parts(shape):
+            rings=[poly.exterior]+list(poly.interiors)
+            for j,ring in enumerate(rings):
+                pts=list(ring.coords)[:-1]
+                if len(pts)>=3:
+                    paths.append(reverse_if_needed(pts,(j==0)==bool(cfg.get("climb",True))))
+        return paths
+    rough=[];level=center.buffer(-allowance,quad_segs=32) if allowance else center
+    for _ in range(10000):
+        if level.is_empty:break
+        rough.extend(boundaries(level));level=level.buffer(-step,quad_segs=32)
+    else:raise ValueError("Pocket offset limit exceeded.")
+    finish=boundaries(center) if allowance else []
+    paths=rough+finish
+    swept=union_all([LineString(path+[path[0]]).buffer(r,quad_segs=32) for path in paths])
+    # Protected area is never a permissible sweep, even with safety exclusions.
+    if swept.difference(free.buffer(.0001)).area>.0001:
+        raise ValueError("Pocket cutter sweep intersects protected material.")
+    reachable=center.buffer(r,quad_segs=32).intersection(area)
+    if reachable.difference(swept.buffer(.002)).area>.01:
+        raise ValueError("Pocket offsets leave reachable material; reduce stepover or finish allowance.")
+    residual=area.difference(swept).area
+    return rough,finish,residual
+
+
+def pocket_job_issues(contours:Sequence[Contour],cfg:dict) -> List[str]:
+    """Check pocket sweeps against OTHER placed bodies, including disabled profiles."""
+    from shapely.geometry import Polygon,LineString
+    from shapely import union_all
+    errors=[]
+    for c in contours:
+        if not c.enabled or c.operation!="pocket":continue
+        try:
+            rough,finish,_=pocket_plan(c,cfg["tool_d"],cfg)
+            stock=Polygon(c.pocket_stock)
+            swept=union_all([LineString(p+[p[0]]).buffer(cfg["tool_d"]/2,quad_segs=32) for p in rough+finish])
+            for other in contours:
+                if other.operation=="pocket" or not other.closed or other.role!="outer":continue
+                material=Polygon(other.points)
+                same_instance=contour_group_key(other)==contour_group_key(c)
+                if same_instance and stock.symmetric_difference(material).area<.001:continue
+                if swept.intersection(material).area>.0001:
+                    errors.append("Pocket sweep intersects another part; increase array spacing.");break
+        except ValueError as exc:errors.append(str(exc))
+    return errors
+
+
 def step_faces_to_2d_features(model: StepModel, selected_faces: Sequence[int],
                               matrix: Sequence[Sequence[float]],
-                              progress:Optional[Callable[[float,str],None]]=None
+                              progress:Optional[Callable[[float,str],None]]=None,
+                              include_pockets:bool=False
                               ) -> Tuple[List[Contour],float,int,int]:
     """Project selected bodies into one CAM job, with highest body surface as Z0."""
     def report(value:float,message:str):
@@ -1458,6 +1606,9 @@ def step_faces_to_2d_features(model: StepModel, selected_faces: Sequence[int],
                 contours.append(Contour(inner,True,f"STEP part {group['part']} counterbore through",
                                         layer=group["through_layer"],forced_role="inner",tabs_enabled=False))
         combined.extend(contours)
+        if include_pockets:
+            combined.extend(step_pocket_features(model,group["component"],matrix,group["top_z"],
+                                                 group["stock"],contours[0].points,group["part"]))
     classify_contours(combined)
     report(100,f"STEP 면 {len(groups)}개 2D 변환 완료")
     return combined,stock,depth_count,added_count
@@ -1561,9 +1712,16 @@ def lead_point(contour: Contour, route: Sequence[Point], lead_len: float) -> Tup
     return plan.entry,plan.mode
 
 
-def contour_toolpath_issues(contour: Contour, tool_d: float, auto_trim: bool = False) -> Tuple[List[str], List[str]]:
+def contour_toolpath_issues(contour: Contour, tool_d: float, auto_trim: bool = False,
+                            pocket_cfg:Optional[dict]=None) -> Tuple[List[str], List[str]]:
     """Return (errors, warnings) for compensated profile geometry."""
     errors: List[str]=[]; warnings: List[str]=[]
+    if contour.operation=="pocket" and contour.enabled:
+        try:
+            _,_,residual=pocket_plan(contour,tool_d,pocket_cfg or {})
+            if residual>.01:warnings.append(f"Pocket residual area {residual:.3f} mm2; inspect corners / use smaller tool.")
+        except ValueError as exc:errors.append(str(exc))
+        return errors,warnings
     if not contour.enabled or contour.safety_excluded or not contour.closed or len(contour.points)<3:
         return errors,warnings
     expected="inner" if contour.depth%2 else "outer"
@@ -1713,7 +1871,7 @@ def tool_sweep_collisions(contours:Sequence[Contour],tool_d:float,auto_trim:bool
                           progress:Optional[Callable[[float,str],None]]=None,
                           use_parallel:bool=True)->Dict[int,List[str]]:
     """Find where the cutter-radius sweep of one path touches another model line."""
-    active=[c for c in contours if c.enabled and not c.safety_excluded and len(c.points)>=2]
+    active=[c for c in contours if c.enabled and c.operation!="pocket" and not c.safety_excluded and len(c.points)>=2]
     radius=max(0.0,tool_d/2.0)
     prepared=[]
     for c in active:
@@ -1803,6 +1961,9 @@ def _nearest_contour_sequence(contours:Sequence[Contour],current:Point)->Tuple[L
 def ordered_contours(contours: Sequence[Contour],rapid_optimize:bool=True,
                      start_point:Point=(0.0,0.0)) -> List[Contour]:
     """Preserve manual/safe ordering, then minimize XY jumps inside each safe group."""
+    pockets=sorted((c for c in contours if c.enabled and c.operation=="pocket"),key=lambda c:c.target_depth or 0)
+    if pockets:
+        return pockets+ordered_contours([c for c in contours if c.operation!="pocket"],rapid_optimize,start_point)
     active=[c for c in contours if c.enabled]
     manual=sorted((c for c in active if c.cut_order is not None),
                   key=lambda c:(c.cut_order,)+contour_auto_key(c))
@@ -1908,10 +2069,11 @@ def dxf_to_contours(filename: str, chord: float = 0.35, gap_tol: float = 0.20) -
 def classify_contours(contours: List[Contour]) -> None:
     closed = [c for c in contours if c.closed and len(c.points) >= 3]
     for c in closed:
+        if c.operation=="pocket":c.role="pocket";c.depth=0;continue
         if c.forced_role in ("inner","outer"):
             c.depth=1 if c.forced_role=="inner" else 0;c.role=c.forced_role;continue
         probe = c.points[0]
-        c.depth = sum(1 for other in closed if other is not c and abs(other.area) > abs(c.area) and point_in_poly(probe, other.points))
+        c.depth = sum(1 for other in closed if other is not c and other.operation!="pocket" and abs(other.area) > abs(c.area) and point_in_poly(probe, other.points))
         c.role = "inner" if c.depth % 2 else "outer"
 
 
@@ -2029,7 +2191,7 @@ def toolpath_with_events(pts: Sequence[Point], tabs: Sequence[float], flat: floa
 
 
 def wall_finish_for(c:Contour,target:float,stock:float,cfg:dict)->bool:
-    if not (cfg.get("wall_finish") and c.closed):return False
+    if c.operation=="pocket" or not (cfg.get("wall_finish") and c.closed):return False
     scope=cfg.get("finish_scope","전체")
     if c.role=="inner":return scope in ("전체","내부홀만","All","Inner only")
     return target>=stock-EPS and scope in ("전체","외곽만","All","Outer only")
@@ -2076,6 +2238,13 @@ def effective_tool_diameter(cfg:dict,accumulated_cut_m:float)->float:
 def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
                         )->Tuple[float,float,float]:
     """Return cutting millimetres, XY cutting minutes, and plunge minutes."""
+    if c.operation=="pocket":
+        rough,finish,_=pocket_plan(c,tool_d,cfg)
+        passes=max(1,math.ceil(c.target_depth/float(cfg.get("pocket_stepdown",.25))))
+        rough_mm=sum(path_length(p,True) for p in rough)*passes
+        finish_mm=sum(path_length(p,True) for p in finish)*passes
+        plunge=sum(cfg["safe_z"]+c.target_depth*i/passes for i in range(1,passes+1))*(len(rough)+len(finish))/cfg["plunge"]
+        return rough_mm+finish_mm,rough_mm/cfg["feed"]+finish_mm/(cfg["feed"]*.8),plunge
     passes=1 if cfg["full_depth"] else max(1,cfg["passes"])
     target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
     if c.closed and len(c.points)>=3:
@@ -2106,6 +2275,7 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
 def contour_wear_plan(c:Contour,cfg:dict,stock:float,extra:float,distance_before_m:float
                       )->Tuple[float,Tuple[float,float,float]]:
     """Choose one stable diameter per contour using its estimated distance midpoint."""
+    if c.operation=="pocket":return cfg["tool_d"],contour_cut_metrics(c,cfg,stock,extra,cfg["tool_d"])
     start_d=effective_tool_diameter(cfg,distance_before_m)
     first=contour_cut_metrics(c,cfg,stock,extra,start_d)
     midpoint_d=effective_tool_diameter(cfg,distance_before_m+first[0]/2000.0)
@@ -2117,6 +2287,7 @@ def _gcode_route_worker(task)->Tuple[int,float,List[Point],int,float]:
     ci,c,cfg,stock,extra,tool_d=task
     target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
     pts=list(c.points);removed_count=0
+    if c.operation=="pocket":return ci,float(c.target_depth),pts,0,tool_d
     if c.closed:
         want_ccw=(c.role=="inner") if cfg["climb"] else (c.role!="inner")
         pts=reverse_if_needed(pts,want_ccw)
@@ -2172,9 +2343,11 @@ def work_origin_for_contours(contours:Sequence[Contour],cfg:dict)->Point:
 def split_outer_inner_conflicts(part1:Sequence[Contour],part2:Sequence[Contour])->int:
     """Count unsafe cases where PART1 releases an outer before its PART2 inner cut."""
     outers=[c for c in part1 if c.enabled and c.closed and c.role=="outer" and len(c.points)>=3]
-    inners=[c for c in part2 if c.enabled and c.closed and c.role=="inner" and c.points]
+    inners=[c for c in part2 if c.enabled and c.closed and c.role in ("inner","pocket") and c.points]
+    from shapely.geometry import Polygon
     return sum(1 for outer in outers for inner in inners
-               if point_in_poly(inner.points[0],outer.points))
+               if (Polygon(outer.points).intersection(Polygon(inner.points,inner.pocket_holes)).area>EPS
+                   if inner.operation=="pocket" else point_in_poly(inner.points[0],outer.points)))
 
 
 def split_gcode_paths(filename:str)->Tuple[str,str]:
@@ -2410,6 +2583,10 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         "(----- CAM SETTINGS BEGIN -----)",
         f"(UNITS: MM)",
         f"(ACTIVE_CONTOURS: {len(active)} CLOSED: {closed_count} OPEN: {len(active)-closed_count})",
+        f"(ISLAND_POCKETS: {sum(c.operation=='pocket' for c in active)})",
+        f"(POCKET_STEPOVER_PERCENT: {fmt(float(cfg.get('pocket_stepover',40)))})",
+        f"(POCKET_STEPDOWN_MM: {fmt(float(cfg.get('pocket_stepdown',.25)))})",
+        f"(POCKET_FINISH_ALLOWANCE_MM: {fmt(float(cfg.get('pocket_finish',.1)))})",
         f"(SAFETY_CHECK_EXCLUDED: {safety_excluded})",
         f"(TOOL_DIAMETER_MM: {fmt(float(cfg['tool_d']))})",
         f"(TOOL_WEAR_COMPENSATION: {nc_yes_no(cfg.get('tool_wear_enabled'))})",
@@ -2511,6 +2688,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         if progress:progress(value,message)
     report(2,"G-code 설정 준비 중")
     validate_preflight(cfg)
+    pocket_errors=pocket_job_issues(contours,cfg)
+    if pocket_errors:raise ValueError("\n".join(pocket_errors))
     safe_z, stock, extra = cfg["safe_z"], cfg["stock"], cfg["extra"]
     bottom_zero = cfg.get("z_origin") == "Bottom"
     safe_machine_z = stock + safe_z if bottom_zero else safe_z
@@ -2638,6 +2817,21 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         out.append("(Stage 1: complete internal features before outer-profile cutting)")
     for (ci,target,pts,removed_count,effective_d),c in zip(prepared_routes,ordered):
         report(38+42*ci/max(len(ordered),1),f"G-code 조립 {ci}/{len(ordered)}")
+        if c.operation=="pocket":
+            rough,finish,residual=pocket_plan(c,effective_d,cfg)
+            out.append(f"(ISLAND POCKET {ci}: depth={fmt(target)}, residual_mm2={fmt(residual)})")
+            count=max(1,math.ceil(target/float(cfg.get("pocket_stepdown",.25))))
+            for level in range(1,count+1):
+                z=machine_z(target*level/count)
+                for label,paths,feed in (("rough",rough,cfg["feed"]),("finish",finish,cfg["feed"]*.8)):
+                    for route in paths:
+                        points=[(x-origin_x,y-origin_y) for x,y in route]
+                        out.extend([f"(Pocket {label} pass {level}/{count})",f"G0 Z{fmt(safe_machine_z)}",
+                                    f"G0 X{fmt(points[0][0])} Y{fmt(points[0][1])}",f"G1 Z{fmt(z)} F{fmt(cfg['plunge'])}"])
+                        for x,y in points[1:]+points[:1]:out.append(f"G1 X{fmt(x)} Y{fmt(y)} F{fmt(feed)}")
+                        out.append(f"G0 Z{fmt(safe_machine_z)}")
+                        current_xy=route[0]
+            continue
         if c.closed:
             if c.start_s>EPS:
                 start_point=point_at(c.points,c.start_s,True)[0]
@@ -3008,6 +3202,10 @@ class StepSetupDialog(tk.Toplevel):
         ttk.Button(bar,text="취소",command=self.cancel).pack(side="right")
         ttk.Button(bar,text="CAM으로 가져오기",command=self.commit,style="Accent.TButton").pack(side="right",padx=6)
         ttk.Button(bar,text="초기화",command=self.reset).pack(side="right")
+        self.include_pockets=getattr(parent,"vars",{}).get("step_pockets")
+        if self.include_pockets is None:self.include_pockets=tk.BooleanVar(value=True)
+        pocket_bar=ttk.Frame(self,padding=(6,0,6,4));pocket_bar.pack(fill="x")
+        ttk.Checkbutton(pocket_bar,text="단차 면을 아일랜드 포켓으로 가져오기",variable=self.include_pockets).pack(side="left")
         second=ttk.Frame(self,padding=(6,0,6,6));second.pack(fill="x")
         ttk.Label(second,text="Z 회전 °").pack(side="left")
         ttk.Entry(second,width=8,textvariable=self.rotation).pack(side="left",padx=3)
@@ -3378,7 +3576,7 @@ class StepSetupDialog(tk.Toplevel):
         progress=ProgressDialog(self,"STEP 2D/깊이 변환")
         try:
             contours,stock,depths,added=step_faces_to_2d_features(
-                self.model,self.active_face_indices(),self.model.matrix,progress.set_progress)
+                self.model,self.active_face_indices(),self.model.matrix,progress.set_progress,include_pockets=bool(self.include_pockets.get()))
         except Exception as exc:
             progress.close()
             messagebox.showerror("STEP 가져오기",str(exc),parent=self);return
@@ -3389,7 +3587,7 @@ class StepSetupDialog(tk.Toplevel):
         self.model.matrix=mat_mul(mat_translate(0,0,-top_z),self.model.matrix)
         messagebox.showinfo("STEP 가져오기",
                             "전체 바디 외곽과 홀을 가져왔습니다. Z0은 바디 최상단입니다.\n"
-                            "양각 주변 면을 깎는 포켓 가공은 자동 생성하지 않습니다.",parent=self)
+                            "포켓 옵션을 켜면 단차 면이 추가됩니다. 경로와 깊이를 확인하세요.",parent=self)
         self.on_cancel=None
         self.on_apply(contours,self.model.filename,self.selected_face+1,copy.deepcopy(self.model.matrix),stock,depths,added);self.destroy()
     def draw(self):
@@ -4112,6 +4310,12 @@ class App(tk.Tk):
                                 ("프리뷰 속도 (mm/min)","preflight_feed",1000.0)):
             ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w")
             ttk.Entry(controls,width=12,textvariable=self.var(key,value)).grid(row=r,column=1,padx=5);r+=1
+        self.var("step_pockets",True,tk.BooleanVar)
+        for label,key,value in (("포켓 스텝오버 (%)","pocket_stepover",40.0),
+                                ("포켓 패스 깊이 (mm)","pocket_stepdown",.25),
+                                ("포켓 정삭 여유 (mm)","pocket_finish",.1)):
+            ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w")
+            ttk.Entry(controls,width=12,textvariable=self.var(key,value)).grid(row=r,column=1,padx=5);r+=1
         self.var("tool_wear_enabled",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="거리 기반 공구 마모 보정",variable=self.vars["tool_wear_enabled"],
                         command=self.redraw).grid(row=r,columnspan=2,sticky="w",pady=(4,1));r+=1
@@ -4421,12 +4625,14 @@ class App(tk.Tk):
             raise ValueError("판재 X/Y 크기는 0보다 커야 합니다.")
         if cfg["array_gap"]<0 or cfg["array_edge"]<0 or cfg["array_qty"]<0:
             raise ValueError("어레이 간격, 가장자리 여유, 수량은 음수가 될 수 없습니다.")
+        for c in self.contours:
+            if c.enabled and c.operation=="pocket":validate_pocket(c,cfg)
         return cfg
 
     def job_signature(self,cfg:dict):
         machining_keys=("tool_d","tool_wear_enabled","tool_wear_loss_per_100m","tool_wear_min_d",
                         "rpm","feed","plunge","stock","extra","safe_z","lead","passes",
-                        "preflight_enabled","preflight_z","preflight_feed",
+                        "preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
                         "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim","accum_distance_m",
@@ -4434,7 +4640,7 @@ class App(tk.Tk):
                         "start_code","end_code")
         contour_key=tuple((tuple((round(x,7),round(y,7)) for x,y in c.points),c.closed,c.role,
                            tuple(round(s,7) for s in c.tabs),c.layer,c.target_depth,c.tabs_enabled,
-                           c.tabs_cleared,c.enabled,c.safety_excluded,round(c.start_s,7),c.cut_order)
+                           c.tabs_cleared,c.enabled,c.safety_excluded,round(c.start_s,7),c.cut_order,c.operation,repr(c.pocket_holes),repr(c.pocket_stock))
                           for c in self.contours)
         return hash((contour_key,tuple((key,repr(cfg.get(key))) for key in machining_keys)))
 
@@ -4686,6 +4892,7 @@ class App(tk.Tk):
             dx,dy=offsets.get(part.object_id,part.display_offset)
             for c in group:
                 c.points=[(x+dx,y+dy) for x,y in c.points]
+                transform_pocket(c,lambda p:(p[0]+dx,p[1]+dy))
                 c.bridges=[((a[0]+dx,a[1]+dy),(b[0]+dx,b[1]+dy)) for a,b in c.bridges]
                 c.object_id=part.object_id;c.object_name=part.name;c.instance_id=1
             nested.extend(group)
@@ -4919,6 +5126,7 @@ class App(tk.Tk):
             part=part_by_id[placement.object_id];group=copy.deepcopy(templates[(placement.object_id,placement.angle)])
             for c in group:
                 c.points=[(x+placement.x,y+placement.y) for x,y in c.points]
+                transform_pocket(c,lambda p:(p[0]+placement.x,p[1]+placement.y))
                 c.bridges=[((a[0]+placement.x,a[1]+placement.y),(b[0]+placement.x,b[1]+placement.y)) for a,b in c.bridges]
                 c.object_id=part.object_id;c.object_name=part.name;c.instance_id=placement.instance_id
                 c.name=f"{c.name} · {part.name} #{placement.instance_id}"
@@ -4968,6 +5176,7 @@ class App(tk.Tk):
                 group=copy.deepcopy(template)
                 for c in group:
                     c.points=[(px+x,py+y) for px,py in c.points]
+                    transform_pocket(c,lambda p:(p[0]+x,p[1]+y))
                     c.bridges=[((a[0]+x,a[1]+y),(b[0]+x,b[1]+y)) for a,b in c.bridges]
                     c.object_id=part.object_id;c.object_name=part.name;c.instance_id=instance_id
                     c.name=f"{c.name} · {part.name} #{instance_id}"
@@ -5109,6 +5318,8 @@ class App(tk.Tk):
         except ValueError:
             messagebox.showerror("설정 오류", "깊이는 0보다 큰 숫자, 가공 순번은 1 이상의 정수로 입력하세요.")
             return
+        if self.selected.operation=="pocket" and (new_depth is None or new_depth>self.selected.pocket_max_depth or not math.isfinite(new_depth)):
+            messagebox.showerror("설정 오류","Pocket depth cannot exceed the imported STEP floor.");return
         self.push_undo("선택 윤곽 설정")
         self.selected.target_depth = new_depth
         self.selected.cut_order = new_order
@@ -5227,6 +5438,7 @@ class App(tk.Tk):
         ox, oy = snapped
         for c in self.contours:
             c.points = [(x-ox, y-oy) for x, y in c.points]
+            transform_pocket(c,lambda p:(p[0]-ox,p[1]-oy))
             c.bridges = [((a[0]-ox, a[1]-oy), (b[0]-ox, b[1]-oy)) for a, b in c.bridges]
         self.vars["xy_origin"].set("선택점")
         self.origin_mode = False
@@ -5330,7 +5542,7 @@ class App(tk.Tk):
         index_by_id={id(c):i for i,c in enumerate(self.contours)}
         for c in display:
             idx=index_by_id[id(c)]
-            typ="열린선" if not c.closed else ("내부" if c.role=="inner" else "외부")
+            typ="아일랜드 포켓" if c.operation=="pocket" else ("열린선" if not c.closed else ("내부" if c.role=="inner" else "외부"))
             depth=f"{c.target_depth:g}" if c.target_depth is not None else "관통"
             seq=str(actual[id(c)]) if c.enabled else "-"
             manual=str(c.cut_order) if c.cut_order is not None else "자동"
@@ -5699,6 +5911,17 @@ class App(tk.Tk):
             show_order_numbers=len(preview_order)<=60
             for number, c in enumerate(preview_order, 1):
                 if id(c) not in visible_ids: continue
+                if c.operation=="pocket":
+                    try:
+                        pocket_cfg={k:self.vars[k].get() for k in ("pocket_stepover","pocket_stepdown","pocket_finish","climb")}
+                        rough,finish,_=pocket_plan(c,preview_radius*2,pocket_cfg)
+                        for route in rough+finish:
+                            xy=[v for p in route+[route[0]] for v in self.transform(p)]
+                            self.canvas.create_line(*xy,fill="#49d8c8",width=1)
+                    except ValueError:
+                        xy=[v for p in c.points+[c.points[0]] for v in self.transform(p)]
+                        self.canvas.create_line(*xy,fill="#ff3030",width=2)
+                    continue
                 if not c.closed:
                     xy=[]
                     for p in c.points: xy.extend(self.transform(p))
@@ -5921,14 +6144,14 @@ class App(tk.Tk):
                     warnings.append(
                         f"2분할 순서 주의: PART1 외곽 안쪽의 내부 윤곽 {conflicts}개가 PART2에 있습니다. "
                         "PART1에서 외곽을 먼저 자르면 소재가 분리될 수 있습니다.")
-            too_small=[]; center_leads=0; fatal=[]; geometry_warnings=[]
+            too_small=[]; center_leads=0; fatal=pocket_job_issues(active,cfg); geometry_warnings=[]
             collision_map=tool_sweep_collisions(
                 active,cfg["tool_d"],cfg.get("auto_trim",False),
                 lambda value,message:progress.set_progress(5+value*.22,message) if progress else None)
             for check_index,c in enumerate(active,1):
                 progress.set_progress(27+18*check_index/max(len(active),1),
                                       f"경로 안전검사 {check_index}/{len(active)}")
-                errs,warns=contour_toolpath_issues(c,cfg["tool_d"],cfg.get("auto_trim",False))
+                errs,warns=contour_toolpath_issues(c,cfg["tool_d"],cfg.get("auto_trim",False),pocket_cfg=cfg)
                 fatal += [f"Layer {c.layer}: {x}" for x in errs]
                 fatal += [f"Layer {c.layer}: {x}" for x in collision_map.get(id(c),[])]
                 geometry_warnings += [f"Layer {c.layer}: {x}" for x in warns]
@@ -6015,10 +6238,10 @@ class App(tk.Tk):
             collision_map=tool_sweep_collisions(
                 active,tool_d,auto_trim,
                 lambda value,message:progress.set_progress(value*.65,message) if progress else None)
-            errors=[];warnings=[]
+            errors=pocket_job_issues(active,cfg);warnings=[]
             for i,c in enumerate(active,1):
                 progress.set_progress(65+34*i/max(len(active),1),f"윤곽 안전검사 {i}/{len(active)}")
-                es,ws=contour_toolpath_issues(c,tool_d,auto_trim)
+                es,ws=contour_toolpath_issues(c,tool_d,auto_trim,pocket_cfg=cfg)
                 es=list(es)+collision_map.get(id(c),[])
                 errors += [f"윤곽 {i} / Layer {c.layer}: {x}" for x in es]
                 warnings += [f"윤곽 {i} / Layer {c.layer}: {x}" for x in ws]

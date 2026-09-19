@@ -69,6 +69,7 @@ jobs:
         if: steps.release.outputs.exists != 'true'
         shell: pwsh
         run: |
+          python verification/gui_smoke_v113_pocket.py
           python verification/gui_smoke_v108.py
           python verification/gui_smoke_v110_first_run.py ko
           python verification/gui_smoke_v110_first_run.py en
@@ -102,7 +103,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "STEP 전체 바디 외곽 가져오기와 가공 전 높이 설정 외곽 프리뷰를 추가했습니다."
+            message = "양각을 보존하는 STEP 아일랜드 포켓 가공과 스텝오버·패스 깊이·정삭 여유 설정을 추가했습니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
