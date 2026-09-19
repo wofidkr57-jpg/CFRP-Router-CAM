@@ -5,7 +5,7 @@
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
 - 현재 애플리케이션 소스 버전: **V1.16**
-- 배포 상태: V1.15 Windows 검사·EXE 빌드·릴리스 완료. Defender 최초 skipped 이후 별도 경로에서 재검사 완료, found no threats 확인. 사용자 PC 탐지 해소와 V1.14 오탐 여부는 미확인.
+- 배포 상태: V1.16 Windows 회귀53개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료. 사용자 PC의 백신 탐지 여부는 별도 확인 필요.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
 - 이 문서는 클라우드 채팅과 여러 로컬 PC가 같은 작업 상태를 이어받기 위한 정본이다.
@@ -239,3 +239,10 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - 일반 저장 파일의 with open 종료 후 저장 완료 팝업과 실제 파일 경로 표시. 취소/쓰기 실패는 성공 팝업에 도달하지 않음.
 - 2분할 저장 기존 완료 안내 유지, 한국어/영어 번역 지원.
 - Windows 회귀/GUI/EXE/Defender 검증 및 배포 결과 대기.
+
+### V1.16 배포 확인
+- 소스 커밋 `032085f4795455899229c6c1c00071c9222565b7`, 매니페스트 `be501f2feccd0aef8c2bbbe6f24156e564a6f516`.
+- Windows https://github.com/wofidkr57-jpg/CFRP-Router-CAM/actions/runs/35445829582 전체 성공. Linux/Windows 회귀53개, 기존 GUI6회, EXE 빌드 성공.
+- Defender 별도 경로 실검사 로그 `found no threats` 확인. EXE 두 개와 매니페스트 SHA-256 일치 `871cf65ffc4fb3ed72711200331e69b508fe83c1978ada421fbdfb3390a99436`.
+- 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.16
+- 다음 작업: 사용자 PC에서 일반 NC 저장 후 알림창 확인. 실기 가공/사용자 PC 백신 판정은 미검증.
