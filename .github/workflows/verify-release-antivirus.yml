@@ -1,0 +1,37 @@
+name: Verify released V1.15 executable with Defender
+on:
+  push:
+    branches: [main]
+    paths: [.github/workflows/verify-release-antivirus.yml]
+  workflow_dispatch:
+permissions:
+  contents: read
+jobs:
+  scan-release:
+    runs-on: windows-latest
+    steps:
+      - name: Download exact released executable and scan outside build exclusions
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $scanDir = 'C:/CAM_Defender_Validation'
+          New-Item -ItemType Directory -Force $scanDir | Out-Null
+          gh release download v1.15 --repo ${{ github.repository }} --pattern CFRP_Router_CAM_V1.15.exe --dir $scanDir
+          if ($LASTEXITCODE -ne 0) { throw "Release download failed." }
+          $scanFile = Join-Path $scanDir 'CFRP_Router_CAM_V1.15.exe'
+          $hash = (Get-FileHash $scanFile -Algorithm SHA256).Hash.ToLowerInvariant()
+          if ($hash -ne 'f1a194abae02a76c83e04f3e17845f5ca75e02dd2cba73a9a95a68f3f6e83da1') { throw "Unexpected release hash." }
+          $status = Get-MpComputerStatus
+          if (-not $status.AMServiceEnabled -or -not $status.AntivirusEnabled) { throw "Defender unavailable." }
+          Update-MpSignature
+          $scanner = Join-Path $env:ProgramFiles 'Windows Defender/MpCmdRun.exe'
+          $scanOutput = & $scanner -Scan -ScanType 3 -File $scanFile -DisableRemediation 2>&1
+          $scanExit = $LASTEXITCODE
+          $scanOutput | Write-Output
+          if ($scanExit -ne 0 -or ($scanOutput -join "`n") -match '(?i)skipped|excluded') { throw "Scan failed, detected a threat or was skipped (exit $scanExit)." }
+          if (-not (Test-Path $scanFile)) { throw "Scanned file missing." }
+          if ((Get-FileHash $scanFile -Algorithm SHA256).Hash.ToLowerInvariant() -ne $hash) { throw "File changed during scan." }
+          Get-MpComputerStatus | Select-Object AMProductVersion, AntivirusSignatureVersion, AntivirusSignatureLastUpdated
+          Write-Output "VERIFIED_RELEASE_SHA256=$hash"

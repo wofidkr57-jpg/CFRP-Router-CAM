@@ -91,10 +91,19 @@ jobs:
             throw "Defender is unavailable; release is blocked until antivirus validation succeeds."
           }
           Update-MpSignature
+          $scanDir = 'C:/CAM_Defender_Validation'
+          New-Item -ItemType Directory -Force $scanDir | Out-Null
+          $scanFile = Join-Path $scanDir 'CFRP_Router_CAM.exe'
+          Copy-Item dist/CFRP_Router_CAM.exe $scanFile
           $scanner = Join-Path $env:ProgramFiles "Windows Defender/MpCmdRun.exe"
-          & $scanner -Scan -ScanType 3 -File "$PWD/dist/CFRP_Router_CAM.exe" -DisableRemediation
-          if ($LASTEXITCODE -ne 0) { throw "Defender scan failed or detected a threat; release blocked (exit $LASTEXITCODE)." }
-          if (-not (Test-Path dist/CFRP_Router_CAM.exe)) { throw "Scanned EXE is missing." }
+          $scanOutput = & $scanner -Scan -ScanType 3 -File $scanFile -DisableRemediation 2>&1
+          $scanExit = $LASTEXITCODE
+          $scanOutput | Write-Output
+          if ($scanExit -ne 0 -or ($scanOutput -join "`n") -match '(?i)skipped|excluded') {
+            throw "Defender did not complete a clean scan; release blocked (exit $scanExit)."
+          }
+          if (-not (Test-Path $scanFile)) { throw "Scanned EXE is missing." }
+          if ((Get-FileHash $scanFile).Hash -ne (Get-FileHash dist/CFRP_Router_CAM.exe).Hash) { throw "Scan file hash mismatch." }
           Get-MpComputerStatus | Select-Object AMProductVersion, AntivirusSignatureVersion, AntivirusSignatureLastUpdated
 
       - name: Prepare release files and update manifest

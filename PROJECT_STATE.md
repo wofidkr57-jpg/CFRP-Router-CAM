@@ -5,7 +5,7 @@
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
 - 현재 애플리케이션 소스 버전: **V1.15**
-- 배포 상태: V1.15 소스 수정 완료, Windows/Defender 배포 검증 대기. V1.14 사용자 PC Defender 탐지 보고로 안전 확인 전 실행 권장하지 않음.
+- 배포 상태: V1.15 Windows 검사·EXE 빌드·릴리스 완료. Defender 첫 검사는 skipped로 실검사 미완료, 별도 재검사 대기. 사용자 PC 탐지 해소와 V1.14 오탐 여부는 미확인.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
 - 이 문서는 클라우드 채팅과 여러 로컬 PC가 같은 작업 상태를 이어받기 위한 정본이다.
@@ -215,3 +215,15 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 
 - 후속 캡처의 홀 간 긴 선/가느다란 삼각형 원인: 삼각형 union의 내부 수치 틈이 가짜 홀로 유입. 수평면은 mesh 경계 루프를 먼저 폴리곤화하고 mesh 면적 일치 검증 후 union하도록 변경.
 - q20 좌표 이동 + 회전0/37도 모두 바디별 윤곽85/66/5개(외곽3, 내부153) 동일. 최소 내부 면적5.723mm2, 이전 수치 틈 윤곽 제거. 판 두께2mm.
+
+### V1.15 배포 확인 — 2026-09-19
+- 소스 커밋 `0399f5bac3f04cfab71f63839ab6e3cdda4ba4bb`, 매니페스트 커밋 `5ad0b590d5c5bdede9616ba27d962f7fb3ab5673`.
+- Windows 실행 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/actions/runs/35445128157 단위53개/GUI6회/EXE 빌드/릴리스 생성 성공. Defender 단계는 exit0이지만 로그에서 skipped 확인하여 검사 통과 취소.
+- 원격/로컬 소스 blob 일치 `f03bfd835266105e4624350d1c137f99366fd031`.
+- 릴리스 두 EXE와 latest.json SHA-256 일치: `f1a194abae02a76c83e04f3e17845f5ca75e02dd2cba73a9a95a68f3f6e83da1`.
+- https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.15
+- Defender 결과는 빌드 서버 검사 범위이며 사용자 PC의 클라우드/행위 탐지 해소 또는 V1.14 오탐 확정을 의미하지 않음.
+- 다음 작업: 사용자 PC에서 V1.15 탐지 여부 확인, q20.step 다시 가져와 긴 선/가짜 홀 소멸 및 가공경로 확인. 실제 CNC 검증 전.
+
+- Defender 검사 보정: GitHub runner의 빌드 경로에서 검사 skipped가 exit0으로 반환됨. 배포 EXE를 C:/CAM_Defender_Validation으로 복사하고 skipped/excluded 출력도 실패 처리. 백신 제외 설정은 변경하지 않음.
+- V1.15 공개 EXE의 SHA-256를 고정한 독립 검증 workflow로 다시 검사. 결과 확인 전 백신 통과로 표시하지 않음.
