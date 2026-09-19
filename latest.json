@@ -1,6 +1,6 @@
 {
-  "version": "1.12",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.12/CFRP_Router_CAM.exe",
-  "sha256": "e4b49b8c9901e71d6ab3e0c526259f35a5e831c3ac7b43bc3c3e8737120c88c5",
-  "message": "STEP 전체 바디 외곽 가져오기와 가공 전 높이 설정 외곽 프리뷰를 추가했습니다."
+  "version": "1.13",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.13/CFRP_Router_CAM.exe",
+  "sha256": "f46ac387c1379298367c819ad8a75067c33119c50d78ad3f7f94f21667ad0aca",
+  "message": "양각을 보존하는 STEP 아일랜드 포켓 가공과 스텝오버·패스 깊이·정삭 여유 설정을 추가했습니다."
 }
