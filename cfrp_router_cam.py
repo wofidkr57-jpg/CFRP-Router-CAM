@@ -16,8 +16,8 @@ Supported DXF entities: LINE, LWPOLYLINE, POLYLINE, ARC, CIRCLE.
 Curves are tessellated into line segments. Units are millimetres.
 Output post: Mach3 metric G-code (G21/G90/G54, M3/M5).
 
-STEP solids are reduced to the boundary loops of one selected planar machining
-face, then processed by the same proven 2.5D routing engine as DXF contours.
+STEP solids are projected per selected body; the machining face sets orientation.
+Outer silhouettes and hole loops feed the same 2.5D routing engine as DXF contours.
 Always
 inspect the preview, simulate/dry-run above the stock, verify zero/origin and
 clamps, and use suitable dust extraction and PPE for conductive CFRP dust.
@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.11"
+APP_VERSION = "1.12"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -102,6 +102,10 @@ _UI_EN_EXACT = {
     "판 두께 (mm)": "Stock Thickness (mm)",
     "관통 여유 (mm)": "Through Allowance (mm)",
     "안전 Z (mm)": "Safe Z (mm)",
+    "가공 전 외곽 프리뷰 1회": "Trace outlines once before cutting",
+    "프리뷰 높이 (mm)": "Preview clearance (mm)",
+    "프리뷰 속도 (mm/min)": "Preview feed (mm/min)",
+    "전체 바디 외곽과 홀을 가져왔습니다. Z0은 바디 최상단입니다.\n양각 주변 면을 깎는 포켓 가공은 자동 생성하지 않습니다.": "Imported body outline and holes. Z0 is the highest point of the body.\nPocket clearing around raised features is not generated automatically.",
     "패스 수": "Pass Count",
     "탭 개수/외곽": "Tabs per Outer Contour",
     "마이크로탭 길이 (mm)": "Microtab Length (mm)",
@@ -1321,11 +1325,46 @@ def contour_shape_score(a: Sequence[Point], b: Sequence[Point]) -> Optional[floa
     return center_gap+size_gap+area_gap*span
 
 
+def step_component_projection(model: StepModel, component: int,
+                              matrix: Sequence[Sequence[float]]) -> List[List[Point]]:
+    """Union projected solid triangles; never treat a raised face outline as a cut."""
+    from shapely.geometry import Polygon
+    from shapely import union_all
+    triangles=[];openings=[]
+    for fi,face in enumerate(model.faces):
+        if model.face_components[fi]!=component:continue
+        vertices=[mat_apply(matrix,p) for p in face.vertices]
+        for indices in face.triangles:
+            polygon=Polygon([(vertices[i][0],vertices[i][1]) for i in indices])
+            if polygon.area>EPS:triangles.append(polygon)
+        normal=mat_apply(matrix,face.normal,vector=True)
+        if normal[2]<STEP_FACE_NORMAL_DOT or not vertices:continue
+        if max(p[2] for p in vertices)-min(p[2] for p in vertices)>.04:continue
+        loops=[clean_points([(p[0],p[1]) for p in loop],True)
+               for loop in face_boundary_loops(face,matrix)]
+        loops=[p for p in loops if len(p)>=3 and abs(signed_area(p))>EPS]
+        loops.sort(key=lambda p:abs(signed_area(p)),reverse=True)
+        openings.extend(loops[1:])
+    if not triangles:raise ValueError("STEP body has no projected area.")
+    projection=union_all(triangles)
+    if projection.geom_type!="Polygon" or not projection.is_valid:
+        raise ValueError("STEP body projection is disconnected or invalid; check the solid.")
+    outer=clean_points(list(projection.exterior.coords)[:-1],True)
+    loops=[outer]
+    # Include through openings even on curved faces. Retain larger counterbores
+    # and blind openings from upward planar faces for the existing floor matcher.
+    openings.extend([list(ring.coords)[:-1] for ring in projection.interiors])
+    for pts in openings:
+        if not any(contour_shape_score(existing,pts) is not None for existing in loops[1:]):
+            loops.append(pts)
+    return loops
+
+
 def step_faces_to_2d_features(model: StepModel, selected_faces: Sequence[int],
                               matrix: Sequence[Sequence[float]],
                               progress:Optional[Callable[[float,str],None]]=None
                               ) -> Tuple[List[Contour],float,int,int]:
-    """Flatten several coplanar STEP faces into one CAM job."""
+    """Project selected bodies into one CAM job, with highest body surface as Z0."""
     def report(value:float,message:str):
         if progress:progress(value,message)
     face_indices=list(dict.fromkeys(int(i) for i in selected_faces))
@@ -1339,39 +1378,27 @@ def step_faces_to_2d_features(model: StepModel, selected_faces: Sequence[int],
     transformed_components={component:[mat_apply(matrix,p) for p in points]
                             for component,points in model.component_vertices.items()}
     component_count=len(set(model.face_components))
-    groups=[]
-    for part_no,face_index in enumerate(face_indices,1):
-        top_loops=face_boundary_loops(model.faces[face_index],matrix)
-        prepared=[]
-        for loop in top_loops:
-            pts=clean_points([(p[0],p[1]) for p in loop],True)
-            if len(pts)>=3 and abs(signed_area(pts))>EPS:prepared.append(pts)
-        if not prepared:raise ValueError(f"면 {face_index+1}의 2D 경계를 만들지 못했습니다.")
-        prepared.sort(key=lambda p:abs(signed_area(p)),reverse=True)
-        top_z=mat_apply(matrix,model.faces[face_index].center)[2]
-        outer=prepared[0];local_vertices=[]
-        for point in all_vertices:
-            xy=(point[0],point[1])
-            if point_in_poly(xy,outer) or nearest_path_distance(outer,xy,True)[0]<=.08:local_vertices.append(point)
+    groups=[];seen_components=set()
+    for face_index in face_indices:
         component=model.face_components[face_index]
+        if component in seen_components:continue
+        seen_components.add(component)
+        part_no=len(groups)+1
+        prepared=step_component_projection(model,component,matrix)
         component_points=transformed_components.get(component,[])
-        component_bottom=min((p[2] for p in component_points),default=top_z)
-        if component_bottom<top_z-.005:
-            bottom_z=component_bottom
-        elif component_count==1:
-            # Compatibility fallback for synthetic/mesh-only files that contain
-            # just the selected top face but still expose exact B-Rep vertices.
-            bottom_z=global_bottom
-        else:
-            bottom_z=min((p[2] for p in local_vertices),default=global_bottom)
-        local_stock=max(top_z-bottom_z,.01);through_layer=f"STEP_P{part_no}_THROUGH_{local_stock:.3f}"
+        top_z=max((p[2] for p in component_points),default=0.0)
+        bottom_z=min((p[2] for p in component_points),default=global_bottom)
+        if top_z-bottom_z<.005 and component_count==1:bottom_z=global_bottom
+        local_stock=max(top_z-bottom_z,.01)
+        through_layer=f"STEP_P{part_no}_THROUGH_{local_stock:.3f}"
         contours=[]
         for loop_no,pts in enumerate(prepared):
             is_outer=loop_no==0
             contours.append(Contour(pts,True,
                                     f"STEP part {part_no} outer" if is_outer else f"STEP part {part_no} opening {loop_no}",
                                     layer=through_layer,forced_role="outer" if is_outer else "inner",tabs_enabled=is_outer))
-        groups.append({"part":part_no,"face":face_index,"top_z":top_z,"stock":local_stock,
+        groups.append({"part":part_no,"face":face_index,"component":component,
+                       "top_z":top_z,"stock":local_stock,
                        "through_layer":through_layer,"contours":contours})
 
     top_levels=[g["top_z"] for g in groups]
@@ -1387,7 +1414,6 @@ def step_faces_to_2d_features(model: StepModel, selected_faces: Sequence[int],
     face_total=max(1,len(model.faces))
     for fi,face in enumerate(model.faces):
         report(18+57*(fi+1)/face_total,f"깊이 면 검사 {fi+1}/{len(model.faces)}")
-        if fi in face_indices:continue
         tv=[mat_apply(matrix,p) for p in face.vertices]
         if not tv:continue
         zs=[p[2] for p in tv]
@@ -1407,6 +1433,7 @@ def step_faces_to_2d_features(model: StepModel, selected_faces: Sequence[int],
     for group in groups:
         contours=group["contours"];floors=[]
         for z,fi,loops in floor_candidates:
+            if model.face_components[fi]!=group["component"]:continue
             depth=group["top_z"]-z
             if depth<=.04 or depth>=group["stock"]-.04:continue
             if any(contour_shape_score(c.points,loops[0]) is not None for c in contours[1:]):
@@ -2403,6 +2430,9 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(XY_ORIGIN_SOURCE_X_MM: {fmt(float(origin[0]))})",
         f"(XY_ORIGIN_SOURCE_Y_MM: {fmt(float(origin[1]))})",
         f"(SAFE_Z_CLEARANCE_MM: {fmt(float(cfg['safe_z']))})",
+        f"(PREFLIGHT_ENABLED: {nc_yes_no(cfg.get('preflight_enabled',False))})",
+        f"(PREFLIGHT_CLEARANCE_MM: {fmt(float(cfg.get('preflight_z',30.0)))})",
+        f"(PREFLIGHT_FEED_MM_MIN: {fmt(float(cfg.get('preflight_feed',1000.0)))})",
         f"(SAFE_Z_PROGRAMMED: {fmt(float(safe_machine_z))})",
         f"(LEAD_IN_OUT_MM: {fmt(float(cfg['lead']))})",
         f"(FULL_DEPTH_ONE_PASS: {nc_yes_no(cfg.get('full_depth'))})",
@@ -2440,11 +2470,47 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
     ]
 
 
+def validate_preflight(cfg:dict) -> None:
+    if not cfg.get("preflight_enabled",False):return
+    height=float(cfg.get("preflight_z",30.0));feed=float(cfg.get("preflight_feed",1000.0))
+    if not math.isfinite(height) or height<max(float(cfg["safe_z"]),EPS):
+        raise ValueError("Preview height must be finite and at least Safe Z.")
+    if not math.isfinite(feed) or feed<=0:
+        raise ValueError("Preview feed must be finite and greater than zero.")
+
+
+def preflight_gcode(contours:Sequence[Contour],cfg:dict,origin:Point) -> List[str]:
+    """Trace each enabled outer once above stock; holes-only jobs use a bounding box."""
+    if not cfg.get("preflight_enabled",False):return []
+    validate_preflight(cfg)
+    active=[c for c in contours if c.enabled]
+    loops=[c.points for c in active if c.closed and c.role=="outer"]
+    if not loops:
+        points=[p for c in active for p in c.points]
+        if not points:return []
+        x0=min(p[0] for p in points);x1=max(p[0] for p in points)
+        y0=min(p[1] for p in points);y1=max(p[1] for p in points)
+        loops=[[(x0,y0),(x1,y0),(x1,y1),(x0,y1)]]
+    z=float(cfg.get("preflight_z",30.0))+(cfg["stock"] if cfg.get("z_origin")=="Bottom" else 0.0)
+    feed=float(cfg.get("preflight_feed",1000.0))
+    out=["(PREFLIGHT BEGIN - nominal outlines, above stock)","G21 G90 G17 G94",f"G0 Z{fmt(z)}"]
+    for loop in loops:
+        if not loop:continue
+        points=[(x-origin[0],y-origin[1]) for x,y in loop]
+        out.append(f"G1 X{fmt(points[0][0])} Y{fmt(points[0][1])} F{fmt(feed)}")
+        for x,y in points[1:]+points[:1]:out.append(f"G1 X{fmt(x)} Y{fmt(y)} F{fmt(feed)}")
+    safe=cfg["safe_z"]+(cfg["stock"] if cfg.get("z_origin")=="Bottom" else 0.0)
+    # Return to the origin used by automatic route ordering before restoring clearance.
+    out.extend([f"G1 X0 Y0 F{fmt(feed)}",f"G0 Z{fmt(safe)}","(PREFLIGHT END)"])
+    return out
+
+
 def generate_gcode(contours: List[Contour], cfg: dict,
                    progress:Optional[Callable[[float,str],None]]=None) -> str:
     def report(value:float,message:str):
         if progress:progress(value,message)
     report(2,"G-code 설정 준비 중")
+    validate_preflight(cfg)
     safe_z, stock, extra = cfg["safe_z"], cfg["stock"], cfg["extra"]
     bottom_zero = cfg.get("z_origin") == "Bottom"
     safe_machine_z = stock + safe_z if bottom_zero else safe_z
@@ -2500,6 +2566,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
            f"(This job estimated cutting time: {fmt(minutes)} min)",
            f"(Accumulated after job: {fmt(total_metres)} m, {fmt(total_minutes)} min)"]+start_lines
 
+    out.extend(preflight_gcode(active,cfg,(origin_x,origin_y)))
     current_xy:Point=(origin_x,origin_y)
     def emit_phase(c:Contour,route:List[Point],depths:Sequence[float],tab_distances:Sequence[float],
                    feed:float,label:str,sink:Optional[List[str]]=None)->str:
@@ -3316,6 +3383,13 @@ class StepSetupDialog(tk.Toplevel):
             progress.close()
             messagebox.showerror("STEP 가져오기",str(exc),parent=self);return
         progress.close()
+        components={self.model.face_components[i] for i in self.active_face_indices()}
+        top_z=max(mat_apply(self.model.matrix,p)[2] for k in components
+                  for p in self.model.component_vertices[k])
+        self.model.matrix=mat_mul(mat_translate(0,0,-top_z),self.model.matrix)
+        messagebox.showinfo("STEP 가져오기",
+                            "전체 바디 외곽과 홀을 가져왔습니다. Z0은 바디 최상단입니다.\n"
+                            "양각 주변 면을 깎는 포켓 가공은 자동 생성하지 않습니다.",parent=self)
         self.on_cancel=None
         self.on_apply(contours,self.model.filename,self.selected_face+1,copy.deepcopy(self.model.matrix),stock,depths,added);self.destroy()
     def draw(self):
@@ -4032,6 +4106,12 @@ class App(tk.Tk):
             cls = tk.IntVar if key in ("passes", "tab_count") else tk.DoubleVar
             ttk.Entry(controls, width=12, textvariable=self.var(key, val, cls)).grid(row=r, column=1, padx=5)
         r = len(rows)
+        self.var("preflight_enabled",False,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="가공 전 외곽 프리뷰 1회",variable=self.vars["preflight_enabled"]).grid(row=r,columnspan=2,sticky="w");r+=1
+        for label,key,value in (("프리뷰 높이 (mm)","preflight_z",30.0),
+                                ("프리뷰 속도 (mm/min)","preflight_feed",1000.0)):
+            ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w")
+            ttk.Entry(controls,width=12,textvariable=self.var(key,value)).grid(row=r,column=1,padx=5);r+=1
         self.var("tool_wear_enabled",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="거리 기반 공구 마모 보정",variable=self.vars["tool_wear_enabled"],
                         command=self.redraw).grid(row=r,columnspan=2,sticky="w",pady=(4,1));r+=1
@@ -4317,6 +4397,7 @@ class App(tk.Tk):
         if (cfg["tool_d"] <= 0 or cfg["stock"] <= 0 or cfg["feed"] <= 0 or
                 cfg["plunge"] <= 0 or cfg["rpm"] <= 0 or cfg["safe_z"] <= 0):
             raise ValueError("공구, 판 두께, RPM, Feed, Plunge, 안전 Z는 0보다 커야 합니다.")
+        validate_preflight(cfg)
         if cfg["passes"] < 1:
             raise ValueError("패스 수는 1 이상이어야 합니다.")
         if (cfg["lead"] < 0 or cfg["tab_count"] < 0 or cfg["tab_flat"] < 0 or
@@ -4345,6 +4426,7 @@ class App(tk.Tk):
     def job_signature(self,cfg:dict):
         machining_keys=("tool_d","tool_wear_enabled","tool_wear_loss_per_100m","tool_wear_min_d",
                         "rpm","feed","plunge","stock","extra","safe_z","lead","passes",
+                        "preflight_enabled","preflight_z","preflight_feed",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
                         "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim","accum_distance_m",
@@ -6005,3 +6087,4 @@ if __name__ == "__main__":
         if len(sys.argv)>index+1:cleanup_path=sys.argv[index+1]
     if cleanup_path:cleanup_update_file(cleanup_path)
     App().mainloop()
+

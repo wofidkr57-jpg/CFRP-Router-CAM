@@ -92,7 +92,7 @@ jobs:
 
           Copy-Item dist/CFRP_Router_CAM.exe (Join-Path $releaseDir "CFRP_Router_CAM.exe")
           Copy-Item dist/CFRP_Router_CAM.exe (Join-Path $releaseDir "CFRP_Router_CAM_V${version}.exe")
-          Copy-Item cfrp_router_cam.py, README.md, CHANGELOG.md, requirements.txt, build_windows.ps1 $sourceDir
+          Copy-Item cfrp_router_cam.py, README.md, CHANGELOG.md, AGENTS.md, PROJECT_STATE.md, requirements.txt, build_windows.ps1 $sourceDir
           Copy-Item verification/*.py (Join-Path $sourceDir "verification")
 
           $zip = Join-Path $releaseDir "${sourceName}.zip"
@@ -102,7 +102,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "배열 가공 순서 복사와 누적 거리 기반 공구 마모 보정을 추가했습니다."
+            message = "STEP 전체 바디 외곽 가져오기와 가공 전 높이 설정 외곽 프리뷰를 추가했습니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
@@ -134,3 +134,4 @@ jobs:
             "release/CFRP_Router_CAM_V${version}_source.zip" `
             --title "CFRP Router CAM V${version}" `
             --notes-file CHANGELOG.md
+

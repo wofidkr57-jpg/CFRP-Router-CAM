@@ -26,15 +26,15 @@ class UpdaterTests(unittest.TestCase):
 
     def test_manifest_accepts_only_newer_github_release(self):
         data = {
-            "version": "1.12",
-            "download_url": cam.UPDATE_DOWNLOAD_PREFIX + "v1.12/CFRP_Router_CAM.exe",
+            "version": "999.0",
+            "download_url": cam.UPDATE_DOWNLOAD_PREFIX + "v999.0/CFRP_Router_CAM.exe",
             "sha256": "a" * 64,
             "message": "test",
         }
-        self.assertEqual(cam.validated_update_manifest(data)["version"], "1.12")
+        self.assertEqual(cam.validated_update_manifest(data)["version"], "999.0")
         data["version"] = cam.APP_VERSION
         self.assertIsNone(cam.validated_update_manifest(data))
-        data["version"] = "1.12"
+        data["version"] = "999.0"
         data["download_url"] = "https://example.com/update.exe"
         with self.assertRaises(ValueError):
             cam.validated_update_manifest(data)
@@ -72,3 +72,4 @@ class UpdaterTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
