@@ -30,7 +30,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.12**입니다.
+현재 최신 버전은 **V1.13**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정 추가: 기존 누적거리와 작업 중 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소
