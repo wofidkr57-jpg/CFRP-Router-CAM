@@ -5,7 +5,7 @@
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
 - 현재 애플리케이션 소스 버전: **V1.15**
-- 배포 상태: V1.15 Windows 검사·EXE 빌드·릴리스 완료. Defender 첫 검사는 skipped로 실검사 미완료, 별도 재검사 대기. 사용자 PC 탐지 해소와 V1.14 오탐 여부는 미확인.
+- 배포 상태: V1.15 Windows 검사·EXE 빌드·릴리스 완료. Defender 최초 skipped 이후 별도 경로에서 재검사 완료, found no threats 확인. 사용자 PC 탐지 해소와 V1.14 오탐 여부는 미확인.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
 - 이 문서는 클라우드 채팅과 여러 로컬 PC가 같은 작업 상태를 이어받기 위한 정본이다.
@@ -227,3 +227,10 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 
 - Defender 검사 보정: GitHub runner의 빌드 경로에서 검사 skipped가 exit0으로 반환됨. 배포 EXE를 C:/CAM_Defender_Validation으로 복사하고 skipped/excluded 출력도 실패 처리. 백신 제외 설정은 변경하지 않음.
 - V1.15 공개 EXE의 SHA-256를 고정한 독립 검증 workflow로 다시 검사. 결과 확인 전 백신 통과로 표시하지 않음.
+
+### V1.15 Defender 재검사 완료
+- https://github.com/wofidkr57-jpg/CFRP-Router-CAM/actions/runs/35445342543 성공.
+- GitHub 공개 릴리스 EXE를 다시 내려받고 SHA-256 일치 확인 후 C:/CAM_Defender_Validation에서 검사.
+- 실제 로그: `Scanning C:\CAM_Defender_Validation\CFRP_Router_CAM_V1.15.exe found no threats.`
+- 엔진4.18.26080.4, 시그니처1.459.287.0. 검사 전후 해시 일치, 백신 제외 설정 변경 없음.
+- 사용자 PC 탐지 해소/클라우드·행위 검사 및 V1.14 오탐 여부는 여전히 미확인.
