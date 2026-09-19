@@ -5,7 +5,7 @@
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
 - 현재 애플리케이션 소스 버전: **V1.18**
-- 배포 상태: V1.17 Windows 회귀59개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료. 사용자 PC의 백신 탐지 여부는 별도 확인 필요.
+- 배포 상태: V1.18 Windows 회귀62개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료. 사용자 PC의 백신 탐지 여부는 별도 확인 필요.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
 - 이 문서는 클라우드 채팅과 여러 로컬 PC가 같은 작업 상태를 이어받기 위한 정본이다.
@@ -268,3 +268,11 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - TOP/BOTTOM stock1/2/3/5의 NC XY 높이, 수동 유지, 얇은 판의 접근 높이 충돌 검증 추가.
 - Windows GUI에 두께 변경/자동·수동 전환/설정 복원 검사 추가. Windows/백신/릴리스 결과 대기.
 - 다음 작업: 검사·배포 후 사용자 PC NC 재생성과 공중운전. 실가공 미검증.
+
+### V1.18 배포 확인
+- 소스 커밋 `ad94755fabdd6b41b68fc4fda47ff38fa8f53ea2`.
+- Windows https://github.com/wofidkr57-jpg/CFRP-Router-CAM/actions/runs/35457727158 전체 성공. 단위62개, GUI6회(안전Z 자동/수동/설정복원 포함), EXE 빌드 성공.
+- Defender 실검사 `found no threats` 확인. 매니페스트1.18 및 두 EXE SHA-256 일치 `493d44ec3e271a84c7e4c4bc9e1884960e24b2731f1c8450de49ce0be38b6c1d`.
+- 소스 blob `f262eb34f28e9e01429895674385ea713d633928`, 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.18
+- v1.11~v1.18 릴리스별 EXE와 소스 ZIP 존재 확인. 최신 자동 업데이트1.18.
+- 다음 작업: 사용자 PC에서 두께3mm/BOTTOM 안전Z9·접근Z4 확인 후 공중 운전. 실가공 검증 전.
