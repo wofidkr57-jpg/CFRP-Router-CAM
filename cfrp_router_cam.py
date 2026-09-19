@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.16"
+APP_VERSION = "1.17"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -86,6 +86,8 @@ _UI_EN_EXACT = {
     "예제 사각형": "Example Rectangle",
     "G-code 생성": "Generate G-code",
     "G-code 저장": "Save G-code",
+    "급속 접근 여유 (mm)": "Rapid approach clearance (mm)",
+    "급속 접근 여유는 0보다 크고 안전 Z 이하여야 합니다.": "Rapid approach clearance must be positive and no greater than Safe Z.",
     "저장 완료": "Save complete",
     "G코드 저장이 완료되었습니다.": "G-code has been saved successfully.",
     "3D 시뮬레이션": "3D Simulation",
@@ -2268,6 +2270,14 @@ def effective_tool_diameter(cfg:dict,accumulated_cut_m:float)->float:
     return max(minimum,nominal-loss_per_100m*max(0.0,float(accumulated_cut_m))/100.0)
 
 
+def rapid_approach_clearance(cfg:dict) -> float:
+    value=float(cfg.get("approach_z",min(1.0,float(cfg["safe_z"]))))
+    safe=float(cfg["safe_z"])
+    if not math.isfinite(value) or not math.isfinite(safe) or not 0<value<=safe:
+        raise ValueError("급속 접근 여유는 0보다 크고 안전 Z 이하여야 합니다.")
+    return value
+
+
 def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
                         )->Tuple[float,float,float]:
     """Return cutting millimetres, XY cutting minutes, and plunge minutes."""
@@ -2276,7 +2286,7 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
         passes=max(1,math.ceil(c.target_depth/float(cfg.get("pocket_stepdown",.25))))
         rough_mm=sum(path_length(p,True) for p in rough)*passes
         finish_mm=sum(path_length(p,True) for p in finish)*passes
-        plunge=sum(cfg["safe_z"]+c.target_depth*i/passes for i in range(1,passes+1))*(len(rough)+len(finish))/cfg["plunge"]
+        plunge=sum(rapid_approach_clearance(cfg)+c.target_depth*i/passes for i in range(1,passes+1))*(len(rough)+len(finish))/cfg["plunge"]
         return rough_mm+finish_mm,rough_mm/cfg["feed"]+finish_mm/(cfg["feed"]*.8),plunge
     passes=1 if cfg["full_depth"] else max(1,cfg["passes"])
     target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
@@ -2296,12 +2306,12 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
         cut_mm=rough_mm+finish_mm
         cut_min=rough_mm/max(cfg["feed"],EPS)+finish_mm/max(cfg["feed"]*cfg["finish_feed_pct"]/100.0,EPS)
         rough_target=rough_target_for(target,stock,cfg,use_onion)
-        plunge_min=sum(cfg["safe_z"]+rough_target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
-        plunge_min+=(cfg["safe_z"]+target)/max(cfg["plunge"],EPS)
+        plunge_min=sum(rapid_approach_clearance(cfg)+rough_target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
+        plunge_min+=(rapid_approach_clearance(cfg)+target)/max(cfg["plunge"],EPS)
     else:
         cut_mm=route_len*passes+lead_one*(passes+1)
         cut_min=cut_mm/max(cfg["feed"],EPS)
-        plunge_min=sum(cfg["safe_z"]+target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
+        plunge_min=sum(rapid_approach_clearance(cfg)+target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
     return cut_mm,cut_min,plunge_min
 
 
@@ -2639,6 +2649,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(XY_ORIGIN_MODE: {nc_ascii_text(cfg.get('xy_origin','DXF origin')).upper()})",
         f"(XY_ORIGIN_SOURCE_X_MM: {fmt(float(origin[0]))})",
         f"(XY_ORIGIN_SOURCE_Y_MM: {fmt(float(origin[1]))})",
+        f"(RAPID_APPROACH_CLEARANCE_MM: {fmt(rapid_approach_clearance(cfg))})",
         f"(SAFE_Z_CLEARANCE_MM: {fmt(float(cfg['safe_z']))})",
         f"(PREFLIGHT_ENABLED: {nc_yes_no(cfg.get('preflight_enabled',False))})",
         f"(PREFLIGHT_CLEARANCE_MM: {fmt(float(cfg.get('preflight_z',30.0)))})",
@@ -2726,6 +2737,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     safe_z, stock, extra = cfg["safe_z"], cfg["stock"], cfg["extra"]
     bottom_zero = cfg.get("z_origin") == "Bottom"
     safe_machine_z = stock + safe_z if bottom_zero else safe_z
+    approach_machine_z=rapid_approach_clearance(cfg)+(stock if bottom_zero else 0.0)
     def machine_z(depth_below_top: float) -> float:
         return stock - depth_below_top if bottom_zero else -depth_below_top
     passes = 1 if cfg["full_depth"] else max(1, cfg["passes"])
@@ -2790,6 +2802,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         center=None if plan.center is None else (plan.center[0]-origin_x,plan.center[1]-origin_y)
         p0=shifted[0];dst.append(f"(Phase: {label}, feed={fmt(feed)})")
         if plan.mode=="center-fallback":dst.append("(Lead-in auto: insufficient space -> safe interior center)")
+        dst.append(f"G0 Z{fmt(safe_machine_z)}")
         dst.append(f"G0 X{fmt(lead[0])} Y{fmt(lead[1])}")
         for pi,depth in enumerate(depths,1):
             active_tabs=list(tab_distances) if pi==len(depths) else []
@@ -2801,6 +2814,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             start_z=(z_for_distance(0.0,total,active_tabs,depth,
                                      machine_z(stock-cfg["tab_remain"]),tab_flat,cfg["tab_ramp"])
                      if c.closed else depth)
+            dst.append(f"G0 Z{fmt(approach_machine_z)}")
             dst.append(f"G1 Z{fmt(start_z)} F{fmt(cfg['plunge'])}")
             if center is not None:
                 code="G2" if plan.clockwise else "G3"
@@ -2860,7 +2874,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
                     for route in paths:
                         points=[(x-origin_x,y-origin_y) for x,y in route]
                         out.extend([f"(Pocket {label} pass {level}/{count})",f"G0 Z{fmt(safe_machine_z)}",
-                                    f"G0 X{fmt(points[0][0])} Y{fmt(points[0][1])}",f"G1 Z{fmt(z)} F{fmt(cfg['plunge'])}"])
+                                    f"G0 X{fmt(points[0][0])} Y{fmt(points[0][1])}",
+                                    f"G0 Z{fmt(approach_machine_z)}",f"G1 Z{fmt(z)} F{fmt(cfg['plunge'])}"])
                         for x,y in points[1:]+points[:1]:out.append(f"G1 X{fmt(x)} Y{fmt(y)} F{fmt(feed)}")
                         out.append(f"G0 Z{fmt(safe_machine_z)}")
                         current_xy=route[0]
@@ -4330,6 +4345,7 @@ class App(tk.Tk):
             ("Feed XY (mm/min)", "feed", 800.0), ("Plunge (mm/min)", "plunge", 200.0),
             ("판 두께 (mm)", "stock", 3.0), ("관통 여유 (mm)", "extra", 0.1),
             ("안전 Z (mm)", "safe_z", 10.0), ("Lead in/out (mm)", "lead", 1.0),
+            ("급속 접근 여유 (mm)", "approach_z", 1.0),
             ("패스 수", "passes", 1),
         ]
         for r, (label, key, val) in enumerate(rows):
@@ -4635,6 +4651,7 @@ class App(tk.Tk):
                 cfg["plunge"] <= 0 or cfg["rpm"] <= 0 or cfg["safe_z"] <= 0):
             raise ValueError("공구, 판 두께, RPM, Feed, Plunge, 안전 Z는 0보다 커야 합니다.")
         validate_preflight(cfg)
+        rapid_approach_clearance(cfg)
         if cfg["passes"] < 1:
             raise ValueError("패스 수는 1 이상이어야 합니다.")
         if (cfg["lead"] < 0 or cfg["tab_count"] < 0 or cfg["tab_flat"] < 0 or
@@ -4664,7 +4681,7 @@ class App(tk.Tk):
 
     def job_signature(self,cfg:dict):
         machining_keys=("tool_d","tool_wear_enabled","tool_wear_loss_per_100m","tool_wear_min_d",
-                        "rpm","feed","plunge","stock","extra","safe_z","lead","passes",
+                        "rpm","feed","plunge","stock","extra","safe_z","approach_z","lead","passes",
                         "preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
                         "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",

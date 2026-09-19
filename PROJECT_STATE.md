@@ -4,7 +4,7 @@
 - 저장소: `wofidkr57-jpg/CFRP-Router-CAM`
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
-- 현재 애플리케이션 소스 버전: **V1.16**
+- 현재 애플리케이션 소스 버전: **V1.17**
 - 배포 상태: V1.16 Windows 회귀53개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료. 사용자 PC의 백신 탐지 여부는 별도 확인 필요.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
@@ -246,3 +246,10 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - Defender 별도 경로 실검사 로그 `found no threats` 확인. EXE 두 개와 매니페스트 SHA-256 일치 `871cf65ffc4fb3ed72711200331e69b508fe83c1978ada421fbdfb3390a99436`.
 - 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.16
 - 다음 작업: 사용자 PC에서 일반 NC 저장 후 알림창 확인. 실기 가공/사용자 PC 백신 판정은 미검증.
+
+## 15. V1.17 — 급속 접근과 절입 분리
+- 안전 Z는 횡이동, approach_z 기본1mm는 소재 윗면 기준 급속 하강 종료 높이. 이후 Plunge로 절입.
+- TOP/BOTTOM, 프로파일/열린 경로/홀/포켓/다단/정삭에 적용. phase 첫 XY 전에도 안전 Z 상승 명시.
+- 설정 저장/작업 서명/NC 헤더/절입 시간 추정 반영. 급속 시간은 기존과 같이 절삭 시간 추정에서 제외.
+- Linux 단위59개 통과: 좌표 파싱으로 모든 XY 급속 높이, 급속 하강 종료 높이, G1 절입 직전 G0 접근, 설정 Plunge 확인. TOP/BOTTOM 및 포켓 반복/정삭/탭 포함.
+- Windows GUI/EXE/Defender/릴리스 결과 대기. 실제 CNC 검증 전이며 NC 재생성 및 공중 운전 필요.

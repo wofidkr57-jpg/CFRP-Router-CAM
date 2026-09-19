@@ -129,7 +129,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "G코드 저장 완료 알림창을 추가했습니다."
+            message = "소재 표면 1mm 위까지 급속 접근 후 설정 속도로 절입하도록 개선했습니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
