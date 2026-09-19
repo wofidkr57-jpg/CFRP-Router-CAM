@@ -5,7 +5,7 @@
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
 - 현재 애플리케이션 소스 버전: **V1.12**
-- 배포 상태: Windows 자동 빌드·릴리스 결과 확인 전. 검증 매니페스트는 V1.11 유지.
+- 배포 상태: V1.12 Windows 검사·빌드·릴리스 완료. 원격 매니페스트와 릴리스 자산 SHA-256 일치 확인.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
 - 이 문서는 클라우드 채팅과 여러 로컬 PC가 같은 작업 상태를 이어받기 위한 정본이다.
@@ -130,3 +130,14 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 2. 검증된 EXE의 자동 생성 매니페스트와 릴리스 일치 확인.
 3. 실제 PC에서 STEP Z0을 바디 최상단으로 맞추고, 프리뷰 높이·XY 범위·기존 절삭경로 확인.
 4. 실제 가공은 장비 공중 운전 이후 확인.
+
+### V1.12 배포 확인 — 2026-09-19
+- 소스 커밋: `0295bb68a2765b28decdf21b42242d6862c5f1f3`.
+- Windows Actions 실행: https://github.com/wofidkr57-jpg/CFRP-Router-CAM/actions/runs/35441438583
+- Windows 단위 검사 37개와 기존 GUI smoke 검사 4회 통과, EXE 빌드 및 v1.12 릴리스 생성 완료.
+- 원격 main 소스 blob과 로컬 수정본 hash 일치: `7f84d3ee1f8d7629f8cee7b7452f9051bab4fd17`.
+- 원격 latest.json 버전 1.12 및 GitHub 릴리스 EXE 2개 자산 digest와 동일 SHA-256 확인: `e4b49b8c9901e71d6ab3e0c526259f35a5e831c3ac7b43bc3c3e8737120c88c5`.
+- 릴리스: https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.12
+- Windows GUI 검사는 Python 소스 기준이다. 패키징된 EXE의 실제 사용자 PC 실행, Mach3 공중 운전과 실제 절삭은 아직 미검증이다.
+- 릴리스 ZIP의 상태 문서는 빌드 직전 기록이며, 이 main 문서에 배포 결과를 후속 기록했다.
+- 남은 작업: 사용자 PC에서 새 EXE 실행, 소재 최상단 Z0 확인, 프리뷰 ON 및 실제 이동/가공경로 확인.
