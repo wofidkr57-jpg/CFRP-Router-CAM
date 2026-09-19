@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.15"
+APP_VERSION = "1.16"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -86,6 +86,8 @@ _UI_EN_EXACT = {
     "예제 사각형": "Example Rectangle",
     "G-code 생성": "Generate G-code",
     "G-code 저장": "Save G-code",
+    "저장 완료": "Save complete",
+    "G코드 저장이 완료되었습니다.": "G-code has been saved successfully.",
     "3D 시뮬레이션": "3D Simulation",
     "되돌리기 (Ctrl+Z)": "Undo (Ctrl+Z)",
     "다시 실행 (Ctrl+Y)": "Redo (Ctrl+Y)",
@@ -6361,6 +6363,7 @@ class App(tk.Tk):
                 code=self.gcode_parts[0][1] if self.gcode_parts else self.gcode
                 with open(fn,"w",encoding="ascii",errors="replace",newline="\n") as f:f.write(code)
                 self.status.set(f"저장 완료: {fn}")
+                messagebox.showinfo("저장 완료",ui_text("G코드 저장이 완료되었습니다.")+f"\n\n{fn}",parent=self)
 
     def open_3d(self):
         try:cfg=self.config();current_signature=self.job_signature(cfg)

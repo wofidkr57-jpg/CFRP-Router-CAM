@@ -4,7 +4,7 @@
 - 저장소: `wofidkr57-jpg/CFRP-Router-CAM`
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
-- 현재 애플리케이션 소스 버전: **V1.15**
+- 현재 애플리케이션 소스 버전: **V1.16**
 - 배포 상태: V1.15 Windows 검사·EXE 빌드·릴리스 완료. Defender 최초 skipped 이후 별도 경로에서 재검사 완료, found no threats 확인. 사용자 PC 탐지 해소와 V1.14 오탐 여부는 미확인.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
@@ -234,3 +234,8 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - 실제 로그: `Scanning C:\CAM_Defender_Validation\CFRP_Router_CAM_V1.15.exe found no threats.`
 - 엔진4.18.26080.4, 시그니처1.459.287.0. 검사 전후 해시 일치, 백신 제외 설정 변경 없음.
 - 사용자 PC 탐지 해소/클라우드·행위 검사 및 V1.14 오탐 여부는 여전히 미확인.
+
+## 14. V1.16 — G코드 저장 완료 알림
+- 일반 저장 파일의 with open 종료 후 저장 완료 팝업과 실제 파일 경로 표시. 취소/쓰기 실패는 성공 팝업에 도달하지 않음.
+- 2분할 저장 기존 완료 안내 유지, 한국어/영어 번역 지원.
+- Windows 회귀/GUI/EXE/Defender 검증 및 배포 결과 대기.
