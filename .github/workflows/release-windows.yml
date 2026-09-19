@@ -81,6 +81,22 @@ jobs:
         shell: pwsh
         run: ./build_windows.ps1 -Python ((Get-Command python).Source)
 
+      - name: Scan executable with Microsoft Defender
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          $ErrorActionPreference = 'Stop'
+          $status = Get-MpComputerStatus
+          if (-not $status.AMServiceEnabled -or -not $status.AntivirusEnabled) {
+            throw "Defender is unavailable; release is blocked until antivirus validation succeeds."
+          }
+          Update-MpSignature
+          $scanner = Join-Path $env:ProgramFiles "Windows Defender/MpCmdRun.exe"
+          & $scanner -Scan -ScanType 3 -File "$PWD/dist/CFRP_Router_CAM.exe" -DisableRemediation
+          if ($LASTEXITCODE -ne 0) { throw "Defender scan failed or detected a threat; release blocked (exit $LASTEXITCODE)." }
+          if (-not (Test-Path dist/CFRP_Router_CAM.exe)) { throw "Scanned EXE is missing." }
+          Get-MpComputerStatus | Select-Object AMProductVersion, AntivirusSignatureVersion, AntivirusSignatureLastUpdated
+
       - name: Prepare release files and update manifest
         if: steps.release.outputs.exists != 'true'
         shell: pwsh
@@ -104,7 +120,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "윤곽 목록에 가공 여부 적용/제외 선택과 다중 선택 변경을 추가했습니다."
+            message = "STEP 회전·원점 이동 시 외곽 투영 오류를 수정했습니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 

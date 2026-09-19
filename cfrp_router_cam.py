@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.14"
+APP_VERSION = "1.15"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -1341,6 +1341,23 @@ def contour_shape_score(a: Sequence[Point], b: Sequence[Point]) -> Optional[floa
     return center_gap+size_gap+area_gap*span
 
 
+def connected_step_projection(triangles):
+    """Close only sub-micron numerical seams, never discard disconnected pieces."""
+    from shapely import union_all
+    projection=union_all(triangles)
+    if projection.geom_type=="Polygon" and projection.is_valid:
+        return projection
+    # Millimetre coordinates: 1e-7 mm is far below STEP meshing tolerance.
+    # Round closing avoids unstable tiny mitre intersections after rotation.
+    tolerance=1e-7
+    repaired=projection.buffer(tolerance).buffer(-tolerance)
+    area_limit=max(1e-10,projection.length*tolerance*2)
+    if (repaired.geom_type=="Polygon" and repaired.is_valid and not repaired.is_empty
+            and projection.symmetric_difference(repaired).area<=area_limit):
+        return repaired
+    raise ValueError("STEP body projection is disconnected or invalid; check the solid.")
+
+
 def step_component_projection(model: StepModel, component: int,
                               matrix: Sequence[Sequence[float]]) -> List[List[Point]]:
     """Union projected solid triangles; never treat a raised face outline as a cut."""
@@ -1350,21 +1367,32 @@ def step_component_projection(model: StepModel, component: int,
     for fi,face in enumerate(model.faces):
         if model.face_components[fi]!=component:continue
         vertices=[mat_apply(matrix,p) for p in face.vertices]
+        if not vertices:continue
+        normal=mat_apply(matrix,face.normal,vector=True)
+        face_triangles=[]
         for indices in face.triangles:
             polygon=Polygon([(vertices[i][0],vertices[i][1]) for i in indices])
-            if polygon.area>EPS:triangles.append(polygon)
-        normal=mat_apply(matrix,face.normal,vector=True)
-        if normal[2]<STEP_FACE_NORMAL_DOT or not vertices:continue
-        if max(p[2] for p in vertices)-min(p[2] for p in vertices)>.04:continue
-        loops=[clean_points([(p[0],p[1]) for p in loop],True)
-               for loop in face_boundary_loops(face,matrix)]
-        loops=[p for p in loops if len(p)>=3 and abs(signed_area(p))>EPS]
-        loops.sort(key=lambda p:abs(signed_area(p)),reverse=True)
-        openings.extend(loops[1:])
+            if polygon.area>EPS:face_triangles.append(polygon)
+        horizontal=(abs(normal[2])>=STEP_FACE_NORMAL_DOT
+                    and max(p[2] for p in vertices)-min(p[2] for p in vertices)<1e-6)
+        loops=[]
+        if horizontal:
+            loops=[clean_points([(p[0],p[1]) for p in loop],True)
+                   for loop in face_boundary_loops(face,matrix)]
+            loops=[p for p in loops if len(p)>=3 and abs(signed_area(p))>EPS]
+            loops.sort(key=lambda p:abs(signed_area(p)),reverse=True)
+        # A planar face already has real outer/hole boundaries. Unioning its
+        # individual triangles can turn shared edges into artificial slit holes.
+        boundary=Polygon(loops[0],loops[1:]) if loops else None
+        mesh_area=sum(p.area for p in face_triangles)
+        if (boundary is not None and boundary.is_valid
+                and abs(boundary.area-mesh_area)<=max(1e-6,mesh_area*1e-8)):
+            triangles.append(boundary)
+        else:
+            triangles.extend(face_triangles)
+        if normal[2]>=STEP_FACE_NORMAL_DOT:openings.extend(loops[1:])
     if not triangles:raise ValueError("STEP body has no projected area.")
-    projection=union_all(triangles)
-    if projection.geom_type!="Polygon" or not projection.is_valid:
-        raise ValueError("STEP body projection is disconnected or invalid; check the solid.")
+    projection=connected_step_projection(triangles)
     outer=clean_points(list(projection.exterior.coords)[:-1],True)
     loops=[outer]
     # Include through openings even on curved faces. Retain larger counterbores
