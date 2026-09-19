@@ -1,6 +1,6 @@
 {
-  "version": "1.14",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.14/CFRP_Router_CAM.exe",
-  "sha256": "b32e1b48297cc457d8931375a4eeeb807e4db3c70053f0d1785ce8aa33b1b061",
-  "message": "윤곽 목록에 가공 여부 적용/제외 선택과 다중 선택 변경을 추가했습니다."
+  "version": "1.15",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.15/CFRP_Router_CAM.exe",
+  "sha256": "f1a194abae02a76c83e04f3e17845f5ca75e02dd2cba73a9a95a68f3f6e83da1",
+  "message": "STEP 회전·원점 이동 시 외곽 투영 오류를 수정했습니다."
 }
