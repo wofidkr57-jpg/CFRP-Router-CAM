@@ -5,7 +5,7 @@
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
 - 현재 애플리케이션 소스 버전: **V1.20**
-- 배포 상태: V1.20 검증 및 릴리스 진행 중.
+- 배포 상태: V1.20 Windows 회귀70개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
 - 이 문서는 클라우드 채팅과 여러 로컬 PC가 같은 작업 상태를 이어받기 위한 정본이다.
@@ -296,4 +296,9 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 
 ## 18. V1.20 — 경로 허용오차 기본0.01mm
 - UI/NC fallback 기본0.01mm. V1.19 이하 저장값0.02만 0.01로 전환, 기타 지정값과 V1.20 설정 유지.
-- 회귀 및 Windows GUI/EXE/Defender/릴리스 확인 예정. 실제 CNC 검증 전.
+- Linux/Windows 회귀70개 및 Windows GUI6회 통과, EXE 빌드와 릴리스 완료. 실제 CNC 검증 전.
+- Windows 실행 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/actions/runs/35484827795
+- Defender 실검사 found no threats. 두 EXE와 latest.json SHA-256 일치: `0c26d5a79c77c9fed99ee88ca934c272c75fa9b8eab6bbfb774d9321185e271f`.
+- 원격/로컬 소스 blob 일치: `db088b684ff33cb44253ed162f8e2d0a3f2ee47c`.
+- 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.20
+- 다음 작업: 사용자 PC에서 0.01mm 확인 후 NC 재생성 및 시뮬레이션/공중 운전. 사용자 PC 백신 판정과 실가공 미검증.
