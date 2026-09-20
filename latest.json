@@ -1,6 +1,6 @@
 {
-  "version": "1.19",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.19/CFRP_Router_CAM.exe",
-  "sha256": "af335a6206e346c6a1469e4f2c0a92423d81adbf6f8dbb08fd743ab6f74f0a6b",
-  "message": "어니언스킨·벽면정삭 기본OFF, 경로 허용오차와 포켓 연속 가공을 추가했습니다."
+  "version": "1.20",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.20/CFRP_Router_CAM.exe",
+  "sha256": "0c26d5a79c77c9fed99ee88ca934c272c75fa9b8eab6bbfb774d9321185e271f",
+  "message": "경로 허용오차 기본값을 0.01mm로 변경했습니다."
 }
