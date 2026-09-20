@@ -1,11 +1,11 @@
 # CFRP Router CAM 프로젝트 상태
 
-- 기준일: 2026-09-19
+- 기준일: 2026-09-20
 - 저장소: `wofidkr57-jpg/CFRP-Router-CAM`
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
 - 현재 애플리케이션 소스 버전: **V1.19**
-- 배포 상태: V1.18 Windows 회귀62개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료. 사용자 PC의 백신 탐지 여부는 별도 확인 필요.
+- 배포 상태: V1.19 Windows 회귀69개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료. 사용자 PC의 백신 탐지 여부는 별도 확인 필요.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
 - 이 문서는 클라우드 채팅과 여러 로컬 PC가 같은 작업 상태를 이어받기 위한 정본이다.
@@ -285,3 +285,11 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - 로컬 BATT STEP 포켓 예: G0 Z 명령71→11, stay-down 연결30회. 단순 이동 시뮬레이션은279.4→295.2초로 증가(기가공 구간 G1 재이동 영향). 실제 가감속과 CV 미반영이므로 실가공 속도 개선을 단정하지 않음.
 - Mach3 공식 CV 설명 확인: https://www.machsupport.com/wp-content/uploads/2013/02/Mach3_CVSettings_v2.pdf . 실제 사용자 Mach3 설정/모션컨트롤러 미확인, CV값/가감속 변경하지 않음.
 - 고객 STEP/NC 비공개 유지. Windows GUI/EXE/Defender/릴리스 결과 대기. 이후 사용자 NC 재생성·공중운전/실기 비교 필요.
+
+### V1.19 배포 확인 — 2026-09-20
+- 소스 `9a513cac7ffc102600062833c689d4a96435a237`, 매니페스트 `e8e1403ca45eeea65ce0c6572c2daca94c4e42b0`.
+- Windows https://github.com/wofidkr57-jpg/CFRP-Router-CAM/actions/runs/35484017539 단위69개/GUI6회/EXE 빌드/Defender/릴리스 성공.
+- 원격/로컬 소스 blob `a82a3b285f3b8d4776b89c2011046438047c921c` 일치.
+- Defender `found no threats`, 두 EXE와 latest.json SHA-256 일치 `af335a6206e346c6a1469e4f2c0a92423d81adbf6f8dbb08fd743ab6f74f0a6b`.
+- 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.19
+- 다음 작업: NC 재생성 후 3D 연결/탭/양각 검사와 공중 운전, 사용자 Mach3 CV·LookAhead·가감속 설정 확인. 실가공 및 사용자 PC 백신 판정은 미확인.
