@@ -1,6 +1,6 @@
 {
-  "version": "1.18",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.18/CFRP_Router_CAM.exe",
-  "sha256": "493d44ec3e271a84c7e4c4bc9e1884960e24b2731f1c8450de49ce0be38b6c1d",
-  "message": "기본 안전 높이를 판 두께의 2배로 자동 계산하고 급속 접근은 표면 위 1mm로 설정했습니다."
+  "version": "1.19",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.19/CFRP_Router_CAM.exe",
+  "sha256": "af335a6206e346c6a1469e4f2c0a92423d81adbf6f8dbb08fd743ab6f74f0a6b",
+  "message": "어니언스킨·벽면정삭 기본OFF, 경로 허용오차와 포켓 연속 가공을 추가했습니다."
 }
