@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.18"
+APP_VERSION = "1.19"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -86,6 +86,8 @@ _UI_EN_EXACT = {
     "예제 사각형": "Example Rectangle",
     "G-code 생성": "Generate G-code",
     "G-code 저장": "Save G-code",
+    "경로 허용오차 (mm)": "Path tolerance (mm)",
+    "포켓 연속 가공": "Stay down within pocket",
     "안전 Z 자동: 판 두께 × 2": "Auto Safe Z: stock thickness x 2",
     "급속 접근 여유 (mm)": "Rapid approach clearance (mm)",
     "급속 접근 여유는 0보다 크고 안전 Z 이하여야 합니다.": "Rapid approach clearance must be positive and no greater than Safe Z.",
@@ -1464,6 +1466,118 @@ def step_pocket_features(model:StepModel,component:int,matrix,top_z:float,stock:
     return result
 
 
+def path_tolerance(cfg:dict) -> float:
+    value=float(cfg.get("path_tolerance",.02))
+    if not math.isfinite(value) or not 0<=value<=.1:
+        raise ValueError("Path tolerance must be between 0 and 0.1 mm (0 disables simplification).")
+    return value
+
+
+def simplify_cut_path(points:Sequence[Point],tolerance:float) -> List[Point]:
+    """Bounded chord simplification; retain endpoints and turns >= 10 degrees."""
+    from shapely.geometry import LineString,Polygon
+    pts=list(points)
+    if tolerance<=0 or len(pts)<4:return pts
+    anchors=[0]
+    for i in range(1,len(pts)-1):
+        a,b,d=pts[i-1],pts[i],pts[i+1]
+        u=(b[0]-a[0],b[1]-a[1]);v=(d[0]-b[0],d[1]-b[1])
+        if math.atan2(abs(u[0]*v[1]-u[1]*v[0]),u[0]*v[0]+u[1]*v[1])>=math.radians(10):anchors.append(i)
+    anchors.append(len(pts)-1);out=[pts[0]]
+    for a,b in zip(anchors,anchors[1:]):
+        part=pts[a:b+1]
+        out.extend(list(LineString(part).simplify(tolerance,preserve_topology=False).coords)[1:])
+    if pts[0]==pts[-1] and (len(out)<4 or not Polygon(out).is_valid):return pts
+    return out if len(out)<len(pts) else pts
+
+
+def cut_xyz_lines(points:Sequence[Point3],feed:float,tolerance:float) -> List[str]:
+    """Simplify only constant-Z runs; retain every tab/ramp transition."""
+    pts=list(points);out=[];i=0
+    while i<len(pts)-1:
+        j=i+1
+        if abs(pts[j][2]-pts[i][2])<EPS:
+            while j+1<len(pts) and abs(pts[j+1][2]-pts[i][2])<EPS:j+=1
+            xy=simplify_cut_path([(p[0],p[1]) for p in pts[i:j+1]],tolerance)
+            out.extend(f"G1 X{fmt(x)} Y{fmt(y)} Z{fmt(pts[i][2])} F{fmt(feed)}" for x,y in xy[1:])
+        else:
+            p=pts[j];out.append(f"G1 X{fmt(p[0])} Y{fmt(p[1])} Z{fmt(p[2])} F{fmt(feed)}")
+        i=j
+    return out
+
+
+def pocket_free_area(c:Contour,tool_d:float):
+    from shapely.geometry import Polygon
+    stock=Polygon(c.pocket_stock)
+    return Polygon(c.points,c.pocket_holes).union(stock.buffer(tool_d,quad_segs=32).difference(stock))
+
+
+def pocket_link_schedule(c:Contour,rough,finish,tool_d:float,cfg:dict):
+    """G1 links along a completed ring then one bounded adjacent step.
+
+    Each entry is (label, closed route, link from previous route or None).
+    Long links require already-cleared cutter coverage; islands are protected.
+    """
+    from shapely.geometry import LineString,Polygon,Point as ShapelyPoint
+    from shapely.ops import nearest_points
+    free=pocket_free_area(c,tool_d);r=tool_d/2
+    max_step=tool_d*float(cfg.get("pocket_stepover",40))/100+.0001
+    schedule=[];previous=None;cleared=Polygon()
+    for label,paths in (("rough",rough),("finish",finish)):
+        remaining=[list(p) for p in paths]
+        while remaining:
+            candidates=[]
+            if previous is not None and cfg.get("pocket_stay_down",True):
+                prevline=LineString(previous+[previous[0]])
+                for idx,route in enumerate(remaining):
+                    a,b=nearest_points(prevline,LineString(route+[route[0]]))
+                    pa=(a.x,a.y);pb=(b.x,b.y)
+                    options=[]
+                    for walk in (previous,[previous[0]]+list(reversed(previous[1:]))):
+                        s=nearest_path_distance(walk,pa,True)[1]
+                        prefix=[walk[0]];length=0.0
+                        for u,v in zip(walk,walk[1:]+walk[:1]):
+                            segment=dist(u,v)
+                            if length+segment>=s-EPS:break
+                            prefix.append(v);length+=segment
+                        prefix.extend([pa,pb]);options.append((prefix,pa,pb))
+                    _,near=nearest_points(ShapelyPoint(previous[0]),LineString(route+[route[0]]))
+                    direct=(near.x,near.y)
+                    options.append(([previous[0],direct],previous[0],direct))
+                    for prefix,pa,pb in options:
+                        prefix=clean_points(prefix,False)
+                        if len(prefix)<2:prefix=[previous[0],pb]
+                        swept=LineString(prefix).buffer(r,quad_segs=32)
+                        gap=dist(pa,pb);adjacent=gap<=max_step
+                        # Long travel must be cleared except the final stepover.
+                        cleared_link=False
+                        if not adjacent:
+                            fraction=(gap-max_step)/gap
+                            stop=(pa[0]+(pb[0]-pa[0])*fraction,pa[1]+(pb[1]-pa[1])*fraction)
+                            travel=LineString([pa,stop]).buffer(r,quad_segs=32)
+                            cleared_link=travel.difference(cleared.buffer(.0002)).area<=1e-5
+                        if (free.buffer(.0001).covers(swept) and (adjacent or cleared_link)):
+                            rotated=rotate_closed_path(route,nearest_path_distance(route,pb,True)[1])
+                            candidates.append((path_length(prefix,False),idx,rotated,prefix))
+            if candidates:
+                _,idx,route,link=min(candidates,key=lambda q:q[0]);remaining.pop(idx)
+            else:
+                idx=0 if previous is None else min(range(len(remaining)),key=lambda i:dist(previous[0],remaining[i][0]))
+                route=remaining.pop(idx);link=None
+            schedule.append((label,route,link))
+            cleared=cleared.union(LineString(route+[route[0]]).buffer(r,quad_segs=32))
+            if link:cleared=cleared.union(LineString(link).buffer(r,quad_segs=32))
+            previous=route
+    # The next depth starts only after connecting through this fully cleared layer.
+    level_link=None
+    if schedule and cfg.get("pocket_stay_down",True):
+        candidate=[schedule[-1][1][0],schedule[0][1][0]]
+        sweep=LineString(candidate).buffer(r,quad_segs=32)
+        if (free.buffer(.0001).covers(sweep) and
+                sweep.difference(cleared.buffer(.0002)).area<=1e-5):level_link=candidate
+    return schedule,level_link
+
+
 def validate_pocket(c:Contour,cfg:dict) -> None:
     depth=c.target_depth
     if depth is None or not math.isfinite(depth) or depth<=0 or c.pocket_max_depth is None or depth>c.pocket_max_depth+EPS:
@@ -1479,7 +1593,7 @@ def validate_pocket(c:Contour,cfg:dict) -> None:
 
 
 def pocket_plan(c:Contour,tool_d:float,cfg:dict):
-    """Independent closed offsets; every connection retracts above stock."""
+    """Protected closed offsets; optional verified stay-down connections."""
     from shapely.geometry import Polygon,LineString
     from shapely import union_all
     validate_pocket(c,cfg)
@@ -1501,6 +1615,9 @@ def pocket_plan(c:Contour,tool_d:float,cfg:dict):
             for j,ring in enumerate(rings):
                 pts=list(ring.coords)[:-1]
                 if len(pts)>=3:
+                    candidate=simplify_cut_path(pts+[pts[0]],path_tolerance(cfg))[:-1]
+                    if free.buffer(.0001).covers(LineString(candidate+[candidate[0]]).buffer(r,quad_segs=32)):
+                        pts=candidate
                     paths.append(reverse_if_needed(pts,(j==0)==bool(cfg.get("climb",True))))
         return paths
     rough=[];level=center.buffer(-allowance,quad_segs=32) if allowance else center
@@ -1516,6 +1633,7 @@ def pocket_plan(c:Contour,tool_d:float,cfg:dict):
         raise ValueError("Pocket cutter sweep intersects protected material.")
     reachable=center.buffer(r,quad_segs=32).intersection(area)
     if reachable.difference(swept.buffer(.002)).area>.01:
+        if path_tolerance(cfg)>0:return pocket_plan(c,tool_d,dict(cfg,path_tolerance=0))
         raise ValueError("Pocket offsets leave reachable material; reduce stepover or finish allowance.")
     residual=area.difference(swept).area
     return rough,finish,residual
@@ -1531,7 +1649,10 @@ def pocket_job_issues(contours:Sequence[Contour],cfg:dict) -> List[str]:
         try:
             rough,finish,_=pocket_plan(c,cfg["tool_d"],cfg)
             stock=Polygon(c.pocket_stock)
-            swept=union_all([LineString(p+[p[0]]).buffer(cfg["tool_d"]/2,quad_segs=32) for p in rough+finish])
+            schedule,level_link=pocket_link_schedule(c,rough,finish,cfg["tool_d"],cfg)
+            lines=[p+[p[0]] for _,p,_ in schedule]+[link for _,_,link in schedule if link]
+            if level_link:lines.append(level_link)
+            swept=union_all([LineString(p).buffer(cfg["tool_d"]/2,quad_segs=32) for p in lines])
             for other in contours:
                 if other.operation=="pocket" or not other.closed or other.role!="outer":continue
                 material=Polygon(other.points)
@@ -2292,9 +2413,18 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
     if c.operation=="pocket":
         rough,finish,_=pocket_plan(c,tool_d,cfg)
         passes=max(1,math.ceil(c.target_depth/float(cfg.get("pocket_stepdown",.25))))
-        rough_mm=sum(path_length(p,True) for p in rough)*passes
-        finish_mm=sum(path_length(p,True) for p in finish)*passes
-        plunge=sum(rapid_approach_clearance(cfg)+c.target_depth*i/passes for i in range(1,passes+1))*(len(rough)+len(finish))/cfg["plunge"]
+        schedule,level_link=pocket_link_schedule(c,rough,finish,tool_d,cfg)
+        rough_mm=sum(path_length(p,True)+(path_length(link,False) if link else 0)
+                     for label,p,link in schedule if label=="rough")*passes
+        finish_mm=sum(path_length(p,True)+(path_length(link,False) if link else 0)
+                      for label,p,link in schedule if label=="finish")*passes
+        if level_link:rough_mm+=path_length(level_link,False)*(passes-1)
+        starts=sum(link is None for _,_,link in schedule)
+        plunge_mm=sum(rapid_approach_clearance(cfg)+c.target_depth*i/passes for i in range(1,passes+1))*starts
+        if level_link:
+            plunge_mm-=sum(rapid_approach_clearance(cfg)+c.target_depth*i/passes for i in range(2,passes+1))
+            plunge_mm+=c.target_depth/passes*(passes-1)
+        plunge=plunge_mm/cfg["plunge"]
         return rough_mm+finish_mm,rough_mm/cfg["feed"]+finish_mm/(cfg["feed"]*.8),plunge
     passes=1 if cfg["full_depth"] else max(1,cfg["passes"])
     target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
@@ -2657,6 +2787,8 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(XY_ORIGIN_MODE: {nc_ascii_text(cfg.get('xy_origin','DXF origin')).upper()})",
         f"(XY_ORIGIN_SOURCE_X_MM: {fmt(float(origin[0]))})",
         f"(XY_ORIGIN_SOURCE_Y_MM: {fmt(float(origin[1]))})",
+        f"(PATH_TOLERANCE_MM: {fmt(path_tolerance(cfg))})",
+        f"(POCKET_STAY_DOWN: {nc_yes_no(cfg.get('pocket_stay_down',True))})",
         f"(SAFE_Z_AUTO_STOCK_X2: {nc_yes_no(cfg.get('safe_z_auto',False))})",
         f"(RAPID_APPROACH_CLEARANCE_MM: {fmt(rapid_approach_clearance(cfg))})",
         f"(SAFE_Z_CLEARANCE_MM: {fmt(float(cfg['safe_z']))})",
@@ -2741,6 +2873,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         if progress:progress(value,message)
     report(2,"G-code 설정 준비 중")
     cfg=resolved_z_config(cfg)
+    tolerance=path_tolerance(cfg)
     validate_preflight(cfg)
     pocket_errors=pocket_job_issues(contours,cfg)
     if pocket_errors:raise ValueError("\n".join(pocket_errors))
@@ -2832,12 +2965,13 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             elif lead!=p0:dst.append(f"G1 X{fmt(p0[0])} Y{fmt(p0[1])} F{fmt(feed)}")
             if c.closed:
                 events=toolpath_with_events(shifted,active_tabs,tab_flat,cfg["tab_ramp"])
+                xyz=[(p0[0],p0[1],start_z)]
                 for p,s in events[1:]:
                     z=z_for_distance(s%total if total else 0,total,active_tabs,depth,
                                      machine_z(stock-cfg["tab_remain"]),tab_flat,cfg["tab_ramp"])
-                    dst.append(f"G1 X{fmt(p[0])} Y{fmt(p[1])} Z{fmt(z)} F{fmt(feed)}")
-            else:
-                for p in shifted[1:]:dst.append(f"G1 X{fmt(p[0])} Y{fmt(p[1])} F{fmt(feed)}")
+                    xyz.append((p[0],p[1],z))
+                dst.extend(cut_xyz_lines(xyz,feed,tolerance))
+            else:dst.extend(cut_xyz_lines([(x,y,start_z) for x,y in shifted],feed,tolerance))
             if pi!=len(depths):dst.extend((f"G0 Z{fmt(safe_machine_z)}",f"G0 X{fmt(lead[0])} Y{fmt(lead[1])}"))
         if c.closed and cfg["lead"]>0:
             if center is not None:
@@ -2878,17 +3012,24 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             rough,finish,residual=pocket_plan(c,effective_d,cfg)
             out.append(f"(ISLAND POCKET {ci}: depth={fmt(target)}, residual_mm2={fmt(residual)})")
             count=max(1,math.ceil(target/float(cfg.get("pocket_stepdown",.25))))
+            schedule,level_link=pocket_link_schedule(c,rough,finish,effective_d,cfg)
             for level in range(1,count+1):
                 z=machine_z(target*level/count)
-                for label,paths,feed in (("rough",rough,cfg["feed"]),("finish",finish,cfg["feed"]*.8)):
-                    for route in paths:
-                        points=[(x-origin_x,y-origin_y) for x,y in route]
-                        out.extend([f"(Pocket {label} pass {level}/{count})",f"G0 Z{fmt(safe_machine_z)}",
-                                    f"G0 X{fmt(points[0][0])} Y{fmt(points[0][1])}",
+                for index,(label,route,link) in enumerate(schedule):
+                    feed=cfg["feed"] if label=="rough" else cfg["feed"]*.8
+                    points=[(x-origin_x,y-origin_y) for x,y in route]
+                    out.append(f"(Pocket {label} pass {level}/{count})")
+                    connection=level_link if index==0 and level>1 else link
+                    if connection is None:
+                        out.extend([f"G0 Z{fmt(safe_machine_z)}",f"G0 X{fmt(points[0][0])} Y{fmt(points[0][1])}",
                                     f"G0 Z{fmt(approach_machine_z)}",f"G1 Z{fmt(z)} F{fmt(cfg['plunge'])}"])
-                        for x,y in points[1:]+points[:1]:out.append(f"G1 X{fmt(x)} Y{fmt(y)} F{fmt(feed)}")
-                        out.append(f"G0 Z{fmt(safe_machine_z)}")
-                        current_xy=route[0]
+                    else:
+                        out.append("(Pocket stay-down link)")
+                        for x,y in connection[1:]:out.append(f"G1 X{fmt(x-origin_x)} Y{fmt(y-origin_y)} F{fmt(feed)}")
+                        if index==0:out.append(f"G1 Z{fmt(z)} F{fmt(cfg['plunge'])}")
+                    for x,y in points[1:]+points[:1]:out.append(f"G1 X{fmt(x)} Y{fmt(y)} F{fmt(feed)}")
+                    current_xy=route[0]
+            out.append(f"G0 Z{fmt(safe_machine_z)}")
             continue
         if c.closed:
             if c.start_s>EPS:
@@ -4356,6 +4497,7 @@ class App(tk.Tk):
             ("판 두께 (mm)", "stock", 3.0), ("관통 여유 (mm)", "extra", 0.1),
             ("안전 Z (mm)", "safe_z", 6.0), ("Lead in/out (mm)", "lead", 1.0),
             ("급속 접근 여유 (mm)", "approach_z", 1.0),
+            ("경로 허용오차 (mm)", "path_tolerance", .02),
             ("패스 수", "passes", 1),
         ]
         for r, (label, key, val) in enumerate(rows):
@@ -4376,6 +4518,8 @@ class App(tk.Tk):
                                 ("프리뷰 속도 (mm/min)","preflight_feed",1000.0)):
             ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w")
             ttk.Entry(controls,width=12,textvariable=self.var(key,value)).grid(row=r,column=1,padx=5);r+=1
+        self.var("pocket_stay_down",True,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="포켓 연속 가공",variable=self.vars["pocket_stay_down"]).grid(row=r,columnspan=2,sticky="w");r+=1
         self.var("step_pockets",True,tk.BooleanVar)
         for label,key,value in (("포켓 스텝오버 (%)","pocket_stepover",40.0),
                                 ("포켓 패스 깊이 (mm)","pocket_stepdown",.25),
@@ -4432,9 +4576,9 @@ class App(tk.Tk):
                               ("G53 주차 Z","machine_park_z",-2.0)):
             ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w",pady=2)
             ttk.Entry(controls,width=12,textvariable=self.var(key,val)).grid(row=r,column=1,padx=5);r+=1
-        self.var("wall_finish",True,tk.BooleanVar)
+        self.var("wall_finish",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="황삭 측면여유 → 벽면 정삭",variable=self.vars["wall_finish"],command=self.redraw).grid(row=r,columnspan=2,sticky="w",pady=(4,1));r+=1
-        self.var("onion_skin_enabled",True,tk.BooleanVar)
+        self.var("onion_skin_enabled",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="외곽 관통부 어니언스킨",variable=self.vars["onion_skin_enabled"],command=self.redraw).grid(row=r,columnspan=2,sticky="w");r+=1
         ttk.Label(controls,text="정삭 적용 범위").grid(row=r,column=0,sticky="w",pady=2)
         self.var("finish_scope","전체",tk.StringVar)
@@ -4678,6 +4822,7 @@ class App(tk.Tk):
             raise ValueError("공구, 판 두께, RPM, Feed, Plunge, 안전 Z는 0보다 커야 합니다.")
         validate_preflight(cfg)
         rapid_approach_clearance(cfg)
+        path_tolerance(cfg)
         if cfg["passes"] < 1:
             raise ValueError("패스 수는 1 이상이어야 합니다.")
         if (cfg["lead"] < 0 or cfg["tab_count"] < 0 or cfg["tab_flat"] < 0 or
@@ -4708,7 +4853,7 @@ class App(tk.Tk):
     def job_signature(self,cfg:dict):
         machining_keys=("tool_d","tool_wear_enabled","tool_wear_loss_per_100m","tool_wear_min_d",
                         "rpm","feed","plunge","stock","extra","safe_z","safe_z_auto","approach_z","lead","passes",
-                        "preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
+                        "path_tolerance","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
                         "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim","accum_distance_m",
@@ -4755,6 +4900,9 @@ class App(tk.Tk):
                     start_code=DEFAULT_START_CODE
                     if abs(float(data.get("vars",{}).get("safe_z",10.0))-3.0)<EPS:self.vars["safe_z"].set(10.0)
                 self.start_text.delete("1.0","end");self.start_text.insert("1.0",start_code)
+            if newer_version("1.19",str(data.get("version","0"))):
+                for key in ("wall_finish","onion_skin_enabled"):
+                    if key in self.vars:self.vars[key].set(False)
             self.sync_safe_z()
             if "end_code" in data:
                 end_code=str(data["end_code"]).strip()
@@ -6038,7 +6186,7 @@ class App(tk.Tk):
                 if id(c) not in visible_ids: continue
                 if c.operation=="pocket":
                     try:
-                        pocket_cfg={k:self.vars[k].get() for k in ("pocket_stepover","pocket_stepdown","pocket_finish","climb")}
+                        pocket_cfg={k:self.vars[k].get() for k in ("pocket_stepover","pocket_stepdown","pocket_finish","climb","path_tolerance","pocket_stay_down")}
                         rough,finish,_=pocket_plan(c,preview_radius*2,pocket_cfg)
                         for route in rough+finish:
                             xy=[v for p in route+[route[0]] for v in self.transform(p)]

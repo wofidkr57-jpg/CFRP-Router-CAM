@@ -55,7 +55,8 @@ class IslandPocketTests(unittest.TestCase):
             if movement.rapid and movement.start[:2]!=movement.end[:2]:
                 self.assertGreaterEqual(movement.start[2],5)
                 self.assertGreaterEqual(movement.end[2],5)
-        self.assertEqual(section.count('G0 Z5'),2*len(plunges))
+        self.assertLessEqual(section.count('G0 Z5'),len(plunges)+1)
+        self.assertIn('Pocket stay-down link',section)
     def test_bottom_and_xy_origin(self):
         c=pocket();code=cam.generate_gcode([c],cfg(z_origin='Bottom',_xy_origin_override=(7,9)))
         self.assertIn('G1 Z2.75',code);self.assertIn('G1 Z2.5',code);self.assertIn('G0 Z8',code)
@@ -81,7 +82,11 @@ class IslandPocketTests(unittest.TestCase):
     def test_metrics_include_all_pocket_paths(self):
         c=pocket();r,f,_=cam.pocket_plan(c,2,cfg())
         mm,mins,plunge=cam.contour_cut_metrics(c,cfg(),3,.1,2)
-        self.assertAlmostEqual(mm,sum(cam.path_length(p,True) for p in r+f)*2)
+        self.assertGreaterEqual(mm,sum(cam.path_length(p,True) for p in r+f)*2)
+        code=cam.generate_gcode([c],cfg())
+        emitted=sum(math.hypot(m.end[0]-m.start[0],m.end[1]-m.start[1])
+                    for m in cam.parse_gcode_moves(code) if not m.rapid)
+        self.assertAlmostEqual(mm,emitted,delta=.05)
         self.assertGreater(plunge,0);self.assertGreater(mins,0)
     def test_pocket_does_not_change_profile_classification(self):
         c=pocket();outer=cam.Contour(c.pocket_stock)

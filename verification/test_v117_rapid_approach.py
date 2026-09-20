@@ -46,7 +46,7 @@ class RapidApproachTests(unittest.TestCase):
 
     def test_pocket_every_loop_and_level(self):
         for origin in ('Top','Bottom'):
-            cfg=self.cfg(z_origin=origin,stock=3,pocket_stepover=40,pocket_stepdown=.25,pocket_finish=.1)
+            cfg=self.cfg(z_origin=origin,stock=3,pocket_stepover=40,pocket_stepdown=.25,pocket_finish=.1,pocket_stay_down=False)
             self.check_moves([pocket()],cfg)
 
     def test_open_profile_and_custom_clearance(self):

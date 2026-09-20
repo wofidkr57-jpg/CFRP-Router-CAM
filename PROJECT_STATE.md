@@ -4,7 +4,7 @@
 - 저장소: `wofidkr57-jpg/CFRP-Router-CAM`
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
-- 현재 애플리케이션 소스 버전: **V1.18**
+- 현재 애플리케이션 소스 버전: **V1.19**
 - 배포 상태: V1.18 Windows 회귀62개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료. 사용자 PC의 백신 탐지 여부는 별도 확인 필요.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
@@ -276,3 +276,12 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - 소스 blob `f262eb34f28e9e01429895674385ea713d633928`, 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.18
 - v1.11~v1.18 릴리스별 EXE와 소스 ZIP 존재 확인. 최신 자동 업데이트1.18.
 - 다음 작업: 사용자 PC에서 두께3mm/BOTTOM 안전Z9·접근Z4 확인 후 공중 운전. 실가공 검증 전.
+
+## 17. V1.19 — 가공 기본값/선분 축소/포켓 연속
+- wall_finish/onion_skin_enabled 기본OFF와 기존<=1.18 설정의 1회 OFF 전환. 새 버전 명시 선택은 유지.
+- path_tolerance 기본.02mm/0~.1mm. 일정Z 구간을 Douglas-Peucker 단순화하되 10도 이상 코너/탭Z변화 보존. 원호 신규복원은 아님. 포켓은 공구스윕/잔삭검증 통과하는 단순화만 채택.
+- pocket_stay_down 기본ON. 이전 경로의 정/역방향 기가공 구간 또는 직접 연결을 비교해 짧은 경로 선택. 인접 스텝오버 및 기가공영역 제약/양각 보호/타부품 공구스윕 검증. 다음층도 기가공영역 통과 가능한 경우만 연속절입.
+- 회귀69개 통과. dense 원형360선분→104선분, 최대 경로편차.02mm 범위 검사. 코너/탭/설정이관/분리포켓/실제 NC 좌표 공구스윕/연속깊이 검사 포함.
+- 로컬 BATT STEP 포켓 예: G0 Z 명령71→11, stay-down 연결30회. 단순 이동 시뮬레이션은279.4→295.2초로 증가(기가공 구간 G1 재이동 영향). 실제 가감속과 CV 미반영이므로 실가공 속도 개선을 단정하지 않음.
+- Mach3 공식 CV 설명 확인: https://www.machsupport.com/wp-content/uploads/2013/02/Mach3_CVSettings_v2.pdf . 실제 사용자 Mach3 설정/모션컨트롤러 미확인, CV값/가감속 변경하지 않음.
+- 고객 STEP/NC 비공개 유지. Windows GUI/EXE/Defender/릴리스 결과 대기. 이후 사용자 NC 재생성·공중운전/실기 비교 필요.
