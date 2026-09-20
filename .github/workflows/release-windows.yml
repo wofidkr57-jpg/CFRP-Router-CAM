@@ -129,7 +129,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "어니언스킨·벽면정삭 기본OFF, 경로 허용오차와 포켓 연속 가공을 추가했습니다."
+            message = "경로 허용오차 기본값을 0.01mm로 변경했습니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 

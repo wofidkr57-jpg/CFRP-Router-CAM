@@ -32,6 +32,17 @@ class SmoothPathTests(unittest.TestCase):
             with self.assertRaises(ValueError):cam.path_tolerance({'path_tolerance':value})
 
 class DefaultMigrationTests(unittest.TestCase):
+    def test_tolerance_default_migration_preserves_custom_values(self):
+        self.assertEqual(cam.path_tolerance({}),.01)
+        for version,value,expected in (("1.19",.02,.01),("1.19",0,0),("1.19",.05,.05),("1.20",.02,.02)):
+            with self.subTest(version=version,value=value),tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp)/"settings.json"
+                path.write_text(json.dumps({'version':version,'vars':{'path_tolerance':value}}))
+                app=SettingsHarness(tmp,Path(tmp)/'fallback.json')
+                app.vars['path_tolerance']=FakeVar(.01)
+                app.load_settings()
+                self.assertEqual(app.vars['path_tolerance'].get(),expected)
+
     def test_old_defaults_off_new_explicit_choices_retained(self):
         for version,expected in (("1.18",False),("1.19",True)):
             with tempfile.TemporaryDirectory() as tmp:

@@ -4,8 +4,8 @@
 - 저장소: `wofidkr57-jpg/CFRP-Router-CAM`
 - 공개 범위: **공개 저장소(기존 운영 상태 유지)**
 - 기본 브랜치: `main`
-- 현재 애플리케이션 소스 버전: **V1.19**
-- 배포 상태: V1.19 Windows 회귀69개·GUI6회·EXE 빌드·Defender 실검사·릴리스 완료. 사용자 PC의 백신 탐지 여부는 별도 확인 필요.
+- 현재 애플리케이션 소스 버전: **V1.20**
+- 배포 상태: V1.20 검증 및 릴리스 진행 중.
 - V1.11 코드 기준 커밋: `75df745841c890911ac94e945b7f77b8cd94f6fe`
 - V1.11 업데이트 매니페스트 기준 커밋: `4ad0c9e44d3fad34305d36e58947cce873c36df5`
 - 이 문서는 클라우드 채팅과 여러 로컬 PC가 같은 작업 상태를 이어받기 위한 정본이다.
@@ -293,3 +293,7 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - Defender `found no threats`, 두 EXE와 latest.json SHA-256 일치 `af335a6206e346c6a1469e4f2c0a92423d81adbf6f8dbb08fd743ab6f74f0a6b`.
 - 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.19
 - 다음 작업: NC 재생성 후 3D 연결/탭/양각 검사와 공중 운전, 사용자 Mach3 CV·LookAhead·가감속 설정 확인. 실가공 및 사용자 PC 백신 판정은 미확인.
+
+## 18. V1.20 — 경로 허용오차 기본0.01mm
+- UI/NC fallback 기본0.01mm. V1.19 이하 저장값0.02만 0.01로 전환, 기타 지정값과 V1.20 설정 유지.
+- 회귀 및 Windows GUI/EXE/Defender/릴리스 확인 예정. 실제 CNC 검증 전.

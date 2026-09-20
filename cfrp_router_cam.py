@@ -53,7 +53,7 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
-APP_VERSION = "1.19"
+APP_VERSION = "1.20"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -1467,7 +1467,7 @@ def step_pocket_features(model:StepModel,component:int,matrix,top_z:float,stock:
 
 
 def path_tolerance(cfg:dict) -> float:
-    value=float(cfg.get("path_tolerance",.02))
+    value=float(cfg.get("path_tolerance",.01))
     if not math.isfinite(value) or not 0<=value<=.1:
         raise ValueError("Path tolerance must be between 0 and 0.1 mm (0 disables simplification).")
     return value
@@ -4497,7 +4497,7 @@ class App(tk.Tk):
             ("판 두께 (mm)", "stock", 3.0), ("관통 여유 (mm)", "extra", 0.1),
             ("안전 Z (mm)", "safe_z", 6.0), ("Lead in/out (mm)", "lead", 1.0),
             ("급속 접근 여유 (mm)", "approach_z", 1.0),
-            ("경로 허용오차 (mm)", "path_tolerance", .02),
+            ("경로 허용오차 (mm)", "path_tolerance", .01),
             ("패스 수", "passes", 1),
         ]
         for r, (label, key, val) in enumerate(rows):
@@ -4903,6 +4903,11 @@ class App(tk.Tk):
             if newer_version("1.19",str(data.get("version","0"))):
                 for key in ("wall_finish","onion_skin_enabled"):
                     if key in self.vars:self.vars[key].set(False)
+            # Adopt the new default for the previous default only; retain custom values.
+            if newer_version("1.20",str(data.get("version","0"))):
+                old_tolerance=data.get("vars",{}).get("path_tolerance")
+                if old_tolerance is not None and abs(float(old_tolerance)-.02)<EPS:
+                    if "path_tolerance" in self.vars:self.vars["path_tolerance"].set(.01)
             self.sync_safe_z()
             if "end_code" in data:
                 end_code=str(data["end_code"]).strip()

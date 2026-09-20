@@ -14,7 +14,7 @@ with tempfile.TemporaryDirectory() as folder:
     assert not app.vars['wall_finish'].get()
     assert not app.vars['onion_skin_enabled'].get()
     assert app.vars['pocket_stay_down'].get()
-    assert app.vars['path_tolerance'].get()==.02
+    assert app.vars['path_tolerance'].get()==.01
     stock=[(0,0),(40,0),(40,30),(0,30)]
     island=[(15,10),(25,10),(25,20),(15,20)]
     c=cam.Contour(stock,operation='pocket',role='pocket',target_depth=.5,pocket_max_depth=.5,
