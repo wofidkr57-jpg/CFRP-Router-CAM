@@ -1,6 +1,6 @@
 {
-  "version": "1.20",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.20/CFRP_Router_CAM.exe",
-  "sha256": "0c26d5a79c77c9fed99ee88ca934c272c75fa9b8eab6bbfb774d9321185e271f",
-  "message": "경로 허용오차 기본값을 0.01mm로 변경했습니다."
+  "version": "1.21",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.21/CFRP_Router_CAM.exe",
+  "sha256": "fc52d8703d9a7d7bc3ef44cc7a895c30c70e1cab7b4698bda10c6adfac175a5b",
+  "message": "3D 시뮬레이션 전환 속도를 개선하고 8m 공구 경고와 10m G-code 생성 차단을 추가했습니다."
 }
