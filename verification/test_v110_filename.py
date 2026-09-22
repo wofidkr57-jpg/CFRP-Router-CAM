@@ -29,12 +29,12 @@ class ThicknessFilenameTests(unittest.TestCase):
                                          datetime(2026, 8, 31))
         self.assertEqual(name, "260831_2.0endmill_T3.0_panel_1_35min.nc")
         self.assertEqual(cam.split_gcode_paths(name), (
-            "260831_2.0endmill_T3.0_panel_1_35min_PART1.nc",
-            "260831_2.0endmill_T3.0_panel_1_35min_PART2.nc",
+            "260831_2.0endmill_T3.0_panel_1_35min_ROUGH.nc",
+            "260831_2.0endmill_T3.0_panel_1_35min_FINISH.nc",
         ))
         self.assertEqual(cam.split_gcode_paths(name, (12.4, 22.6)), (
-            "260831_2.0endmill_T3.0_panel_1_12min_PART1.nc",
-            "260831_2.0endmill_T3.0_panel_1_23min_PART2.nc",
+            "260831_2.0endmill_T3.0_panel_1_12min_ROUGH.nc",
+            "260831_2.0endmill_T3.0_panel_1_23min_FINISH.nc",
         ))
 
     def test_disabled_instances_do_not_increase_quantity(self):
@@ -74,8 +74,8 @@ class ThicknessFilenameTests(unittest.TestCase):
                     self.assertIn("_T4.5_", path.name)
                     self.assertEqual(path.read_text(encoding="ascii"), "G21\nM30\n")
                 if split:
-                    self.assertTrue(paths[0].name.endswith("_12min_PART1.nc"))
-                    self.assertTrue(paths[1].name.endswith("_23min_PART2.nc"))
+                    self.assertTrue(paths[0].name.endswith("_12min_ROUGH.nc"))
+                    self.assertTrue(paths[1].name.endswith("_23min_FINISH.nc"))
 
 
 if __name__ == "__main__":

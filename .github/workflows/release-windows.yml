@@ -70,6 +70,7 @@ jobs:
         shell: pwsh
         run: |
           python verification/gui_smoke_v114_enabled.py
+          python verification/gui_smoke_onion_split.py
           python verification/gui_smoke_v113_pocket.py
           python verification/gui_smoke_v108.py
           python verification/gui_smoke_v110_first_run.py ko
