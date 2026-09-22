@@ -3967,7 +3967,7 @@ class Toolpath3D(tk.Toplevel):
         self.zoom=1.0;self.panx=self.pany=0.0;self.drag=None;self.playing=False;self.sim_time=0.0
         self._last_tick=None;self._timeline_internal=False
         self.draw_job=None;self.move_items:List[Optional[int]]=[];self.depth_items:List[Optional[int]]=[]
-        self.rendered_done=0
+        self.rendered_done=0;self._scene_key=None
         self.speed=tk.DoubleVar(value=20.0);self.show_rapid=tk.BooleanVar(value=True)
         self.sim_mode=tk.StringVar(value="깊이맵")
         self.total_time=sum(m.seconds for m in moves);self.cumulative=[];run=0.0
@@ -3994,6 +3994,8 @@ class Toolpath3D(tk.Toplevel):
         self.slider.pack(fill="x",padx=7,pady=(0,4))
         viewer=ttk.Frame(self);viewer.pack(fill="both",expand=True)
         self.legend=tk.Canvas(viewer,width=145,bg="#0d1217",highlightthickness=0)
+        # Keep the viewport size stable across mode switches (projection cache).
+        self.legend.pack(side="left",fill="y")
         self.legend.bind("<Configure>",lambda e:self.draw_depth_legend())
         self.canvas=tk.Canvas(viewer,bg="#11161c",highlightthickness=0);self.canvas.pack(side="left",fill="both",expand=True)
         self.canvas.bind("<Configure>",self.request_draw);self.canvas.bind("<ButtonPress-1>",self.rotate_start)
@@ -4052,10 +4054,9 @@ class Toolpath3D(tk.Toplevel):
     def mode_changed(self,*_):
         depth=self.sim_mode.get() in ("깊이맵","Depth map")
         if depth:
-            if not self.legend.winfo_manager():self.legend.pack(side="left",fill="y",before=self.canvas)
             self.rapid_check.state(["disabled"]);self.draw_depth_legend()
         else:
-            if self.legend.winfo_manager():self.legend.pack_forget()
+            self.legend.itemconfigure("all",state="hidden")
             self.rapid_check.state(["!disabled"])
         self.draw()
 
@@ -4153,6 +4154,8 @@ class Toolpath3D(tk.Toplevel):
             gap=1 if cell<14 else 4
             self.legend.create_rectangle(x0,y,x1,y+cell-gap,fill=color,outline="#d8e1e9",width=1)
             self.legend.create_text(x1+10,y+(cell-gap)/2,text=label,fill="#d8e1e9",anchor="w",font=label_font)
+        if self.sim_mode.get() not in ("깊이맵","Depth map"):
+            self.legend.itemconfigure("all",state="hidden")
     def tick(self):
         if not self.winfo_exists():return
         if self.playing:
@@ -4177,6 +4180,13 @@ class Toolpath3D(tk.Toplevel):
         return w/2+self.panx+x1*scale,h/2+self.pany-sy*scale
     def draw(self):
         if not self.moves or not self.winfo_exists():return
+        # Moves/cfg are fixed for this simulation window. Only a changed camera
+        # or viewport invalidates projected Canvas geometry, never display mode.
+        key=(self.az,self.el,self.zoom,self.panx,self.pany,
+             self.canvas.winfo_width(),self.canvas.winfo_height())
+        if getattr(self,"_scene_key",None)==key:
+            self._apply_mode_visibility();self.update_frame();return
+        self._scene_key=key
         self.canvas.delete("all");b=self.bounds;minx,miny,minz,maxx,maxy,maxz=b
         margin=max(maxx-minx,maxy-miny,1)*.04
         top=self.cfg["stock"] if self.cfg.get("z_origin")=="Bottom" else 0.0
@@ -4189,15 +4199,24 @@ class Toolpath3D(tk.Toplevel):
             self.canvas.create_line(*self.project(pb,b),*self.project(qb,b),fill="#46515a")
         path_mode=self.sim_mode.get() in ("공구경로","Toolpath");self.move_items=[]
         for m in self.moves:
-            if not path_mode or (m.rapid and not self.show_rapid.get()):self.move_items.append(None);continue
             item=self.canvas.create_line(*self.project(m.start,b),*self.project(m.end,b),
-                                         fill="#303841",dash=(3,4),width=1)
+                                         fill="#303841",dash=(3,4),width=1,
+                                         tags=("path_rapid" if m.rapid else "path_cut",))
             self.move_items.append(item)
         self.depth_items=[None]*len(self.moves)
         self.depth_layer_tags={}
         legend="빨강: 절삭 · 회색 점선: 급속 · 노랑: 현재 공구" if path_mode else "왼쪽 색상: 제거 깊이 · 검정: 관통 · 밝은 노랑: 남은 탭"
-        self.canvas.create_text(12,12,text=legend,fill="#d9e2ea",anchor="nw")
-        self.rendered_done=0;self.update_frame()
+        self.canvas.create_text(12,12,text=legend,fill="#d9e2ea",anchor="nw",tags="mode_caption")
+        self.rendered_done=0;self._apply_mode_visibility();self.update_frame()
+
+    def _apply_mode_visibility(self):
+        path=self.sim_mode.get() in ("공구경로","Toolpath")
+        self.canvas.itemconfigure("path_cut",state="normal" if path else "hidden")
+        self.canvas.itemconfigure("path_rapid",state="normal" if path and self.show_rapid.get() else "hidden")
+        self.canvas.itemconfigure("removed",state="hidden" if path else "normal")
+        self.canvas.itemconfigure("mode_caption",text=(
+            "빨강: 절삭 · 회색 점선: 급속 · 노랑: 현재 공구" if path else
+            "왼쪽 색상: 제거 깊이 · 검정: 관통 · 밝은 노랑: 남은 탭"))
 
     def _depth_style(self,m:Move3D)->Optional[Tuple[str,float,Tuple[float,float,float],Tuple[float,float,float]]]:
         if m.rapid:return None
@@ -4216,13 +4235,14 @@ class Toolpath3D(tk.Toplevel):
         return color,line_width,a,b
 
     def _add_depth_item(self,index:int):
-        if self.sim_mode.get() not in ("깊이맵","Depth map") or self.depth_items[index] is not None:return
+        if self.depth_items[index] is not None:return
         style=self._depth_style(self.moves[index])
         if style is None:return
         color,width,a,b=style
         depth=self.move_depth(self.moves[index]);depth_tag=self._depth_layer_tag(depth)
         item=self.canvas.create_line(*self.project(a,self.bounds),*self.project(b,self.bounds),
-                                     fill=color,width=width,capstyle="round",tags=("removed",depth_tag))
+                                     fill=color,width=width,capstyle="round",tags=("removed",depth_tag),
+                                     state="normal" if self.sim_mode.get() in ("깊이맵","Depth map") else "hidden")
         self.depth_items[index]=item
         path_item=self.move_items[index] if index<len(self.move_items) else None
         if path_item is not None:
