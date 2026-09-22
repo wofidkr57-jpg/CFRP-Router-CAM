@@ -151,8 +151,6 @@ _UI_EN_EXACT = {
     "정삭 Feed (%)": "Finish Feed (%)",
     "탭 형상": "Tab Shape",
     "탭 설정 / 배치": "Tab Settings / Placement",
-    "기존 누적거리 (m)": "Previous Accumulated Distance (m)",
-    "기존 누적시간 (분)": "Previous Accumulated Time (min)",
     "라인 복구 허용오차 (mm)": "Line Repair Tolerance (mm)",
     "끊긴 라인 복구": "Repair Broken Lines",
     "두 라인 선택 연결: OFF": "Join Two Lines: OFF",
@@ -277,7 +275,6 @@ _UI_EN_PHRASES = {
     "공구, 판 두께, RPM, Feed, Plunge, 안전 Z는 0보다 커야 합니다.": "Tool diameter, stock, RPM, feed, plunge and Safe Z must be greater than zero.",
     "관통 여유와 탭 잔여두께 값을 확인하세요.": "Check through allowance and tab remaining thickness.",
     "정삭 Feed는 0 초과 100% 이하로 설정하세요.": "Finish feed must be greater than 0% and no more than 100%.",
-    "누적 거리와 누적 시간은 음수가 될 수 없습니다.": "Accumulated distance and time cannot be negative.",
     "라인 복구 허용오차는 음수가 될 수 없습니다.": "Line repair tolerance cannot be negative.",
     "판재 X/Y 크기는 0보다 커야 합니다.": "Sheet X/Y dimensions must be greater than zero.",
     "최신 버전 확인 중...": "Checking for the latest version...",
@@ -2480,7 +2477,7 @@ def _gcode_route_worker(task)->Tuple[int,float,List[Point],int,float]:
 def prepare_gcode_routes(ordered:Sequence[Contour],cfg:dict,stock:float,extra:float,
                          progress:Optional[Callable[[float,str],None]]=None
                          )->List[Tuple[int,float,List[Point],int,float]]:
-    tasks=[];distance_m=float(cfg.get("accum_distance_m",0.0))
+    tasks=[];distance_m=float(cfg.get("_wear_distance_before_m",0.0))
     for ci,c in enumerate(ordered,1):
         tool_d,metrics=contour_wear_plan(c,cfg,stock,extra,distance_m)
         tasks.append((ci,c,cfg,stock,extra,tool_d));distance_m+=metrics[0]/1000.0
@@ -2767,7 +2764,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
     custom_text=",".join(fmt(value) for value in custom_depths) if custom_depths else "NONE"
     closed_count=sum(bool(c.closed) for c in active)
     safety_excluded=sum(bool(c.safety_excluded) for c in active)
-    accumulated=float(cfg.get("accum_distance_m",0.0))
+    accumulated=float(cfg.get("_wear_distance_before_m",0.0))
     wear_start=effective_tool_diameter(cfg,accumulated)
     wear_end=effective_tool_diameter(cfg,accumulated+max(0.0,float(job_cut_m)))
     return [
@@ -2836,8 +2833,6 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(ARRAY_REQUESTED_QTY: {int(cfg.get('array_qty',0))})",
         f"(ARRAY_ALLOW_90_DEG: {nc_yes_no(cfg.get('array_rotate'))})",
         f"(ARRAY_AUTO_ROTATE: {nc_yes_no(cfg.get('array_auto_rotate'))})",
-        f"(ACCUMULATED_BEFORE_JOB_M: {fmt(float(cfg.get('accum_distance_m',0.0)))})",
-        f"(ACCUMULATED_BEFORE_JOB_MIN: {fmt(float(cfg.get('accum_time_min',0.0)))})",
         "(----- CAM SETTINGS END -----)",
     ]
 
@@ -2932,7 +2927,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     while start_lines and (start_lines[0].strip()=="%" or re.fullmatch(r"O\d+",start_lines[0].strip(),re.IGNORECASE)):
         program_header.append(start_lines.pop(0))
     report(10,"가공 거리·시간 계산 중")
-    metres, minutes, total_metres, total_minutes = machining_report(
+    metres, minutes = machining_report(
         contours,cfg,lambda value,message:report(10+value*.08,message))
     job_label=nc_ascii_text(cfg.get("_job_label",""))
     job_note=nc_ascii_text(cfg.get("_job_note",""))
@@ -2940,8 +2935,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     settings_header=gcode_settings_header(cfg,active,(origin_x,origin_y),safe_machine_z,passes,metres)
     out = program_header+[f"(CFRP Router CAM V{APP_VERSION} - Mach3 post)", f"(XY origin mode: {nc_ascii_text(origin_mode)})"]+job_header+settings_header+[
            f"(This job cutting distance: {fmt(metres)} m)",
-           f"(This job estimated cutting time: {fmt(minutes)} min)",
-           f"(Accumulated after job: {fmt(total_metres)} m, {fmt(total_minutes)} min)"]+start_lines
+           f"(This job estimated cutting time: {fmt(minutes)} min)"]+start_lines
 
     out.extend(preflight_gcode(active,cfg,(origin_x,origin_y)))
     current_xy:Point=(origin_x,origin_y)
@@ -3088,14 +3082,14 @@ def generate_gcode(contours: List[Contour], cfg: dict,
 
 def machining_report(contours: List[Contour], cfg: dict,
                      progress:Optional[Callable[[float,str],None]]=None
-                     ) -> Tuple[float, float, float, float]:
-    """Return job metres/minutes and accumulated metres/minutes after this job."""
+                     ) -> Tuple[float, float]:
+    """Return the current job's cutting distance and estimated cutting time."""
     cut_mm=0.0;cut_min=0.0;plunge_min=0.0;stock=cfg["stock"]
     active=[x for x in contours if x.enabled]
     override=cfg.get("_xy_origin_override")
     origin=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
     ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin)
-    distance_m=float(cfg.get("accum_distance_m",0.0))
+    distance_m=float(cfg.get("_wear_distance_before_m",0.0))
     for report_index,c in enumerate(ordered,1):
         if progress:progress(report_index/max(len(active),1)*100.0,
                              f"가공 거리 계산 {report_index}/{len(active)}")
@@ -3103,7 +3097,7 @@ def machining_report(contours: List[Contour], cfg: dict,
         cut_mm+=metrics[0];cut_min+=metrics[1];plunge_min+=metrics[2]
         distance_m+=metrics[0]/1000.0
     cut_min+=plunge_min;job_m=cut_mm/1000.0
-    return (job_m,cut_min,cfg.get("accum_distance_m",0.0)+job_m,cfg.get("accum_time_min",0.0)+cut_min)
+    return job_m,cut_min
 
 
 @dataclass
@@ -4619,10 +4613,6 @@ class App(tk.Tk):
                               ("정삭 Feed (%)","finish_feed_pct",80.0)):
             ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w",pady=2)
             ttk.Entry(controls,width=12,textvariable=self.var(key,val)).grid(row=r,column=1,padx=5);r+=1
-        ttk.Label(controls, text="기존 누적거리 (m)").grid(row=r, column=0, sticky="w")
-        ttk.Entry(controls, width=12, textvariable=self.var("accum_distance_m", 0.0)).grid(row=r, column=1); r += 1
-        ttk.Label(controls, text="기존 누적시간 (분)").grid(row=r, column=0, sticky="w")
-        ttk.Entry(controls, width=12, textvariable=self.var("accum_time_min", 0.0)).grid(row=r, column=1); r += 1
         ttk.Label(controls, text="라인 복구 허용오차 (mm)").grid(row=r, column=0, sticky="w")
         ttk.Entry(controls, width=12, textvariable=self.var("gap_tol", 0.20)).grid(row=r, column=1); r += 1
         ttk.Button(controls, text="끊긴 라인 복구", command=self.heal_lines).grid(row=r, columnspan=2, sticky="ew", pady=2); r += 1
@@ -4868,8 +4858,6 @@ class App(tk.Tk):
             raise ValueError("공구 마모 감소량과 최소 가정 지름을 확인하세요.")
         if cfg["tool_wear_enabled"] and (cfg["tool_wear_loss_per_100m"]<=0 or cfg["tool_wear_min_d"]>cfg["tool_d"]):
             raise ValueError("공구 마모 보정 사용 시 감소량은 0보다 크게, 최소 지름은 공구 지름 이하로 입력하세요.")
-        if cfg["accum_distance_m"] < 0 or cfg["accum_time_min"] < 0:
-            raise ValueError("누적 거리와 누적 시간은 음수가 될 수 없습니다.")
         if cfg["gap_tol"] < 0:
             raise ValueError("라인 복구 허용오차는 음수가 될 수 없습니다.")
         if cfg["sheet_w"]<=0 or cfg["sheet_h"]<=0:
@@ -4886,8 +4874,8 @@ class App(tk.Tk):
                         "path_tolerance","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
                         "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
-                        "finish_allowance","finish_feed_pct","tab_shape","auto_trim","accum_distance_m",
-                        "accum_time_min","machine_home_enabled","machine_park_x","machine_park_y","machine_park_z",
+                        "finish_allowance","finish_feed_pct","tab_shape","auto_trim",
+                        "machine_home_enabled","machine_park_x","machine_park_y","machine_park_z",
                         "start_code","end_code")
         contour_key=tuple((tuple((round(x,7),round(y,7)) for x,y in c.points),c.closed,c.role,
                            tuple(round(s,7) for s in c.tabs),c.layer,c.target_depth,c.tabs_enabled,
@@ -6193,8 +6181,7 @@ class App(tk.Tk):
                     "tool_wear_loss_per_100m":self.vars["tool_wear_loss_per_100m"].get(),
                     "tool_wear_min_d":self.vars["tool_wear_min_d"].get(),
                 }
-                preview_radius=effective_tool_diameter(
-                    preview_cfg,self.vars["accum_distance_m"].get())/2
+                preview_radius=effective_tool_diameter(preview_cfg,0.0)/2
             except (tk.TclError, ValueError): preview_radius = 1.0
             auto_trim_value=bool(self.vars.get("auto_trim") and self.vars["auto_trim"].get())
             geometry_signature=hash(tuple((id(c),c.enabled,c.safety_excluded,c.closed,c.role,c.target_depth,
@@ -6488,7 +6475,7 @@ class App(tk.Tk):
             progress.set_progress(48,"G-code 공구경로 생성 중")
             if split_selected:
                 common_origin=work_origin_for_contours(active,cfg)
-                part1_m,part1_min,_,_=machining_report(part1,cfg)
+                part1_m,part1_min=machining_report(part1,cfg)
                 cfg1=dict(cfg);cfg1.update({
                     "_xy_origin_override":common_origin,
                     "_job_label":"PART1 OF 2 - SELECTED CONTOURS",
@@ -6497,9 +6484,8 @@ class App(tk.Tk):
                     "_xy_origin_override":common_origin,
                     "_job_label":"PART2 OF 2 - REMAINING CONTOURS",
                     "_job_note":"Before PART2: replace the end mill and re-zero Z only; do not change XY work zero.",
-                    "accum_distance_m":cfg.get("accum_distance_m",0.0)+part1_m,
-                    "accum_time_min":cfg.get("accum_time_min",0.0)+part1_min})
-                _,part2_min,_,_=machining_report(part2,cfg2)
+                    "_wear_distance_before_m":part1_m})
+                _,part2_min=machining_report(part2,cfg2)
                 code1=generate_gcode(
                     part1,cfg1,
                     lambda value,message:progress.set_progress(48+value*.25,f"PART1 · {message}") if progress else None)
@@ -6518,7 +6504,7 @@ class App(tk.Tk):
             self.gcode_split_mode=bool(split_selected)
             self.gcode_signature=requested_signature
             self.text.delete("1.0","end"); self.text.insert("1.0",self.gcode)
-            metres, minutes, total_m, total_min = machining_report(
+            metres, minutes = machining_report(
                 self.contours,cfg,
                 lambda value,message:progress.set_progress(98+value*.02,message) if progress else None)
             self.gcode_job_minutes=minutes
@@ -6528,7 +6514,7 @@ class App(tk.Tk):
             rapid_seconds=sum(m.seconds for m in simulation_moves if m.rapid)
             lead_note=f" | 리드인 중심 자동 {center_leads}개" if center_leads else ""
             split_note=(f" | PART1 {len(part1)}개 / PART2 {len(part2)}개" if split_selected else "")
-            self.status.set(f"이번 {metres:.3f}m / {minutes:.1f}분{split_note} | 급속 XY {rapid_mm/1000:.3f}m / {rapid_seconds:.1f}초 | 작업 후 누적 {total_m:.3f}m{lead_note}")
+            self.status.set(f"이번 {metres:.3f}m / {minutes:.1f}분{split_note} | 급속 XY {rapid_mm/1000:.3f}m / {rapid_seconds:.1f}초{lead_note}")
             progress.set_progress(100,"G-code 생성 완료")
         except Exception as exc:
             if progress:progress.close();progress=None
