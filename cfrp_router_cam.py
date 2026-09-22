@@ -80,6 +80,13 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "촘촘한 배열 (실제 윤곽 / 180° 엇갈림)": "Contour nesting (180 degree interlocking)",
+    "촘촘한 모드: 파츠별 외곽 여유 합산 · 빈칸은 공통 간격의 절반": "Contour mode: add part offsets; blank = half the common gap",
+    "외곽 여유 mm": "Offset mm",
+    "선택 파츠 외곽 여유 (mm)": "Selected part offset (mm)",
+    "여유 적용": "Apply offset",
+    "빈칸=공통 간격의 절반 · 촘촘한 배열 전용": "Blank = half common gap; contour nesting only",
+    "배치 취소": "Cancel nesting",
     "어니언스킨 황삭/정삭 파일 분리": "Onion skin: separate rough / finish files",
     "분리 시 바닥 잔여 (%)": "Split: remaining floor (%)",
     "분리: 전체 측면 정삭 · 마이크로탭 없음": "Split: all wall finishing, no microtabs",
@@ -614,6 +621,7 @@ class PartObject:
     # Parts selected from one multi-body STEP keep their original relative XY
     # placement while remaining independently selectable/arrayable.
     layout_group: str = ""
+    nest_offset: Optional[float] = None  # None inherits half the common array gap.
 
 
 @dataclass
@@ -1270,6 +1278,98 @@ def _split_free_rectangles(free_rects:Sequence[Tuple[float,float,float,float]],
                     contained=True;break
         if not contained:cleaned.append(r)
     return cleaned
+
+
+def nesting_offset(part:PartObject,gap:float)->float:
+    value=float(gap/2 if part.nest_offset is None else part.nest_offset)
+    if not math.isfinite(value) or value<0:raise ValueError("외곽 여유는 0 이상의 유한한 값이어야 합니다.")
+    return value
+
+
+def nesting_outline(part:PartObject):
+    """Material envelope: fill holes so another part cannot be placed inside one."""
+    from shapely.geometry import Polygon
+    from shapely import union_all
+    polygons=[]
+    for c in part.contours:
+        if not c.closed:raise ValueError(f"{part.name}: 촘촘한 배열은 닫힌 외곽이 필요합니다.")
+        polygon=Polygon(c.points)
+        if not polygon.is_valid or polygon.area<=EPS:
+            raise ValueError(f"{part.name}: 유효하지 않은 외곽입니다. 형상을 먼저 복구하세요.")
+        polygons.append(polygon)
+    if not polygons:raise ValueError(f"{part.name}: 배열할 외곽이 없습니다.")
+    return union_all(polygons)
+
+
+def best_contour_nesting(parts:Sequence[PartObject],stock_w:float,stock_h:float,gap:float,edge:float,
+                         angles:Sequence[float],progress=None)->Tuple[List[NestPlacement],Dict[int,int]]:
+    """Bounded vertex-contact search; exact outlines validate every placement.
+
+    Offsets are nesting clearance only. Holes are filled, reflection is forbidden,
+    and candidate simplification never changes the source or collision geometry.
+    This heuristic does not promise a globally optimal packing.
+    """
+    from shapely.affinity import rotate,translate
+    values=(stock_w,stock_h,gap,edge)
+    if not all(math.isfinite(v) for v in values) or min(stock_w,stock_h)<=0 or min(gap,edge)<0:
+        raise ValueError("판재 크기와 여유 값을 확인하세요.")
+    if stock_w<=2*edge or stock_h<=2*edge:return [],{}
+    templates={};items=[];areas={}
+    for part in parts:
+        if not part.enabled or part.quantity<=0:continue
+        base=nesting_outline(part);areas[part.object_id]=base.area;clearance=nesting_offset(part,gap);choices=[]
+        for angle in dict.fromkeys(float(a)%360 for a in angles):
+            rotated=rotate(base,angle,origin=(0,0));x0,y0,x1,y1=rotated.bounds
+            shape=translate(rotated,-x0,-y0);w,h=x1-x0,y1-y0
+            if w+2*clearance>stock_w-2*edge+EPS or h+2*clearance>stock_h-2*edge+EPS:continue
+            # Mitred clearance envelope supplies contact candidates; exact distance
+            # below enforces offsets even where the candidate envelope is simplified.
+            envelope=shape.buffer(clearance,join_style=2) if clearance else shape
+            vertices=[]
+            for polygon in polygon_parts(envelope):
+                points=list(polygon.simplify(.02,preserve_topology=True).exterior.coords)[:-1]
+                stride=max(1,math.ceil(len(points)/24));vertices.extend(points[::stride])
+            choices.append((angle,shape,w,h,vertices,clearance))
+        templates[part.object_id]=choices
+        items.extend((part,i) for i in range(1,part.quantity+1))
+    if len(items)>1000:raise ValueError("촘촘한 배열 수량은 합계 1000개 이하로 지정하세요.")
+    # Large material envelopes first; stable ordering keeps identical inputs reproducible.
+    items.sort(key=lambda item:-areas[item[0].object_id])
+    placed=[];occupied=[];counts={};failed=set()
+    for index,(part,instance) in enumerate(items):
+        if part.object_id in failed:continue
+        best=None
+        for angle,shape,w,h,vertices,clearance in templates[part.object_id]:
+            low=edge+clearance;maxx=stock_w-edge-clearance-w;maxy=stock_h-edge-clearance-h
+            candidates={(low,low)}
+            for other,other_offset,other_vertices in occupied:
+                ox0,oy0,ox1,oy1=other.bounds
+                candidates.add((ox1+other_offset+clearance,low))
+                candidates.add((low,oy1+other_offset+clearance))
+                for px,py in other_vertices:
+                    for vx,vy in vertices:
+                        x,y=px-vx,py-vy
+                        if low-1e-7<=x<=maxx+1e-7 and low-1e-7<=y<=maxy+1e-7:
+                            candidates.add((max(low,x),max(low,y)))
+            for trial,(x,y) in enumerate(sorted(candidates,key=lambda p:(p[1],p[0]))):
+                if progress and trial%250==0:progress(index/max(1,len(items))*100,f"윤곽 배치 {index+1}/{len(items)}")
+                if x>maxx+1e-7 or y>maxy+1e-7:continue
+                score=(y+h,x+w,y,x,angle)
+                if best is not None and score>=best[0]:continue
+                candidate=translate(shape,x,y);valid=True
+                for other,other_offset,_ in occupied:
+                    required=clearance+other_offset
+                    if candidate.distance(other)<required-1e-7 or candidate.intersection(other).area>1e-8:
+                        valid=False;break
+                if valid:best=(score,angle,candidate,w,h,x,y,vertices,clearance)
+        if best is None:
+            failed.add(part.object_id);continue
+        _,angle,shape,w,h,x,y,vertices,clearance=best
+        placed.append(NestPlacement(part.object_id,instance,angle,x,y,w,h))
+        occupied.append((shape,clearance,[(vx+x,vy+y) for vx,vy in vertices]))
+        counts[part.object_id]=counts.get(part.object_id,0)+1
+        if progress:progress((index+1)/max(1,len(items))*100,f"윤곽 배치 {index+1}/{len(items)}")
+    return placed,counts
 
 
 def best_mixed_nesting(parts:Sequence[PartObject],stock_w:float,stock_h:float,gap:float,edge:float,
@@ -4713,6 +4813,9 @@ class App(tk.Tk):
             ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w",pady=2)
             ttk.Entry(controls,width=12,textvariable=self.var(key,val,cls)).grid(row=r,column=1,padx=5);r+=1
         self.var("array_rotate",True,tk.BooleanVar)
+        self.var("array_dense",False,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="촘촘한 배열 (실제 윤곽 / 180° 엇갈림)",variable=self.vars["array_dense"]).grid(row=r,columnspan=2,sticky="w");r+=1
+        ttk.Label(controls,text="촘촘한 모드: 파츠별 외곽 여유 합산 · 빈칸은 공통 간격의 절반").grid(row=r,columnspan=2,sticky="w");r+=1
         ttk.Checkbutton(controls,text="90° 회전 배치 허용",variable=self.vars["array_rotate"]).grid(row=r,columnspan=2,sticky="w");r+=1
         self.var("array_auto_rotate",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="자동 회전 최적화 (5° 단위)",variable=self.vars["array_auto_rotate"]).grid(row=r,columnspan=2,sticky="w");r+=1
@@ -4768,8 +4871,8 @@ class App(tk.Tk):
         right_pan = ttk.Panedwindow(right, orient="vertical"); right_pan.pack(fill="both", expand=True)
         object_frame=ttk.LabelFrame(right_pan,text="파일별 객체 / 배치 수량",padding=4)
         right_pan.add(object_frame,weight=1)
-        self.object_tree=ttk.Treeview(object_frame,columns=("name","qty","contours"),show="headings",height=5,selectmode="browse")
-        for col,title,width in (("name","객체",150),("qty","수량",45),("contours","윤곽",45)):
+        self.object_tree=ttk.Treeview(object_frame,columns=("name","qty","contours","offset"),show="headings",height=5,selectmode="browse")
+        for col,title,width in (("name","객체",150),("qty","수량",45),("contours","윤곽",45),("offset","외곽 여유 mm",95)):
             self.object_tree.heading(col,text=title);self.object_tree.column(col,width=width,anchor="w" if col=="name" else "center",stretch=col=="name")
         object_scroll=ttk.Scrollbar(object_frame,orient="vertical",command=self.object_tree.yview)
         self.object_tree.configure(yscrollcommand=object_scroll.set);object_scroll.pack(side="right",fill="y")
@@ -4780,6 +4883,12 @@ class App(tk.Tk):
         ttk.Spinbox(object_bar,from_=0,to=1000,width=6,textvariable=self.object_qty).pack(side="left",padx=3)
         ttk.Button(object_bar,text="적용",command=self.apply_object_quantity).pack(side="left")
         ttk.Button(object_bar,text="객체 삭제",command=self.remove_selected_object).pack(side="right")
+        offset_bar=ttk.Frame(object_frame);offset_bar.pack(fill="x",pady=3)
+        ttk.Label(offset_bar,text="선택 파츠 외곽 여유 (mm)").pack(side="left")
+        self.object_offset=tk.StringVar(value="")
+        ttk.Entry(offset_bar,width=8,textvariable=self.object_offset).pack(side="left",padx=3)
+        ttk.Button(offset_bar,text="여유 적용",command=self.apply_object_offset).pack(side="left")
+        ttk.Label(offset_bar,text="빈칸=공통 간격의 절반 · 촘촘한 배열 전용").pack(side="left",padx=5)
         order_frame = ttk.LabelFrame(right_pan, text="가공 순서 / 윤곽 목록", padding=4)
         right_pan.add(order_frame, weight=1)
         order_buttons=ttk.Frame(order_frame); order_buttons.pack(fill="x")
@@ -5306,7 +5415,7 @@ class App(tk.Tk):
         self.object_tree.delete(*self.object_tree.get_children())
         for part in self.part_objects:
             iid=f"o{part.object_id}";tag=f"obj{part.object_id}"
-            self.object_tree.insert("","end",iid=iid,values=(part.name,part.quantity,len(part.contours)),tags=(tag,))
+            self.object_tree.insert("","end",iid=iid,values=(part.name,part.quantity,len(part.contours),"기본" if part.nest_offset is None else f"{part.nest_offset:g}"),tags=(tag,))
             self.object_tree.tag_configure(tag,foreground=OBJECT_TREE_COLORS[(part.object_id-1)%len(OBJECT_TREE_COLORS)])
         if selected_id and self.object_tree.exists(selected_id):self.object_tree.selection_set(selected_id)
 
@@ -5314,7 +5423,23 @@ class App(tk.Tk):
         items=self.object_tree.selection()
         if not items:return
         object_id=int(items[0][1:]);part=next((p for p in self.part_objects if p.object_id==object_id),None)
-        if part:self.object_qty.set(part.quantity)
+        if part:
+            self.object_qty.set(part.quantity)
+            self.object_offset.set("" if part.nest_offset is None else f"{part.nest_offset:g}")
+
+    def apply_object_offset(self):
+        items=self.object_tree.selection()
+        if not items:messagebox.showinfo("외곽 여유","객체 목록에서 파츠를 선택하세요.");return
+        try:
+            raw=self.object_offset.get().strip();value=float(raw) if raw else None
+            if value is not None and (not math.isfinite(value) or value<0):raise ValueError()
+        except (ValueError,tk.TclError):
+            messagebox.showerror("외곽 여유","0 이상의 숫자 또는 빈칸을 입력하세요.");return
+        part=next((p for p in self.part_objects if f"o{p.object_id}"==items[0]),None)
+        if part:
+            self.push_undo("파츠 외곽 여유")
+            part.nest_offset=value;self.refresh_object_tree()
+            self.status.set(f"{part.name}: 외곽 여유 적용. 자동 어레이를 다시 실행하면 배치에 반영됩니다.")
 
     def apply_object_quantity(self):
         items=self.object_tree.selection()
@@ -5440,7 +5565,33 @@ class App(tk.Tk):
             elif cfg["array_rotate"]:angles=(0,90)
             else:angles=(0,)
             parts=[p for p in self.part_objects if p.enabled]
-            if len(parts)==1:
+            if cfg.get("array_dense",False):
+                dense_parts=copy.deepcopy(parts);maximum=False
+                if len(dense_parts)==1:
+                    part=dense_parts[0]
+                    quantity=part.quantity if part.quantity_set else int(cfg["array_qty"])
+                    maximum=quantity==0 and not part.quantity_set
+                    part.quantity=1000 if maximum else quantity
+                requested={p.object_id:p.quantity for p in dense_parts}
+                if sum(requested.values())<=0:raise ValueError("배치 수량을 1개 이상 지정하세요.")
+                if sum(requested.values())>1000:raise ValueError("배치 수량은 합계 1000개 이하로 지정하세요.")
+                offsets=sorted(nesting_offset(p,cfg["array_gap"]) for p in dense_parts for _ in range(min(p.quantity,2)))
+                needed=cfg["tool_d"]+2*(cfg["finish_allowance"] if cfg.get("wall_finish") else 0.0)
+                if len(offsets)>1 and sum(offsets[:2])<needed-1e-7:
+                    if not messagebox.askokcancel("가공 간격 확인",f"외곽 여유 합계가 공구 지름과 황삭 여유를 고려한 {needed:g} mm보다 작은 조합이 있습니다.\n가공 경로 간섭을 확인해야 합니다. 이 간격으로 배치하시겠습니까?",parent=self):
+                        progress.close();return
+                dense_angles=tuple(dict.fromkeys(list(angles)+[a+180 for a in angles]))
+                cancelled=[False]
+                def cancel_dense():cancelled[0]=True
+                ttk.Button(progress,text="배치 취소",command=cancel_dense).pack(pady=(0,10))
+                progress.protocol("WM_DELETE_WINDOW",cancel_dense)
+                def dense_progress(value,message):
+                    progress.set_progress(10+value*.55,message)
+                    if cancelled[0]:raise ValueError("촘촘한 배열을 취소했습니다. 기존 배치는 유지됩니다.")
+                placements,placed_counts=best_contour_nesting(dense_parts,cfg["sheet_w"],cfg["sheet_h"],
+                    cfg["array_gap"],cfg["array_edge"],dense_angles,dense_progress)
+                if maximum:requested=dict(placed_counts)
+            elif len(parts)==1:
                 part=parts[0];quantity=part.quantity if part.quantity_set else int(cfg["array_qty"])
                 if part.quantity_set and quantity<=0:raise ValueError("선택 객체의 배치 수량이 0입니다.")
                 progress.set_progress(10,"회전별 크기 계산 중")
@@ -5479,7 +5630,8 @@ class App(tk.Tk):
             if len(placements)>1000:raise ValueError(f"예상 수량이 {len(placements)}개입니다. 수량을 1000 이하로 지정하세요.")
             part_by_id={p.object_id:p for p in parts}
             progress.set_progress(70,"회전된 가공물 준비 중")
-            templates={(p.object_id,p.angle):oriented_contour_group(part_by_id[p.object_id].contours,p.angle)[0] for p in placements}
+            templates={(oid,angle):oriented_contour_group(part_by_id[oid].contours,angle)[0]
+                       for oid,angle in dict.fromkeys((p.object_id,p.angle) for p in placements)}
         except Exception as exc:
             progress.close();messagebox.showerror("자동 어레이",str(exc));return
         self.push_undo("자동 어레이")
@@ -5510,7 +5662,8 @@ class App(tk.Tk):
         angle_text=", ".join(f"{a:g}°" for a in used_angles)
         mode="자동 회전" if cfg["array_auto_rotate"] else ("0°/90°" if cfg["array_rotate"] else "회전 없음")
         count_text=", ".join(f"{part_by_id[oid].name} {placed_counts.get(oid,0)}/{qty}" for oid,qty in requested.items())
-        self.status.set(f"자동 어레이 완료 | {len(placements)}개 | {count_text} | {mode} {angle_text} | 간격 {cfg['array_gap']:g} mm")
+        spacing="촘촘한 윤곽 / 파츠별 외곽 여유" if cfg.get("array_dense") else f"빠른 박스 / 간격 {cfg['array_gap']:g} mm"
+        self.status.set(f"자동 어레이 완료 | {len(placements)}개 | {count_text} | {angle_text} | {spacing}")
         progress.set_progress(100,"자동 어레이 완료");progress.close()
         missing=[f"{part_by_id[oid].name}: {placed_counts.get(oid,0)}/{qty}개" for oid,qty in requested.items() if placed_counts.get(oid,0)<qty]
         if missing:messagebox.showwarning("판재 공간 부족","다음 객체는 요청 수량을 모두 배치하지 못했습니다.\n\n"+"\n".join(missing))
