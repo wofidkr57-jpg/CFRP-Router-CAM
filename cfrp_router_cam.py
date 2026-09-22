@@ -53,6 +53,9 @@ Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
 EPS = 1e-7
 STEP_FACE_NORMAL_DOT = 0.999
+TOOL_WEAR_DEFAULT_LOSS_PER_10M = 0.079
+TOOL_WEAR_WARNING_DISTANCE_M = 8.0
+TOOL_WEAR_STOP_DISTANCE_M = 10.0
 APP_VERSION = "1.20"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
@@ -104,7 +107,7 @@ _UI_EN_EXACT = {
     "그리드": "Grid",
     "공구 지름 (mm)": "Tool Diameter (mm)",
     "거리 기반 공구 마모 보정": "Distance-based Tool Wear Compensation",
-    "100m당 지름 감소 (mm)": "Diameter Loss per 100 m (mm)",
+    "10m당 지름 감소 (mm)": "Diameter Loss per 10 m (mm)",
     "최소 가정 지름 (mm)": "Minimum Assumed Diameter (mm)",
     "판 두께 (mm)": "Stock Thickness (mm)",
     "관통 여유 (mm)": "Through Allowance (mm)",
@@ -277,6 +280,12 @@ _UI_EN_PHRASES = {
     "정삭 Feed는 0 초과 100% 이하로 설정하세요.": "Finish feed must be greater than 0% and no more than 100%.",
     "라인 복구 허용오차는 음수가 될 수 없습니다.": "Line repair tolerance cannot be negative.",
     "판재 X/Y 크기는 0보다 커야 합니다.": "Sheet X/Y dimensions must be greater than zero.",
+    "예상 절삭거리가 공구 교체 기준에 도달했습니다.": "The estimated cutting distance has reached the tool replacement limit.",
+    "작업을 나누고 새 공구로 각 파일을 생성하세요.": "Split the job and generate each file with a new tool.",
+    "예상 절삭거리": "estimated cutting distance",
+    "공구 교체 기준": "tool replacement limit",
+    "공구 마모 경고": "tool wear warning",
+    "전체 작업": "Full job",
     "최신 버전 확인 중...": "Checking for the latest version...",
     "업데이트 다운로드 완료": "Update download complete",
     "업데이트 실패": "Update Failed",
@@ -287,6 +296,7 @@ _UI_EN_PHRASES = {
     "생성 오류": "Generation Error",
     "가공 전 점검": "Pre-machining Check",
     "가공 점검": "Machining Check",
+    "공구 교체 필요 - 생성 중지": "Tool Replacement Required - Generation Stopped",
     "경로 검사": "Path Check",
     "STEP 오류": "STEP Error",
     "DXF 오류": "DXF Error",
@@ -295,6 +305,7 @@ _UI_EN_PHRASES = {
     "STEP 가져오기": "STEP Import",
     "2분할 G-code": "Split G-code",
     "2분할 G-code 저장": "Save Split G-code",
+    "예상 절삭거리 확인 중": "Checking estimated cutting distance",
 }
 
 _UI_EN_WORDS = {
@@ -2384,9 +2395,9 @@ def effective_tool_diameter(cfg:dict,accumulated_cut_m:float)->float:
     """Return the assumed cutter diameter after linear distance-based wear."""
     nominal=max(float(cfg["tool_d"]),EPS)
     if not cfg.get("tool_wear_enabled"):return nominal
-    loss_per_100m=max(0.0,float(cfg.get("tool_wear_loss_per_100m",0.0)))
+    loss_per_10m=max(0.0,float(cfg.get("tool_wear_loss_per_10m",TOOL_WEAR_DEFAULT_LOSS_PER_10M)))
     minimum=max(EPS,min(nominal,float(cfg.get("tool_wear_min_d",nominal))))
-    return max(minimum,nominal-loss_per_100m*max(0.0,float(accumulated_cut_m))/100.0)
+    return max(minimum,nominal-loss_per_10m*max(0.0,float(accumulated_cut_m))/10.0)
 
 
 def resolved_z_config(cfg:dict) -> dict:
@@ -2477,7 +2488,7 @@ def _gcode_route_worker(task)->Tuple[int,float,List[Point],int,float]:
 def prepare_gcode_routes(ordered:Sequence[Contour],cfg:dict,stock:float,extra:float,
                          progress:Optional[Callable[[float,str],None]]=None
                          )->List[Tuple[int,float,List[Point],int,float]]:
-    tasks=[];distance_m=float(cfg.get("_wear_distance_before_m",0.0))
+    tasks=[];distance_m=0.0
     for ci,c in enumerate(ordered,1):
         tool_d,metrics=contour_wear_plan(c,cfg,stock,extra,distance_m)
         tasks.append((ci,c,cfg,stock,extra,tool_d));distance_m+=metrics[0]/1000.0
@@ -2764,9 +2775,8 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
     custom_text=",".join(fmt(value) for value in custom_depths) if custom_depths else "NONE"
     closed_count=sum(bool(c.closed) for c in active)
     safety_excluded=sum(bool(c.safety_excluded) for c in active)
-    accumulated=float(cfg.get("_wear_distance_before_m",0.0))
-    wear_start=effective_tool_diameter(cfg,accumulated)
-    wear_end=effective_tool_diameter(cfg,accumulated+max(0.0,float(job_cut_m)))
+    wear_start=effective_tool_diameter(cfg,0.0)
+    wear_end=effective_tool_diameter(cfg,max(0.0,float(job_cut_m)))
     return [
         "(----- CAM SETTINGS BEGIN -----)",
         f"(UNITS: MM)",
@@ -2778,7 +2788,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(SAFETY_CHECK_EXCLUDED: {safety_excluded})",
         f"(TOOL_DIAMETER_MM: {fmt(float(cfg['tool_d']))})",
         f"(TOOL_WEAR_COMPENSATION: {nc_yes_no(cfg.get('tool_wear_enabled'))})",
-        f"(TOOL_WEAR_LOSS_PER_100M_MM: {fmt(float(cfg.get('tool_wear_loss_per_100m',0.0)))})",
+        f"(TOOL_WEAR_LOSS_PER_10M_MM: {fmt(float(cfg.get('tool_wear_loss_per_10m',TOOL_WEAR_DEFAULT_LOSS_PER_10M)))})",
         f"(TOOL_WEAR_MIN_DIAMETER_MM: {fmt(float(cfg.get('tool_wear_min_d',cfg['tool_d'])))})",
         f"(TOOL_DIAMETER_JOB_START_MM: {fmt(wear_start)})",
         f"(TOOL_DIAMETER_JOB_END_MM: {fmt(wear_end)})",
@@ -3089,7 +3099,7 @@ def machining_report(contours: List[Contour], cfg: dict,
     override=cfg.get("_xy_origin_override")
     origin=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
     ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin)
-    distance_m=float(cfg.get("_wear_distance_before_m",0.0))
+    distance_m=0.0
     for report_index,c in enumerate(ordered,1):
         if progress:progress(report_index/max(len(active),1)*100.0,
                              f"가공 거리 계산 {report_index}/{len(active)}")
@@ -3098,6 +3108,22 @@ def machining_report(contours: List[Contour], cfg: dict,
         distance_m+=metrics[0]/1000.0
     cut_min+=plunge_min;job_m=cut_mm/1000.0
     return job_m,cut_min
+
+
+def machining_distance_guard(jobs:Sequence[Tuple[str,float]]) -> Tuple[List[str],List[str]]:
+    """Return blocking and warning messages for per-tool cutting distances."""
+    blocked=[];warnings=[]
+    for label,value in jobs:
+        distance=max(0.0,float(value))
+        if distance+EPS>=TOOL_WEAR_STOP_DISTANCE_M:
+            blocked.append(
+                f"{label} 예상 절삭거리 {distance:.3f}m: 공구 교체 기준 "
+                f"{TOOL_WEAR_STOP_DISTANCE_M:g}m 이상입니다.")
+        elif distance+EPS>=TOOL_WEAR_WARNING_DISTANCE_M:
+            warnings.append(
+                f"{label} 예상 절삭거리 {distance:.3f}m: 공구 마모 경고 "
+                f"({TOOL_WEAR_WARNING_DISTANCE_M:g}m 이상)입니다.")
+    return blocked,warnings
 
 
 @dataclass
@@ -4553,7 +4579,7 @@ class App(tk.Tk):
         self.var("tool_wear_enabled",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="거리 기반 공구 마모 보정",variable=self.vars["tool_wear_enabled"],
                         command=self.redraw).grid(row=r,columnspan=2,sticky="w",pady=(4,1));r+=1
-        for label,key,val in (("100m당 지름 감소 (mm)","tool_wear_loss_per_100m",0.0),
+        for label,key,val in (("10m당 지름 감소 (mm)","tool_wear_loss_per_10m",TOOL_WEAR_DEFAULT_LOSS_PER_10M),
                               ("최소 가정 지름 (mm)","tool_wear_min_d",1.0)):
             ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w",pady=2)
             ttk.Entry(controls,width=12,textvariable=self.var(key,val)).grid(row=r,column=1,padx=5);r+=1
@@ -4854,9 +4880,9 @@ class App(tk.Tk):
             raise ValueError("어니언스킨 잔여량과 황삭 측면 여유 값을 확인하세요.")
         if cfg["finish_feed_pct"]<=0 or cfg["finish_feed_pct"]>100:
             raise ValueError("정삭 Feed는 0 초과 100% 이하로 설정하세요.")
-        if cfg["tool_wear_loss_per_100m"]<0 or cfg["tool_wear_min_d"]<=0:
+        if cfg["tool_wear_loss_per_10m"]<0 or cfg["tool_wear_min_d"]<=0:
             raise ValueError("공구 마모 감소량과 최소 가정 지름을 확인하세요.")
-        if cfg["tool_wear_enabled"] and (cfg["tool_wear_loss_per_100m"]<=0 or cfg["tool_wear_min_d"]>cfg["tool_d"]):
+        if cfg["tool_wear_enabled"] and (cfg["tool_wear_loss_per_10m"]<=0 or cfg["tool_wear_min_d"]>cfg["tool_d"]):
             raise ValueError("공구 마모 보정 사용 시 감소량은 0보다 크게, 최소 지름은 공구 지름 이하로 입력하세요.")
         if cfg["gap_tol"] < 0:
             raise ValueError("라인 복구 허용오차는 음수가 될 수 없습니다.")
@@ -4869,7 +4895,7 @@ class App(tk.Tk):
         return cfg
 
     def job_signature(self,cfg:dict):
-        machining_keys=("tool_d","tool_wear_enabled","tool_wear_loss_per_100m","tool_wear_min_d",
+        machining_keys=("tool_d","tool_wear_enabled","tool_wear_loss_per_10m","tool_wear_min_d",
                         "rpm","feed","plunge","stock","extra","safe_z","safe_z_auto","approach_z","lead","passes",
                         "path_tolerance","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
@@ -4908,9 +4934,17 @@ class App(tk.Tk):
             with open(loaded_path,"r",encoding="utf-8") as f:data=json.load(f)
             loaded_language=str(data.get("language",getattr(self,"language","ko"))).strip().lower()
             if loaded_language in SUPPORTED_LANGUAGES:self.language=loaded_language
-            for key,value in data.get("vars",{}).items():
+            saved_vars=data.get("vars",{})
+            for key,value in saved_vars.items():
                 if key in self.vars:
                     self.vars[key].set(localized_enum_value(value) if key in ("xy_origin","finish_scope") else value)
+            # V1.20 originally stored loss per 100 m.  Preserve custom values
+            # by converting the unit; retain the new measured default when the
+            # old value was missing or left at its former zero default.
+            if "tool_wear_loss_per_10m" not in saved_vars and "tool_wear_loss_per_10m" in self.vars:
+                old_loss=saved_vars.get("tool_wear_loss_per_100m")
+                if old_loss is not None and float(old_loss)>EPS:
+                    self.vars["tool_wear_loss_per_10m"].set(float(old_loss)/10.0)
             if "start_code" in data:
                 start_code=str(data["start_code"]).strip()
                 if start_code in (LEGACY_DEFAULT_START_CODE,V101_DEFAULT_START_CODE,
@@ -6178,7 +6212,7 @@ class App(tk.Tk):
                 preview_cfg={
                     "tool_d":self.vars["tool_d"].get(),
                     "tool_wear_enabled":self.vars["tool_wear_enabled"].get(),
-                    "tool_wear_loss_per_100m":self.vars["tool_wear_loss_per_100m"].get(),
+                    "tool_wear_loss_per_10m":self.vars["tool_wear_loss_per_10m"].get(),
                     "tool_wear_min_d":self.vars["tool_wear_min_d"].get(),
                 }
                 preview_radius=effective_tool_diameter(preview_cfg,0.0)/2
@@ -6415,6 +6449,7 @@ class App(tk.Tk):
                 if not part2:
                     messagebox.showinfo("2분할 G-code", "가공 윤곽이 모두 선택되어 PART2가 비어 있습니다.\nPART1에 넣을 윤곽만 선택하세요.")
                     return
+            part1_m=part1_min=part2_m=part2_min=job_m=job_min=0.0
             open_count = sum(not c.closed for c in active)
             warnings=[]
             if open_count:
@@ -6467,6 +6502,26 @@ class App(tk.Tk):
                                      "다음 문제 때문에 G-code를 생성하지 않습니다.\n\n"+"\n".join(fatal[:12])+
                                      ("\n..." if len(fatal)>12 else "")+"\n\n공구 지름, 내부/외부 판정 또는 형상을 수정하세요.")
                 return
+            progress.set_progress(46,"예상 절삭거리 확인 중")
+            if split_selected:
+                common_origin=work_origin_for_contours(active,cfg)
+                split_report_cfg=dict(cfg);split_report_cfg["_xy_origin_override"]=common_origin
+                part1_m,part1_min=machining_report(part1,split_report_cfg)
+                part2_m,part2_min=machining_report(part2,split_report_cfg)
+                distance_jobs=(("PART1",part1_m),("PART2",part2_m))
+            else:
+                job_m,job_min=machining_report(active,cfg)
+                distance_jobs=(("전체 작업",job_m),)
+            distance_blocks,distance_warnings=machining_distance_guard(distance_jobs)
+            if distance_blocks:
+                progress.close();progress=None
+                messagebox.showerror(
+                    "공구 교체 필요 - 생성 중지",
+                    "예상 절삭거리가 공구 교체 기준에 도달했습니다.\n\n"+
+                    "\n".join(distance_blocks)+
+                    "\n\n작업을 나누고 새 공구로 각 파일을 생성하세요.")
+                return
+            warnings += distance_warnings
             if warnings:
                 progress.close();progress=None
                 if not messagebox.askokcancel("가공 전 점검", "\n".join(warnings)+"\n\n계속 생성할까요?"):
@@ -6474,8 +6529,6 @@ class App(tk.Tk):
                 progress=ProgressDialog(self,"G-code 생성")
             progress.set_progress(48,"G-code 공구경로 생성 중")
             if split_selected:
-                common_origin=work_origin_for_contours(active,cfg)
-                part1_m,part1_min=machining_report(part1,cfg)
                 cfg1=dict(cfg);cfg1.update({
                     "_xy_origin_override":common_origin,
                     "_job_label":"PART1 OF 2 - SELECTED CONTOURS",
@@ -6483,9 +6536,7 @@ class App(tk.Tk):
                 cfg2=dict(cfg);cfg2.update({
                     "_xy_origin_override":common_origin,
                     "_job_label":"PART2 OF 2 - REMAINING CONTOURS",
-                    "_job_note":"Before PART2: replace the end mill and re-zero Z only; do not change XY work zero.",
-                    "_wear_distance_before_m":part1_m})
-                _,part2_min=machining_report(part2,cfg2)
+                    "_job_note":"Before PART2: replace the end mill and re-zero Z only; do not change XY work zero."})
                 code1=generate_gcode(
                     part1,cfg1,
                     lambda value,message:progress.set_progress(48+value*.25,f"PART1 · {message}") if progress else None)
@@ -6504,9 +6555,7 @@ class App(tk.Tk):
             self.gcode_split_mode=bool(split_selected)
             self.gcode_signature=requested_signature
             self.text.delete("1.0","end"); self.text.insert("1.0",self.gcode)
-            metres, minutes = machining_report(
-                self.contours,cfg,
-                lambda value,message:progress.set_progress(98+value*.02,message) if progress else None)
+            metres,minutes=(part1_m+part2_m,part1_min+part2_min) if split_selected else (job_m,job_min)
             self.gcode_job_minutes=minutes
             simulation_moves=[]
             for _,code in self.gcode_parts:simulation_moves.extend(parse_gcode_moves(code))
