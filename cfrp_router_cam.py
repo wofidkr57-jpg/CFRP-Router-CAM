@@ -2531,9 +2531,19 @@ def split_outer_inner_conflicts(part1:Sequence[Contour],part2:Sequence[Contour])
                    if inner.operation=="pocket" else point_in_poly(inner.points[0],outer.points)))
 
 
-def split_gcode_paths(filename:str)->Tuple[str,str]:
+def filename_minutes(minutes:float)->int:
+    return max(1,int(math.floor(max(0.0,float(minutes))+.5)))
+
+
+def split_gcode_paths(filename:str,minutes:Optional[Sequence[float]]=None)->Tuple[str,str]:
     root,ext=os.path.splitext(filename);ext=ext or ".nc"
     root=re.sub(r"_(?:PART1|PART2)$","",root,flags=re.IGNORECASE)
+    if minutes is not None and len(minutes)==2:
+        # The save dialog starts with the whole-job time. Replace that suffix
+        # so each split file advertises its own estimated cutting time.
+        root=re.sub(r"_\d+min$","",root,flags=re.IGNORECASE)
+        return (f"{root}_{filename_minutes(minutes[0])}min_PART1{ext}",
+                f"{root}_{filename_minutes(minutes[1])}min_PART2{ext}")
     return f"{root}_PART1{ext}",f"{root}_PART2{ext}"
 
 
@@ -2586,7 +2596,7 @@ def default_gcode_filename(part_objects:Sequence[PartObject],filename:str,contou
     date_text=(when or datetime.now()).strftime("%y%m%d")
     source=loaded_source_name(part_objects,filename)
     quantity=max(1,placed_object_count(contours))
-    rounded_minutes=max(1,int(math.floor(max(0.0,float(minutes))+0.5)))
+    rounded_minutes=filename_minutes(minutes)
     return f"{date_text}_{endmill_name(tool_d)}_{stock_thickness_name(stock)}_{source}_{quantity}_{rounded_minutes}min.nc"
 
 
@@ -4365,7 +4375,7 @@ class App(tk.Tk):
         self.pending_imports: List[str] = []
         self.filename = ""
         self.gcode = ""
-        self.gcode_parts:List[Tuple[str,str]] = []
+        self.gcode_parts:List[Tuple[str,str]] = [];self.gcode_part_minutes:List[float]=[]
         self.gcode_split_mode = False
         self.gcode_job_minutes = 0.0
         self.gcode_signature = None
@@ -6402,7 +6412,7 @@ class App(tk.Tk):
             progress=ProgressDialog(self,"G-code 생성")
             progress.set_progress(2,"가공 설정 확인 중")
             cfg = self.config()
-            requested_signature=self.job_signature(cfg);self.gcode="";self.gcode_parts=[];self.gcode_job_minutes=0.0;self.gcode_signature=None
+            requested_signature=self.job_signature(cfg);self.gcode="";self.gcode_parts=[];self.gcode_part_minutes=[];self.gcode_job_minutes=0.0;self.gcode_signature=None
             active = [c for c in self.contours if c.enabled]
             if not active:
                 messagebox.showerror("가공 점검", "가공에 포함된 윤곽이 없습니다.")
@@ -6489,6 +6499,7 @@ class App(tk.Tk):
                     "_job_note":"Before PART2: replace the end mill and re-zero Z only; do not change XY work zero.",
                     "accum_distance_m":cfg.get("accum_distance_m",0.0)+part1_m,
                     "accum_time_min":cfg.get("accum_time_min",0.0)+part1_min})
+                _,part2_min,_,_=machining_report(part2,cfg2)
                 code1=generate_gcode(
                     part1,cfg1,
                     lambda value,message:progress.set_progress(48+value*.25,f"PART1 · {message}") if progress else None)
@@ -6496,13 +6507,14 @@ class App(tk.Tk):
                     part2,cfg2,
                     lambda value,message:progress.set_progress(73+value*.25,f"PART2 · {message}") if progress else None)
                 self.gcode_parts=[("PART1",code1),("PART2",code2)]
+                self.gcode_part_minutes=[part1_min,part2_min]
                 self.gcode=("(===== PART1: SELECTED CONTOURS =====)\n"+code1+
                             "\n\n(===== PART2: REMAINING CONTOURS =====)\n"+code2)
             else:
                 code=generate_gcode(
                     self.contours,cfg,
                     lambda value,message:progress.set_progress(48+value*.50,message) if progress else None)
-                self.gcode_parts=[("FULL",code)];self.gcode=code
+                self.gcode_parts=[("FULL",code)];self.gcode_part_minutes=[];self.gcode=code
             self.gcode_split_mode=bool(split_selected)
             self.gcode_signature=requested_signature
             self.text.delete("1.0","end"); self.text.insert("1.0",self.gcode)
@@ -6569,7 +6581,9 @@ class App(tk.Tk):
         if fn:
             if len(self.gcode_parts)==2:
                 saved=[]
-                for part_fn,(_,code) in zip(split_gcode_paths(fn),self.gcode_parts):
+                part_minutes=getattr(self,"gcode_part_minutes",[])
+                paths=split_gcode_paths(fn,part_minutes if len(part_minutes)==2 else None)
+                for part_fn,(_,code) in zip(paths,self.gcode_parts):
                     with open(part_fn,"w",encoding="ascii",errors="replace",newline="\n") as f:f.write(code)
                     saved.append(part_fn)
                 self.status.set(f"2분할 저장 완료: {saved[0]} / {saved[1]}")
