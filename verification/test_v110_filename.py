@@ -32,6 +32,10 @@ class ThicknessFilenameTests(unittest.TestCase):
             "260831_2.0endmill_T3.0_panel_1_35min_PART1.nc",
             "260831_2.0endmill_T3.0_panel_1_35min_PART2.nc",
         ))
+        self.assertEqual(cam.split_gcode_paths(name, (12.4, 22.6)), (
+            "260831_2.0endmill_T3.0_panel_1_12min_PART1.nc",
+            "260831_2.0endmill_T3.0_panel_1_23min_PART2.nc",
+        ))
 
     def test_disabled_instances_do_not_increase_quantity(self):
         contours = [cam.Contour([(0, 0), (1, 0), (1, 1)]) for _ in range(3)]
@@ -51,7 +55,8 @@ class ThicknessFilenameTests(unittest.TestCase):
                     job_signature=lambda cfg: 123,
                     gcode="G21\nM30\n", gcode_signature=123, gcode_split_mode=split,
                     part_objects=[], filename="panel.dxf", contours=[],
-                    gcode_job_minutes=35, gcode_parts=parts, status=mock.Mock(),
+                    gcode_job_minutes=35, gcode_parts=parts,
+                    gcode_part_minutes=[12.4, 22.6] if split else [],status=mock.Mock(),
                 )
                 requested = []
 
@@ -69,8 +74,8 @@ class ThicknessFilenameTests(unittest.TestCase):
                     self.assertIn("_T4.5_", path.name)
                     self.assertEqual(path.read_text(encoding="ascii"), "G21\nM30\n")
                 if split:
-                    self.assertTrue(paths[0].name.endswith("_PART1.nc"))
-                    self.assertTrue(paths[1].name.endswith("_PART2.nc"))
+                    self.assertTrue(paths[0].name.endswith("_12min_PART1.nc"))
+                    self.assertTrue(paths[1].name.endswith("_23min_PART2.nc"))
 
 
 if __name__ == "__main__":

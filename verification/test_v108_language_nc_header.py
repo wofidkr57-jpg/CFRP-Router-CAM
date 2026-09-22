@@ -37,7 +37,7 @@ def config():
         "machine_park_x": 10.0, "machine_park_y": 10.0, "machine_park_z": -2.0,
         "wall_finish": False, "onion_skin_enabled": False, "finish_scope": "전체",
         "onion_skin": 0.2, "finish_allowance": 0.12, "finish_feed_pct": 80.0,
-        "tab_shape": "Flat+ramp", "accum_distance_m": 5.0, "accum_time_min": 30.0,
+        "tab_shape": "Flat+ramp",
         "gap_tol": 0.2, "sheet_w": 250.0, "sheet_h": 500.0,
         "array_gap": 5.0, "array_edge": 3.0, "array_qty": 4,
         "array_rotate": True, "array_auto_rotate": True, "auto_trim": False,
@@ -81,6 +81,7 @@ class LanguageAndNcHeaderTests(unittest.TestCase):
         self.assertIn("(COOLANT_AIR_M8: YES)", code)
         self.assertIn("(MACHINE_HOME_G53_PARK: YES)", code)
         self.assertIn("(ARRAY_REQUESTED_QTY: 4)", code)
+        self.assertNotIn("ACCUMULATED", code)
         self.assertIn("G21", code)
         self.assertNotIn("한글", code)
         self.assertTrue(all(ord(char) < 128 for char in code))

@@ -33,7 +33,6 @@ def config():
         "onion_skin": 0.2, "finish_allowance": 0.1,
         "finish_feed_pct": 80.0, "auto_trim": False,
         "start_code": cam.DEFAULT_START_CODE, "end_code": cam.DEFAULT_END_CODE,
-        "accum_distance_m": 0.0, "accum_time_min": 0.0,
     }
 
 

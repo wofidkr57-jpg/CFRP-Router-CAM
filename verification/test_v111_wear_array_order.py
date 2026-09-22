@@ -27,7 +27,7 @@ def config():
         "full_depth": True, "passes": 1, "xy_origin": "좌하단",
         "rapid_optimize": False, "rpm": 18000, "feed": 600.0,
         "plunge": 150.0, "lead": 0.0, "climb": True, "tool_d": 2.0,
-        "tool_wear_enabled": True, "tool_wear_loss_per_100m": 100.0,
+        "tool_wear_enabled": True, "tool_wear_loss_per_10m": 10.0,
         "tool_wear_min_d": 0.5,
         "tab_count": 0, "tab_flat": 0.0, "tab_ramp": 0.0,
         "tab_remain": 0.3, "tab_shape": "Flat+ramp", "m8_enabled": False,
@@ -36,7 +36,6 @@ def config():
         "onion_skin": 0.2, "finish_allowance": 0.1,
         "finish_feed_pct": 80.0, "auto_trim": False,
         "start_code": cam.DEFAULT_START_CODE, "end_code": cam.DEFAULT_END_CODE,
-        "accum_distance_m": 0.0, "accum_time_min": 0.0,
     }
 
 
@@ -58,14 +57,39 @@ class ArrayOrderAndToolWearTests(unittest.TestCase):
         ordered = cam.ordered_contours(copied, rapid_optimize=False)
         self.assertEqual([c.cut_order for c in ordered], [1, 1, 2, 2])
 
-    def test_effective_diameter_uses_accumulated_distance_and_minimum(self):
+    def test_effective_diameter_uses_cut_distance_and_minimum(self):
         cfg = config()
-        cfg["tool_wear_loss_per_100m"] = 0.2
+        cfg["tool_wear_loss_per_10m"] = 0.02
         cfg["tool_wear_min_d"] = 1.7
         self.assertAlmostEqual(cam.effective_tool_diameter(cfg, 50.0), 1.9)
         self.assertAlmostEqual(cam.effective_tool_diameter(cfg, 1000.0), 1.7)
         cfg["tool_wear_enabled"] = False
         self.assertAlmostEqual(cam.effective_tool_diameter(cfg, 1000.0), 2.0)
+
+    def test_legacy_accumulated_fields_are_ignored(self):
+        cfg = config()
+        cfg.update(tool_wear_loss_per_10m=.02, accum_distance_m=50.0,
+                   accum_time_min=30.0)
+        code = cam.generate_gcode([square()], cfg)
+        self.assertIn("(TOOL_DIAMETER_JOB_START_MM: 2)", code)
+        self.assertNotIn("ACCUMULATED", code)
+
+    def test_split_tool_replacement_starts_part2_at_nominal_diameter(self):
+        cfg = config();cfg["tool_wear_loss_per_10m"] = .02
+        part1 = [square()];part2 = [square(200)]
+        code1 = cam.generate_gcode(part1, cfg)
+        code2 = cam.generate_gcode(part2, cfg)
+        end1 = float(re.search(r"TOOL_DIAMETER_JOB_END_MM: ([0-9.]+)", code1).group(1))
+        start2 = float(re.search(r"TOOL_DIAMETER_JOB_START_MM: ([0-9.]+)", code2).group(1))
+        self.assertLess(end1, 2.0)
+        self.assertAlmostEqual(start2, 2.0, places=4)
+
+    def test_distance_guard_warns_at_8m_and_blocks_at_10m(self):
+        blocked,warnings=cam.machining_distance_guard((("LOW",7.999),("WARN",8.0),("STOP",10.0)))
+        self.assertEqual(len(blocked),1)
+        self.assertIn("STOP",blocked[0])
+        self.assertEqual(len(warnings),1)
+        self.assertIn("WARN",warnings[0])
 
     def test_generated_contours_use_progressively_smaller_diameters(self):
         code = cam.generate_gcode([square(), square(200)], config())

@@ -54,6 +54,20 @@ class DefaultMigrationTests(unittest.TestCase):
                 self.assertEqual(app.vars['wall_finish'].get(),expected)
                 self.assertEqual(app.vars['onion_skin_enabled'].get(),expected)
 
+    def test_wear_loss_migrates_from_100m_to_10m_unit(self):
+        for saved_vars,expected in (
+            ({'tool_wear_loss_per_100m':.79},.079),
+            ({'tool_wear_loss_per_100m':0},cam.TOOL_WEAR_DEFAULT_LOSS_PER_10M),
+            ({'tool_wear_loss_per_10m':.05},.05),
+        ):
+            with self.subTest(saved_vars=saved_vars),tempfile.TemporaryDirectory() as tmp:
+                path=Path(tmp)/'settings.json'
+                path.write_text(json.dumps({'version':'1.20','vars':saved_vars}))
+                app=SettingsHarness(tmp,Path(tmp)/'fallback.json')
+                app.vars['tool_wear_loss_per_10m']=FakeVar(cam.TOOL_WEAR_DEFAULT_LOSS_PER_10M)
+                app.load_settings()
+                self.assertAlmostEqual(app.vars['tool_wear_loss_per_10m'].get(),expected)
+
 class PocketLinkTests(unittest.TestCase):
     def test_links_preserve_island_and_reduce_retractions(self):
         for origin in ('Top','Bottom'):
