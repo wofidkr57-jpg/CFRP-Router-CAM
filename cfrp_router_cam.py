@@ -56,7 +56,7 @@ STEP_FACE_NORMAL_DOT = 0.999
 TOOL_WEAR_DEFAULT_LOSS_PER_10M = 0.079
 TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
-APP_VERSION = "1.23"
+APP_VERSION = "1.24"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -80,6 +80,10 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "추천 피드 적용": "Apply recommended feed",
+    "시험 기준: Ø2 / 24000rpm / 전 깊이 가공": "Trial basis: D2 / 24000 rpm / full depth",
+    "등록된 추천 없음 (2T / 3T / 6T)": "No preset (available: 2T / 3T / 6T)",
+    "두께·피드 숫자를 입력하세요.": "Enter numeric thickness and feed.",
     "내경 치수 보정 (mm)": "Internal size correction (mm)",
     "외경 치수 보정 (mm)": "External size correction (mm)",
     "치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 제외": "Size: + enlarge / - shrink; diameter/width; profiles only",
@@ -998,6 +1002,13 @@ def trim_small_self_loops(pts: Sequence[Point], max_cuts: int = 20) -> Tuple[Lis
             route,discard=loop_b,loop_a
         removed.append(discard+[discard[0]]);cuts.append(hit)
     return route,removed,cuts
+
+
+def thickness_feed_recommendation(stock:float)->Optional[int]:
+    """User supplied trial values, not interpolated or applied automatically."""
+    if not math.isfinite(stock):return None
+    return next((feed for thickness,feed in ((2.,600),(3.,550),(6.,500))
+                 if abs(stock-thickness)<1e-6),None)
 
 
 def dimension_correction(contour:Contour,cfg:Optional[dict]=None)->float:
@@ -4730,6 +4741,14 @@ class App(tk.Tk):
             entry.grid(row=r, column=1, padx=5)
             if key=="safe_z":self.safe_z_entry=entry
         r = len(rows)
+        self.feed_hint=DisplayStringVar(value="")
+        ttk.Label(controls,textvariable=self.feed_hint).grid(row=r,columnspan=2,sticky="w");r+=1
+        self.feed_recommend_btn=ttk.Button(controls,text="추천 피드 적용",command=self.apply_recommended_feed)
+        self.feed_recommend_btn.grid(row=r,columnspan=2,sticky="ew");r+=1
+        ttk.Label(controls,text="시험 기준: Ø2 / 24000rpm / 전 깊이 가공").grid(row=r,columnspan=2,sticky="w");r+=1
+        self.vars["stock"].trace_add("write",self.refresh_feed_recommendation)
+        self.vars["feed"].trace_add("write",self.refresh_feed_recommendation)
+        self.refresh_feed_recommendation()
         ttk.Label(controls,text="치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 제외").grid(row=r,columnspan=2,sticky="w");r+=1
         self.var("safe_z_auto",True,tk.BooleanVar)
         ttk.Checkbutton(controls,text="안전 Z 자동: 판 두께 × 2",variable=self.vars["safe_z_auto"]).grid(row=r,columnspan=2,sticky="w");r+=1
@@ -4880,6 +4899,9 @@ class App(tk.Tk):
         self.canvas.pack(fill="both", expand=True)
         self.canvas.bind("<Configure>", lambda e: self.redraw())
         self.canvas.bind("<ButtonPress-1>", self.canvas_press)
+        self.canvas.bind("<Delete>",self.delete_selected_instances)
+        for key in ("c","C"):self.canvas.bind(f"<Control-{key}>",self.copy_selected_instances)
+        for key in ("v","V"):self.canvas.bind(f"<Control-{key}>",self.paste_selected_instances)
         self.canvas.bind("<B1-Motion>", self.canvas_left_drag)
         self.canvas.bind("<ButtonRelease-1>", self.canvas_left_release)
         self.canvas.bind("<MouseWheel>", self.canvas_zoom)
@@ -4900,7 +4922,10 @@ class App(tk.Tk):
         object_bar=ttk.Frame(object_frame);object_bar.pack(fill="x",pady=(4,0))
         ttk.Label(object_bar,text="선택 수량").pack(side="left")
         self.object_qty=tk.IntVar(value=1)
-        ttk.Spinbox(object_bar,from_=0,to=1000,width=6,textvariable=self.object_qty).pack(side="left",padx=3)
+        self.object_qty_spin=ttk.Spinbox(object_bar,from_=0,to=1000,width=6,textvariable=self.object_qty,
+                                       command=self.apply_object_quantity)
+        self.object_qty_spin.pack(side="left",padx=3)
+        self.object_qty_spin.bind("<Return>",lambda event:self.apply_object_quantity())
         ttk.Button(object_bar,text="적용",command=self.apply_object_quantity).pack(side="left")
         ttk.Button(object_bar,text="객체 삭제",command=self.remove_selected_object).pack(side="right")
         offset_bar=ttk.Frame(object_frame);offset_bar.pack(fill="x",pady=3)
@@ -5052,6 +5077,24 @@ class App(tk.Tk):
             self.vars["wall_finish"].set(True)
         for attr in ("onion_start_text","onion_end_text"):
             if hasattr(self,attr):getattr(self,attr).configure(state="normal" if enabled else "disabled")
+
+    def refresh_feed_recommendation(self,*_):
+        try:
+            stock=float(self.vars["stock"].get());recommended=thickness_feed_recommendation(stock)
+            current=float(self.vars["feed"].get())
+            label=(f"{stock:g}T: recommended F{recommended} / current F{current:g}" if CURRENT_LANGUAGE=="en"
+                   else f"{stock:g}T 추천 F{recommended} · 현재 F{current:g}")
+            self.feed_hint.set(label if recommended is not None else "등록된 추천 없음 (2T / 3T / 6T)")
+            self.feed_recommend_btn.configure(state="normal" if recommended is not None else "disabled")
+        except (ValueError,tk.TclError):
+            self.feed_hint.set("두께·피드 숫자를 입력하세요.");self.feed_recommend_btn.configure(state="disabled")
+
+    def apply_recommended_feed(self):
+        try:recommended=thickness_feed_recommendation(float(self.vars["stock"].get()))
+        except (ValueError,tk.TclError):return
+        if recommended is None:return
+        self.vars["feed"].set(float(recommended))
+        self.status.set(f"두께별 추천 피드 F{recommended} 적용 · 사용자 지정 시험값")
 
     def sync_safe_z(self,*_):
         if "safe_z_auto" not in self.vars:return
@@ -5406,7 +5449,7 @@ class App(tk.Tk):
 
     def set_single_part(self,contours:Sequence[Contour],filename:str,stock:Optional[float]=None,
                         display_name:Optional[str]=None,layout_group:str=""):
-        self.part_objects=[];self.next_object_id=1
+        self.part_objects=[];self.next_object_id=1;self.instance_clipboard=[]
         self.part_objects.append(self.make_part_object(contours,filename,stock,display_name,layout_group));self.filename=filename
         if stock is not None:self.vars["stock"].set(round(stock,4))
         self.reset_job_view();self.rebuild_object_preview();self.refresh_object_tree()
@@ -5473,8 +5516,135 @@ class App(tk.Tk):
         if quantity<0 or quantity>1000:messagebox.showerror("객체 수량","수량은 0~1000으로 입력하세요.");return
         object_id=int(items[0][1:]);part=next((p for p in self.part_objects if p.object_id==object_id),None)
         if part:
+            existing=sorted({c.instance_id for c in self.contours if c.object_id==object_id})
+            other_count=len({contour_group_key(c) for c in self.contours if c.object_id!=object_id})
+            if other_count+quantity>1000:
+                messagebox.showerror("객체 수량","배치 수량은 합계 1000개 이하로 지정하세요.");return
+            try:
+                gap=float(self.vars["array_gap"].get());edge=float(self.vars["array_edge"].get())
+                sw=float(self.vars["sheet_w"].get());sh=float(self.vars["sheet_h"].get())
+                if not all(math.isfinite(v) for v in (gap,edge,sw,sh)) or min(gap,edge)<0 or min(sw,sh)<=0:
+                    raise ValueError("판재 크기와 간격을 확인하세요.")
+            except (ValueError,tk.TclError) as exc:
+                messagebox.showerror("객체 수량",str(exc));return
+            self.push_undo("선택 수량 변경")
+            self.sync_part_sources_from_preview()
+            if not self.nest_active:self.nest_source=copy.deepcopy(self.contours)
+            keep=set(existing[:quantity])
+            nested=[c for c in self.contours if c.object_id!=object_id or c.instance_id in keep]
+            if quantity>len(existing):
+                template,w,h=oriented_contour_group(part.contours,0)
+                # Stage new copies beside/above the existing layout without moving it.
+                clearance=nesting_offset(part,gap)
+                spacing=max(gap,clearance+max((nesting_offset(p,gap) for p in self.part_objects),default=0))
+                low=edge+clearance
+                boxes=list(contour_group_bounds_map(nested).values())
+                top=max((b[3] for b in boxes),default=low-spacing)
+                x=max((b[2] for b in boxes),default=low-spacing)+spacing;y=low;row_h=0.0
+                for instance_id in range(max(existing,default=0)+1,max(existing,default=0)+1+quantity-len(existing)):
+                    if x>low+EPS and x+w>sw-low+EPS:
+                        x=low;y=max(y+row_h+spacing,top+spacing);row_h=0.0
+                    group=copy.deepcopy(template)
+                    for c in group:
+                        c.points=[(px+x,py+y) for px,py in c.points]
+                        transform_pocket(c,lambda p:(p[0]+x,p[1]+y))
+                        c.bridges=[((a[0]+x,a[1]+y),(b[0]+x,b[1]+y)) for a,b in c.bridges]
+                        c.object_id=object_id;c.object_name=part.name;c.instance_id=instance_id
+                    nested.extend(group);x+=w+spacing;row_h=max(row_h,h)
+            self.contours=nested;self.nest_active=True;self.sheet_size=(sw,sh)
+            self.preview_cache.clear();self.collision_cache_key=None
+            self.selected=None;self.selected_contours=[];self.view_only=None;self.view_initialized=False
+            self.measure_start=None;self.measurement=None
+            self.manual_array_drag=None;self.manual_array_selected=None
             part.quantity=quantity;part.quantity_set=True;self.refresh_object_tree();self.object_tree.selection_set(f"o{object_id}")
-            self.status.set(f"{part.name} 배치 수량: {quantity}개")
+            self.redraw()
+            outside=sum(b[0]<edge-EPS or b[1]<edge-EPS or b[2]>sw-edge+EPS or b[3]>sh-edge+EPS
+                        for b in contour_group_bounds_map(nested).values())
+            self.status.set(f"{part.name}: {quantity} copies | Outside sheet: {outside} | New copies are staged. Arrange before machining."
+                            if CURRENT_LANGUAGE=="en" else
+                            f"{part.name} 화면 수량: {quantity}개 | 판재 밖 {outside}개 | 추가 복사본은 임시 배치입니다. 자동/수동 어레이로 정리하세요.")
+
+    def selected_instance_keys(self):
+        keys=({self.manual_array_selected} if self.manual_array_mode and self.manual_array_selected is not None
+              else {contour_group_key(c) for c in self.selected_contours if c.object_id})
+        return keys & set(contour_group_bounds_map(self.contours))
+
+    def copy_selected_instances(self,event=None):
+        if event is not None and event.widget is not self.canvas:return
+        keys=self.selected_instance_keys()
+        if keys:
+            self.instance_clipboard=copy.deepcopy([c for c in self.contours if contour_group_key(c) in keys])
+            self.status.set(f"Copied {len(keys)} instances | Ctrl+V to paste" if CURRENT_LANGUAGE=="en" else
+                            f"개체 {len(keys)}개 복사 | Ctrl+V로 붙여넣기")
+        return "break"
+
+    def paste_selected_instances(self,event=None):
+        if event is not None and event.widget is not self.canvas:return
+        copied=getattr(self,"instance_clipboard",[])
+        if not copied:return "break"
+        parts={p.object_id:p for p in self.part_objects}
+        if any(c.object_id not in parts for c in copied):
+            self.status.set("원본 파츠가 없습니다. 현재 작업에서 다시 복사하세요.");return "break"
+        boxes=contour_group_bounds_map(copied);current=contour_group_bounds_map(self.contours)
+        if len(boxes)+len(current)>1000:
+            messagebox.showerror("객체 수량","배치 수량은 합계 1000개 이하로 지정하세요.");return "break"
+        try:
+            gap=float(self.vars["array_gap"].get());edge=float(self.vars["array_edge"].get())
+            sw=float(self.vars["sheet_w"].get());sh=float(self.vars["sheet_h"].get())
+            if not all(math.isfinite(v) for v in (gap,edge,sw,sh)) or min(gap,edge)<0 or min(sw,sh)<=0:raise ValueError("판재 크기와 간격을 확인하세요.")
+            clearance=max(nesting_offset(p,gap) for p in parts.values())
+        except (ValueError,tk.TclError) as exc:
+            messagebox.showerror("붙여넣기",str(exc));return "break"
+        low=edge+clearance;spacing=max(gap,2*clearance)
+        x0=min(b[0] for b in boxes.values());y0=min(b[1] for b in boxes.values())
+        width=max(b[2] for b in boxes.values())-x0
+        x=max((b[2] for b in current.values()),default=low-spacing)+spacing;y=low
+        if x>low+EPS and x+width>sw-low+EPS:
+            x=low;y=max((b[3] for b in current.values()),default=low-spacing)+spacing
+        dx=x-x0;dy=y-y0;group=copy.deepcopy(copied);mapping={};last={}
+        for c in self.contours:last[c.object_id]=max(last.get(c.object_id,0),c.instance_id)
+        for key in boxes:
+            last[key[0]]=last.get(key[0],0)+1;mapping[key]=last[key[0]]
+        self.push_undo("개체 붙여넣기");self.sync_part_sources_from_preview()
+        if not self.nest_active:self.nest_source=copy.deepcopy(self.contours)
+        for c in group:
+            c.instance_id=mapping[contour_group_key(c)]
+            c.points=[(px+dx,py+dy) for px,py in c.points]
+            transform_pocket(c,lambda p:(p[0]+dx,p[1]+dy))
+            c.bridges=[((a[0]+dx,a[1]+dy),(b[0]+dx,b[1]+dy)) for a,b in c.bridges]
+        self.contours.extend(group);self.nest_active=True;self.sheet_size=(sw,sh)
+        for oid in {c.object_id for c in group}:
+            parts[oid].quantity=len({c.instance_id for c in self.contours if c.object_id==oid});parts[oid].quantity_set=True
+        self.set_contour_selection(group,group[0]);self.manual_array_selected=None;self.manual_array_drag=None
+        self.preview_cache.clear();self.collision_cache_key=None;self.view_initialized=False
+        self.redraw();self.object_tree_select()
+        outside=sum(b[0]<edge-EPS or b[1]<edge-EPS or b[2]>sw-edge+EPS or b[3]>sh-edge+EPS
+                    for b in contour_group_bounds_map(group).values())
+        self.status.set(f"Pasted {len(boxes)} instances | Outside sheet: {outside} | Arrange before machining."
+                        if CURRENT_LANGUAGE=="en" else
+                        f"개체 {len(boxes)}개 붙여넣기 | 판재 밖 {outside}개 | 임시 배치: 자동/수동 어레이로 정리하세요.")
+        return "break"
+
+    def delete_selected_instances(self,event=None):
+        if event is not None and event.widget is not self.canvas:return
+        keys=self.selected_instance_keys()
+        if not keys:return "break"
+        self.push_undo("선택 개체 삭제")
+        self.sync_part_sources_from_preview()
+        if not self.nest_active:self.nest_source=copy.deepcopy(self.contours)
+        self.contours=[c for c in self.contours if contour_group_key(c) not in keys]
+        self.nest_active=True
+        for part in self.part_objects:
+            if any(key[0]==part.object_id for key in keys):
+                part.quantity=len({c.instance_id for c in self.contours if c.object_id==part.object_id})
+                part.quantity_set=True
+        self.set_contour_selection([]);self.manual_array_selected=None;self.manual_array_drag=None
+        self.join_first=None;self.measure_start=None;self.measurement=None
+        self.preview_cache.clear();self.collision_cache_key=None
+        self.redraw();self.object_tree_select()
+        self.status.set(f"Deleted {len(keys)} instances | Ctrl+Z to undo" if CURRENT_LANGUAGE=="en" else
+                        f"선택 개체 {len(keys)}개 삭제 | Ctrl+Z로 되돌리기")
+        return "break"
 
     def remove_selected_object(self):
         items=self.object_tree.selection()
@@ -5878,9 +6048,17 @@ class App(tk.Tk):
                                  (f"{self.selected.target_depth:g}" if self.selected.target_depth else "관통"))
         self.redraw()
 
+    def leave_array_edit_for_pick(self):
+        if self.manual_array_mode:
+            self.manual_array_mode=False;self.manual_array_drag=None;self.manual_array_selected=None
+            self.manual_array_btn.configure(text="수동 어레이 편집 (드래그 / R 회전)")
+            self.redraw(refresh_tree=False)
+
     def toggle_manual(self):
         self.manual_mode = not self.manual_mode
         if self.manual_mode:
+            self.leave_array_edit_for_pick()
+            self.start_mode=False;self.start_btn.configure(text="절삭 시작점 선택: OFF")
             self.join_mode = False; self.join_first = None
             self.join_btn.configure(text="두 라인 선택 연결: OFF")
             self.origin_mode = False; self.origin_btn.configure(text="DXF XY 원점 선택: OFF")
@@ -5891,6 +6069,8 @@ class App(tk.Tk):
         self.join_mode = not self.join_mode
         self.join_first = None
         if self.join_mode:
+            self.leave_array_edit_for_pick()
+            self.start_mode=False;self.start_btn.configure(text="절삭 시작점 선택: OFF")
             self.manual_mode = False
             self.manual_btn.configure(text="수동 탭 추가: OFF")
             self.origin_mode = False; self.origin_btn.configure(text="DXF XY 원점 선택: OFF")
@@ -5901,6 +6081,7 @@ class App(tk.Tk):
     def toggle_start(self):
         self.start_mode = not self.start_mode
         if self.start_mode:
+            self.leave_array_edit_for_pick()
             self.manual_mode = False; self.join_mode = False; self.join_first = None
             self.manual_btn.configure(text="수동 탭 추가: OFF")
             self.join_btn.configure(text="두 라인 선택 연결: OFF")
@@ -5915,6 +6096,7 @@ class App(tk.Tk):
             return
         self.origin_mode = not self.origin_mode
         if self.origin_mode:
+            self.leave_array_edit_for_pick()
             self.manual_mode = False; self.join_mode = False; self.join_first = None; self.start_mode = False
             self.measure_mode=False;self.measure_start=None;self.measure_btn.configure(text="거리 측정: OFF")
             self.manual_btn.configure(text="수동 탭 추가: OFF")
@@ -5926,6 +6108,7 @@ class App(tk.Tk):
     def toggle_measure(self):
         self.measure_mode=not self.measure_mode;self.measure_start=None
         if self.measure_mode:
+            self.leave_array_edit_for_pick()
             self.manual_mode=False;self.join_mode=False;self.join_first=None;self.start_mode=False;self.origin_mode=False
             self.manual_btn.configure(text="수동 탭 추가: OFF");self.join_btn.configure(text="두 라인 선택 연결: OFF")
             self.start_btn.configure(text="절삭 시작점 선택: OFF");self.origin_btn.configure(text="DXF XY 원점 선택: OFF")
@@ -5969,6 +6152,7 @@ class App(tk.Tk):
             q=(s0[0]+vx*t,s0[1]+vy*t)
             if EPS<t<1-EPS and den>EPS:mode="perpendicular";ln=math.sqrt(den);unit=(vx/ln,vy/ln)
         self.measurement={"a":a,"b":q,"mode":mode,"unit":unit};self.measure_start=None
+        self.measure_mode=False;self.measure_btn.configure(text="거리 측정: OFF")
         self.status.set(f"측정 {dist(a,q):.3f} mm | ΔX {abs(q[0]-a[0]):.3f} ΔY {abs(q[1]-a[1]):.3f}");self.redraw()
 
     def set_xy_origin(self, point: Point):
@@ -6012,7 +6196,9 @@ class App(tk.Tk):
             if gap > EPS: a.bridges.append(bridge)
             self.contours.remove(b)
             self.status.set(f"두 라인 연결 완료 | 연결 전 간격 {gap:.4f} mm")
-        classify_contours(self.contours); self.join_first = None; self.redraw()
+        classify_contours(self.contours); self.join_first = None
+        self.join_mode=False;self.join_btn.configure(text="두 라인 선택 연결: OFF")
+        self.redraw()
 
     def visible_contours(self) -> List[Contour]:
         return self.view_only if self.view_only is not None else self.contours
@@ -6598,6 +6784,7 @@ class App(tk.Tk):
         self.tag_canvas_items_after(overlay_marker,"view_live")
 
     def canvas_press(self,event):
+        self.canvas.focus_set()
         if self.manual_array_mode:
             key=self.manual_group_at(self.inv_transform((event.x,event.y)))
             self.manual_array_selected=key;self.manual_array_drag=None
@@ -6670,6 +6857,7 @@ class App(tk.Tk):
                 else:
                     self.push_undo("절삭 시작점 변경")
                     best[1].start_s = best[2];self.set_contour_selection([best[1]],best[1])
+                    self.start_mode=False;self.start_btn.configure(text="절삭 시작점 선택: OFF")
                     self.status.set(f"절삭 시작점 설정 | Layer {best[1].layer}")
                     self.redraw(refresh_tree=False)
             elif self.join_mode:
@@ -6684,6 +6872,7 @@ class App(tk.Tk):
             elif self.manual_mode:
                 if best[1].closed and best[1].role == "outer" and best[1].tabs_enabled:
                     self.push_undo("수동 탭 추가")
+                    self.manual_mode=False;self.manual_btn.configure(text="수동 탭 추가: OFF")
                     best[1].tabs.append(best[2]);best[1].tabs.sort();best[1].tabs_cleared=False;self.redraw()
                     self.status.set(f"수동 탭 추가: {len(best[1].tabs)}개")
             else:

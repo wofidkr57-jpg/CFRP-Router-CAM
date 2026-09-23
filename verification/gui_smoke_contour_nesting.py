@@ -22,6 +22,7 @@ with tempfile.TemporaryDirectory() as tmp:
         with mock.patch.object(cam.messagebox,'showerror') as errors:app.apply_object_offset()
         assert errors.called and app.part_objects[0].nest_offset==.5
         app.object_qty.set(2);app.apply_object_quantity()
+        staged=[list(c.points) for c in app.contours]
         app.vars['array_dense'].set(True);app.vars['sheet_w'].set(45);app.vars['sheet_h'].set(30)
         app.vars['array_edge'].set(0);app.vars['array_rotate'].set(False)
         with mock.patch.object(cam.messagebox,'askokcancel',return_value=True) as warning,mock.patch.object(cam.messagebox,'showerror') as errors:
@@ -32,9 +33,10 @@ with tempfile.TemporaryDirectory() as tmp:
         a,b=[Polygon(c.points) for c in app.contours]
         assert a.distance(b)>=1-1e-6 and a.intersection(b).area<1e-7
         assert app.part_objects[0].nest_offset==.5
-        app.undo();assert not app.nest_active and app.part_objects[0].nest_offset==.5
+        app.undo();assert app.nest_active and app.part_objects[0].nest_offset==.5
+        assert [c.points for c in app.contours]==staged
         with mock.patch.object(cam.messagebox,'askokcancel',return_value=False):app.auto_nest()
-        assert not app.nest_active
+        assert [c.points for c in app.contours]==staged
         app.object_tree.selection_set('o1');app.object_tree_select()
         app.object_offset.set('');app.apply_object_offset()
         assert app.part_objects[0].nest_offset is None
