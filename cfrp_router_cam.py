@@ -56,7 +56,7 @@ STEP_FACE_NORMAL_DOT = 0.999
 TOOL_WEAR_DEFAULT_LOSS_PER_10M = 0.079
 TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
-APP_VERSION = "1.25"
+APP_VERSION = "1.26"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -4726,15 +4726,21 @@ class App(tk.Tk):
         ttk.Label(top, textvariable=self.status).pack(side="left", padx=12)
 
         pan = ttk.Panedwindow(self, orient="horizontal"); pan.pack(fill="both", expand=True)
+        self.main_pan=pan;self.panel_ratios=None;self.panel_width=0;self.panel_job=None
         control_holder = ttk.Frame(pan); pan.add(control_holder, weight=0)
         control_canvas = tk.Canvas(control_holder, width=285,bg="#0b1220",highlightthickness=0)
         control_scroll = ttk.Scrollbar(control_holder, orient="vertical", command=control_canvas.yview)
         control_canvas.configure(yscrollcommand=control_scroll.set)
-        control_scroll.pack(side="right", fill="y"); control_canvas.pack(side="left", fill="both", expand=True)
+        self.control_xscroll=ttk.Scrollbar(control_holder,orient="horizontal",command=control_canvas.xview)
+        control_canvas.configure(xscrollcommand=self.control_xscroll.set)
+        control_holder.rowconfigure(0,weight=1);control_holder.columnconfigure(0,weight=1)
+        control_scroll.grid(row=0,column=1,sticky="ns");control_canvas.grid(row=0,column=0,sticky="nsew")
+        self.control_xscroll.grid(row=1,column=0,sticky="ew");self.control_xscroll.grid_remove()
         controls = ttk.Frame(control_canvas, padding=8)
         control_window = control_canvas.create_window((0,0), window=controls, anchor="nw")
         controls.bind("<Configure>", lambda e: control_canvas.configure(scrollregion=control_canvas.bbox("all")))
-        control_canvas.bind("<Configure>", lambda e: control_canvas.itemconfigure(control_window, width=e.width))
+        self.control_canvas=control_canvas;self.controls=controls;self.control_window=control_window
+        control_canvas.bind("<Configure>",self.resize_controls)
         control_canvas.bind("<MouseWheel>", lambda e: control_canvas.yview_scroll(int(-e.delta/120), "units"))
         center = ttk.Frame(pan); pan.add(center, weight=3)
         right = ttk.Frame(pan); pan.add(right, weight=2)
@@ -5079,6 +5085,59 @@ class App(tk.Tk):
         update_box=ttk.LabelFrame(settings_tab,text="프로그램 업데이트",padding=12);update_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Label(update_box,text=f"현재 버전: V{APP_VERSION}\n새 버전은 다운로드 검증 후 기존 EXE를 자동 교체합니다.",justify="left").pack(anchor="w")
         ttk.Button(update_box,text="지금 업데이트 확인",command=lambda:self.start_update_check(manual=True)).pack(fill="x",pady=(8,0))
+        pan.bind("<Configure>",self.resize_panels)
+        pan.bind("<ButtonRelease-1>",self.remember_panel_widths)
+        pan.bind("<Double-Button-1>",self.reset_panel_widths)
+        self.after_idle(self.reset_panel_widths)
+        for key in ("tool_d","inner_size_adjust","outer_size_adjust"):
+            self.vars[key].trace_add("write",lambda *_:self.schedule_view_redraw() if self.manual_array_mode else None)
+
+    def controls_min_width(self):
+        columns=[0,0];spans=0
+        for widget in self.controls.winfo_children():
+            info=widget.grid_info()
+            if not info:continue
+            if int(info.get("columnspan",1))==1:
+                col=int(info.get("column",0))
+                if col<2:columns[col]=max(columns[col],widget.winfo_reqwidth()+10)
+            elif not isinstance(widget,ttk.Label):spans=max(spans,widget.winfo_reqwidth())
+        return max(sum(columns),spans)+20
+
+    def resize_controls(self,event=None):
+        viewport=self.control_canvas.winfo_width()
+        width=max(viewport,self.controls_min_width())
+        for widget in self.controls.winfo_children():
+            if isinstance(widget,ttk.Label) and int(widget.grid_info().get("columnspan",1))>1:
+                widget.configure(wraplength=max(100,width-24),justify="left")
+        self.control_canvas.itemconfigure(self.control_window,width=width)
+        if width>viewport+1:self.control_xscroll.grid()
+        else:self.control_xscroll.grid_remove();self.control_canvas.xview_moveto(0)
+
+    def resize_panels(self,event=None):
+        width=self.main_pan.winfo_width()
+        if width==self.panel_width:return
+        self.panel_width=width
+        if self.panel_job is not None:self.after_cancel(self.panel_job)
+        self.panel_job=self.after_idle(self.layout_panels)
+
+    def layout_panels(self):
+        self.panel_job=None;width=self.main_pan.winfo_width()
+        if width<10:return
+        if self.panel_ratios:
+            left,second=(round(v*width) for v in self.panel_ratios)
+        else:
+            left=min(self.controls_min_width()+24,int(width*.45))
+            second=width-min(max(340,int(width*.28)),int(width*.35))
+        left=max(120,min(left,width-260));second=max(left+140,min(second,width-120))
+        self.main_pan.sashpos(0,left);self.main_pan.sashpos(1,second)
+
+    def remember_panel_widths(self,event=None):
+        width=max(self.main_pan.winfo_width(),1)
+        self.panel_ratios=tuple(self.main_pan.sashpos(i)/width for i in (0,1))
+
+    def reset_panel_widths(self,event=None):
+        self.panel_ratios=None;self.layout_panels();self.resize_controls()
+        return "break"
 
     def apply_language(self):
         selected=str(self.language_var.get()).strip()
@@ -5584,8 +5643,9 @@ class App(tk.Tk):
                             f"{part.name} 화면 수량: {quantity}개 | 판재 밖 {outside}개 | 추가 복사본은 임시 배치입니다. 자동/수동 어레이로 정리하세요.")
 
     def selected_instance_keys(self):
-        keys=({self.manual_array_selected} if self.manual_array_mode and self.manual_array_selected is not None
-              else {contour_group_key(c) for c in self.selected_contours if c.object_id})
+        keys={contour_group_key(c) for c in self.selected_contours if c.object_id}
+        if self.manual_array_mode and self.manual_array_selected is not None and self.manual_array_selected not in keys:
+            keys={self.manual_array_selected}
         return keys & set(contour_group_bounds_map(self.contours))
 
     def nudge_selected_instances(self,event):
@@ -5982,6 +6042,8 @@ class App(tk.Tk):
         except Exception as exc:
             messagebox.showerror("수동 어레이",str(exc));return
         self.manual_array_mode=True;self.manual_array_selected=None;self.manual_array_drag=None
+        self.snap_cooldown={}
+        self.set_contour_selection([])
         self.manual_mode=False;self.join_mode=False;self.join_first=None;self.start_mode=False;self.origin_mode=False;self.measure_mode=False
         self.manual_btn.configure(text="수동 탭 추가: OFF");self.join_btn.configure(text="두 라인 선택 연결: OFF")
         self.start_btn.configure(text="절삭 시작점 선택: OFF");self.origin_btn.configure(text="DXF XY 원점 선택: OFF");self.measure_btn.configure(text="거리 측정: OFF")
@@ -5990,6 +6052,55 @@ class App(tk.Tk):
 
     def manual_group_tag(self,key:Tuple[int,int])->str:
         return f"manual_group_{key[0]}_{key[1]}"
+
+    def snap_manual_move(self,keys,dx,dy):
+        cooldown=getattr(self,"snap_cooldown",{})
+        self.snap_cooldown=cooldown
+        if any(cooldown.get(k,0)>0 for k in keys):
+            for k in keys:cooldown[k]=max(0,cooldown.get(k,0)-1)
+            return dx,dy,False
+        if not self.sheet_size:return dx,dy,False
+        try:edge=max(0,float(self.vars["array_edge"].get()))
+        except (ValueError,tk.TclError):return dx,dy,False
+        bounds=[b for k,b in contour_group_bounds_map(self.contours).items() if k in keys]
+        if not bounds or not math.isfinite(edge):return dx,dy,False
+        x0=min(b[0] for b in bounds)+dx;y0=min(b[1] for b in bounds)+dy
+        x1=max(b[2] for b in bounds)+dx;y1=max(b[3] for b in bounds)+dy
+        sw,sh=self.sheet_size;threshold=min(2.0,8/max(self.view[0],EPS))
+        sx=min((edge-x0,sw-edge-x1),key=abs)
+        sy=min((edge-y0,sh-edge-y1),key=abs)
+        hitx=abs(sx)<=threshold and x1-x0<=sw-2*edge+EPS
+        hity=abs(sy)<=threshold and y1-y0<=sh-2*edge+EPS
+        if hitx or hity:
+            for k in keys:cooldown[k]=2
+        return dx+(sx if hitx else 0),dy+(sy if hity else 0),hitx or hity
+
+    def draw_manual_offsets(self,visible):
+        try:
+            diameter=float(self.vars["tool_d"].get())
+            cfg={k:float(self.vars[k].get()) for k in ("inner_size_adjust","outer_size_adjust")}
+            if not math.isfinite(diameter) or diameter<=0:return
+            if not all(math.isfinite(v) and abs(v)<diameter for v in cfg.values()):return
+        except (ValueError,tk.TclError):return
+        if len(self.preview_cache)>max(512,len(self.contours)*8):self.preview_cache.clear()
+        for c in visible:
+            if not c.enabled or len(c.points)<2 or c.operation=="pocket":continue
+            anchor=c.points[0]
+            relative=tuple((round(x-anchor[0],7),round(y-anchor[1],7)) for x,y in c.points)
+            key=("manual-offset",relative,c.closed,c.role,c.operation,diameter,tuple(cfg.items()))
+            route=self.preview_cache.get(key)
+            if route is None:
+                try:points=compensated_route(c,diameter,False,cfg=cfg)[0] if c.closed and c.operation!="pocket" else c.points
+                except (ValueError,IndexError):continue
+                route=[(x-anchor[0],y-anchor[1]) for x,y in points];self.preview_cache[key]=route
+            if len(route)<2:continue
+            points=route+[route[0]] if c.closed else route
+            xy=[v for x,y in points for v in self.transform((x+anchor[0],y+anchor[1]))]
+            self.canvas.create_line(*xy,fill="#ffb347",dash=(4,3),width=1,
+                                    tags=(self.manual_group_tag(contour_group_key(c)),"manual_offset"))
+        self.canvas.create_text(12,12,anchor="nw",fill="#ffb347",
+            text="공구 중심선 참고 · 리드인/마모/포켓/충돌검사 제외" if CURRENT_LANGUAGE!="en" else
+                 "Tool-center reference: excludes leads, wear, pockets and collision checks")
 
     def manual_group_at(self,p:Point)->Optional[Tuple[int,int]]:
         visible=self.visible_contours();bounds_by_key=contour_group_bounds_map(visible)
@@ -6010,7 +6121,7 @@ class App(tk.Tk):
         if not self.manual_array_mode or self.manual_array_selected is None:return "break"
         if self.manual_array_drag is not None:return "break"
         self.push_undo("수동 배치 좌우 반전")
-        flip_contour_group(self.contours,self.manual_array_selected)
+        for key in self.selected_instance_keys():flip_contour_group(self.contours,key)
         self.preview_cache.clear();self.collision_cache_key=None;self.measurement=None;self.measure_start=None
         self.redraw(refresh_tree=False)
         self.status.set("Flipped left/right | Ctrl+Z to undo" if CURRENT_LANGUAGE=="en" else
@@ -6021,7 +6132,7 @@ class App(tk.Tk):
         if not self.manual_array_mode or self.manual_array_selected is None:return None
         if event is not None and event.widget.winfo_class() in ("Entry","TEntry","Text","TCombobox","TSpinbox"):return None
         self.push_undo("수동 배치 90° 회전")
-        rotate_contour_group(self.contours,self.manual_array_selected,90.0)
+        for key in self.selected_instance_keys():rotate_contour_group(self.contours,key,90.0)
         self.preview_cache.clear();self.collision_cache_key=None;self.redraw(refresh_tree=False)
         self.status.set(f"선택 객체 #{self.manual_array_selected[1]} 90° 회전")
         return "break"
@@ -6503,6 +6614,7 @@ class App(tk.Tk):
         self.text.configure(font=("Consolas",size));self.start_text.configure(font=("Consolas",size));self.end_text.configure(font=("Consolas",size))
         ttk.Style(self).configure("Treeview",rowheight=max(20,size+10),font=("Segoe UI",size))
         ttk.Style(self).configure("Treeview.Heading",font=("Segoe UI",size,"bold"))
+        self.after_idle(self.reset_panel_widths)
         self.redraw()
         if not silent:self.status.set(f"화면 글자 크기 {size} 적용")
 
@@ -6673,6 +6785,7 @@ class App(tk.Tk):
             cy0=min(p[1] for p in contour.points);cy1=max(p[1] for p in contour.points)
             return cx1>=vx0 and cx0<=vx1 and cy1>=vy0 and cy0<=vy1
         visible=[c for c in all_visible if intersects_view(c)]
+        manual_keys=self.selected_instance_keys() if self.manual_array_mode else set()
         if len(self.part_objects)>1 or self.nest_active:
             groups={}
             for c in all_visible:
@@ -6683,7 +6796,7 @@ class App(tk.Tk):
                     if not pts:continue
                     gx0=min(p[0] for p in pts);gy0=min(p[1] for p in pts);gx1=max(p[0] for p in pts);gy1=max(p[1] for p in pts)
                     sx0,sy0=self.transform((gx0,gy0));sx1,sy1=self.transform((gx1,gy1));color=OBJECT_COLORS[(object_id-1)%len(OBJECT_COLORS)]
-                    key=(object_id,instance_id);tag=self.manual_group_tag(key);chosen=self.manual_array_mode and key==self.manual_array_selected
+                    key=(object_id,instance_id);tag=self.manual_group_tag(key);chosen=key in manual_keys
                     self.canvas.create_rectangle(sx0,sy1,sx1,sy0,outline="#42e695" if chosen else color,
                                                  width=3 if chosen else 1,dash=() if chosen else (3,4),tags=(tag,))
                     self.canvas.create_text(sx0+4,sy1+4,text=f"{name} #{instance_id}",fill="#42e695" if chosen else color,
@@ -6692,7 +6805,7 @@ class App(tk.Tk):
             group_tag=self.manual_group_tag(contour_group_key(c)) if c.object_id else ""
             xy=[]
             for p in c.points + ([c.points[0]] if c.closed else []): xy.extend(self.transform(p))
-            group_chosen=self.manual_array_mode and c.object_id and contour_group_key(c)==self.manual_array_selected
+            group_chosen=c.object_id and contour_group_key(c) in manual_keys
             color = "#42e695" if id(c) in selected_ids or group_chosen else ("#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d"))
             self.canvas.create_line(*xy, fill=color, width=3 if id(c) in selected_ids else 2,tags=(group_tag,) if group_tag else ())
             for a,b in c.bridges:
@@ -6706,6 +6819,7 @@ class App(tk.Tk):
                 self.canvas.create_polygon(x,y-7,x-6,y+5,x+6,y+5,fill="#ff4fd8",outline="white",tags=(group_tag,) if group_tag else ())
         self.canvas.addtag_all("view_live")
         detail_marker=self.canvas_item_marker()
+        if self.manual_array_mode and self.vars["show_toolpath"].get():self.draw_manual_offsets(visible)
         if not self.manual_array_mode and self.vars.get("show_toolpath") and self.vars["show_toolpath"].get():
             try:
                 preview_cfg={
@@ -6840,10 +6954,18 @@ class App(tk.Tk):
         self.canvas.focus_set()
         if self.manual_array_mode:
             key=self.manual_group_at(self.inv_transform((event.x,event.y)))
-            self.manual_array_selected=key;self.manual_array_drag=None
-            if key is not None:
-                self.manual_array_drag=(key,event.x,event.y,event.x,event.y)
-                self.status.set(f"선택 객체 #{key[1]} | 방향키 길게: 연속 이동 · Shift: 빠르게 · R: 90° 회전 · F: 좌우 반전")
+            keys=self.selected_instance_keys();additive=bool(event.state & 0x0004)
+            if additive:
+                if key is not None:
+                    if key in keys:keys.remove(key)
+                    else:keys.add(key)
+            elif key not in keys:keys={key} if key is not None else set()
+            self.manual_array_selected=key if key in keys else next(iter(sorted(keys)),None)
+            self.manual_array_drag=None
+            self.set_contour_selection([c for c in self.contours if contour_group_key(c) in keys])
+            if key is not None and key in keys:
+                self.manual_array_drag=(frozenset(keys),event.x,event.y,event.x,event.y)
+                self.status.set(f"개체 {len(keys)}개 선택 | Ctrl+클릭: 추가/해제 · 드래그/방향키: 함께 이동 · R/F: 각 개체 회전/반전")
             else:self.status.set("배치할 객체의 경계 안을 클릭하세요.")
             self.redraw(refresh_tree=False);return
         if self.measure_mode or self.origin_mode or self.start_mode or self.join_mode or self.manual_mode:
@@ -6855,7 +6977,7 @@ class App(tk.Tk):
         if self.manual_array_mode:
             if self.manual_array_drag is None:return
             key,sx,sy,lx,ly=self.manual_array_drag
-            self.canvas.move(self.manual_group_tag(key),event.x-lx,event.y-ly)
+            for item in key:self.canvas.move(self.manual_group_tag(item),event.x-lx,event.y-ly)
             self.manual_array_drag=(key,sx,sy,event.x,event.y);return
         if self.canvas_selection_drag is None:return
         sx,sy,_,_=self.canvas_selection_drag;self.canvas_selection_drag=(sx,sy,event.x,event.y)
@@ -6871,9 +6993,12 @@ class App(tk.Tk):
             key,sx,sy,lx,ly=self.manual_array_drag;self.manual_array_drag=None
             scale=max(self.view[0],EPS);dx=(event.x-sx)/scale;dy=(sy-event.y)/scale
             if abs(dx)>EPS or abs(dy)>EPS:
-                self.push_undo("수동 배치 이동");move_contour_group(self.contours,key,dx,dy)
+                dx,dy,snapped=self.snap_manual_move(key,dx,dy)
+                self.push_undo("수동 배치 이동")
+                for item in key:move_contour_group(self.contours,item,dx,dy)
                 self.preview_cache.clear();self.collision_cache_key=None
-                self.status.set(f"객체 #{key[1]} 이동 | ΔX {dx:.3f} ΔY {dy:.3f} mm")
+                self.status.set(f"개체 {len(key)}개 이동 | ΔX {dx:.3f} ΔY {dy:.3f} mm"+
+                                (" | 테두리 스냅 · 다음 2회 드래그 자유 조정" if snapped else ""))
             self.redraw(refresh_tree=False);return
         if self.canvas_selection_drag is None:return
         sx,sy,_,_=self.canvas_selection_drag;self.canvas_selection_drag=None;self.canvas.delete("selection_box")
