@@ -49,8 +49,8 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "v${{ steps.app.outputs.version }}"
-          gh release view $tag *> $null
-          if ($LASTEXITCODE -eq 0) {
+          $assets = gh release view $tag --json assets --jq '.assets | length' 2>$null
+          if ($LASTEXITCODE -eq 0 -and [int]$assets -ge 3) {
             "exists=true" >> $env:GITHUB_OUTPUT
           } else {
             "exists=false" >> $env:GITHUB_OUTPUT
@@ -181,12 +181,21 @@ jobs:
         run: |
           $version = "${{ steps.app.outputs.version }}"
           $tag = "v${version}"
-          git tag -a $tag -m "CFRP Router CAM V${version}"
-          git push origin $tag
-          gh release create $tag `
+          git rev-parse --verify "refs/tags/$tag" *> $null
+          if ($LASTEXITCODE -ne 0) {
+            git tag -a $tag -m "CFRP Router CAM V${version}"
+            git push origin $tag
+            if ($LASTEXITCODE -ne 0) { throw "Tag push failed." }
+          }
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -ne 0) {
+            gh release create $tag --title "CFRP Router CAM V${version}" --notes-file CHANGELOG.md
+            if ($LASTEXITCODE -ne 0) { throw "Release creation failed." }
+          }
+          gh release upload $tag `
             "release/CFRP_Router_CAM.exe" `
             "release/CFRP_Router_CAM_V${version}.exe" `
-            "release/CFRP_Router_CAM_V${version}_source.zip" `
-            --title "CFRP Router CAM V${version}" `
-            --notes-file CHANGELOG.md
-
+            "release/CFRP_Router_CAM_V${version}_source.zip" --clobber
+          if ($LASTEXITCODE -ne 0) { throw "Release asset upload failed." }
+          $assets = gh release view $tag --json assets --jq '.assets | length'
+          if ($LASTEXITCODE -ne 0 -or [int]$assets -lt 3) { throw "Release assets are missing." }
