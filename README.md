@@ -1,4 +1,4 @@
-## 다음 업데이트: 내경·외경 치수 보정
+## V1.23: 내경·외경 치수 보정
 
 공구 설정에 `내경 치수 보정 (mm)`와 `외경 치수 보정 (mm)`를 추가했습니다. 지름/전체 폭 기준으로 양수는 확대, 음수는 축소하며 실제 중심 경로는 절반만 이동합니다. 현재 요청에 따른 초기 시험값은 내경 +0.10mm, 외경 -0.14mm이며 0으로 바꾸면 해당 보정을 끕니다. 입력값은 설정에 저장됩니다. 새 항목이 없는 기존 설정에도 이 초기값이 표시되므로 생성 전에 확인하세요.
 
@@ -106,7 +106,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.22**입니다.
+현재 최신 버전은 **V1.23**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -128,7 +128,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.22 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.22/CFRP_Router_CAM_V1.22_source.zip)
+- [V1.23 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.23/CFRP_Router_CAM_V1.23_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
