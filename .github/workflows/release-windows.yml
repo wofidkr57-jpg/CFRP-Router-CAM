@@ -190,7 +190,7 @@ jobs:
             "release/CFRP_Router_CAM_V${version}_source.zip" --clobber
           if ($LASTEXITCODE -ne 0) { throw "Release asset upload failed." }
           $releaseId = gh api "repos/${{ github.repository }}/releases/tags/$tag" --jq '.id'
-          $assets = gh api "repos/${{ github.repository }}/releases/$releaseId/assets" --jq 'length' 
+          $assets = gh api "repos/${{ github.repository }}/releases/$releaseId/assets" --jq 'length'
           if ($LASTEXITCODE -ne 0 -or [int]$assets -lt 3) { throw "Release assets are missing." }
 
       - name: Commit verified update manifest
@@ -204,4 +204,3 @@ jobs:
             git commit -m "Point automatic updates to verified V${{ steps.app.outputs.version }} release"
             git push origin HEAD:main
           }
-
