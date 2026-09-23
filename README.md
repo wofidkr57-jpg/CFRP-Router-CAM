@@ -1,3 +1,7 @@
+## V1.29: 단축키와 설정 안내
+
+T는 수동탭, S는 시작점 선택을 켭니다. 한 번 지정하면 종료되며 다음 점은 단축키를 다시 누르세요. Esc는 점 선택을 취소하고 Home은 전체 형상을 화면에 맞춥니다. 설정 탭 아래에 기존 방향키·R/F·복사/붙여넣기 등 단축키 안내를 추가했습니다. 문자 단축키는 영문 입력 상태에서 사용하세요. 입력칸 편집이나 별도 창에서는 새 단축키가 CAM 선택 모드를 바꾸지 않습니다.
+
 ## V1.28: 외곽 절단 순서 드래그
 
 외곽 행의 `순서` 또는 이름/Layer 영역을 잡아 다른 외곽 행으로 드래그하면 위아래 순서를 바꿀 수 있습니다. 선택한 대상 행이 강조되며 아래로 내리면 그 행 뒤, 위로 올리면 그 행 앞에 절단됩니다. 변경 후 외곽 순번 전체를 고정하므로 최적화가 되돌리지 않습니다. `외곽 순서 자동` 버튼으로 전체 지정을 해제할 수 있습니다. 내부/포켓 행은 이 드래그로 옮기지 않습니다. `지정`/`윤곽`/`가공 여부` 셀은 클릭 편집 영역입니다.
@@ -144,7 +148,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.28**입니다.
+현재 최신 버전은 **V1.29**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -166,7 +170,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.28 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.28/CFRP_Router_CAM_V1.28_source.zip)
+- [V1.29 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.29/CFRP_Router_CAM_V1.29_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.

@@ -56,7 +56,7 @@ STEP_FACE_NORMAL_DOT = 0.999
 TOOL_WEAR_DEFAULT_LOSS_PER_10M = 0.079
 TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
-APP_VERSION = "1.28"
+APP_VERSION = "1.29"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -4660,7 +4660,8 @@ class App(tk.Tk):
         self.bind_all("<Control-Z>", self.undo)
         self.bind_all("<Control-y>", self.redo)
         self.bind_all("<Control-Y>", self.redo)
-        self.bind_all("<Escape>",self.clear_measurement)
+        for key in ("t","T","s","S","Escape","Home"):
+            self.bind_all(f"<KeyPress-{key}>",self.pick_shortcut)
         self.bind_all("<KeyPress-r>",self.rotate_manual_array_selected)
         self.bind_all("<KeyPress-R>",self.rotate_manual_array_selected)
         if getattr(sys,"frozen",False):self.after(1800,self.start_update_check)
@@ -5105,6 +5106,20 @@ class App(tk.Tk):
         update_box=ttk.LabelFrame(settings_tab,text="프로그램 업데이트",padding=12);update_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Label(update_box,text=f"현재 버전: V{APP_VERSION}\n새 버전은 다운로드 검증 후 기존 EXE를 자동 교체합니다.",justify="left").pack(anchor="w")
         ttk.Button(update_box,text="지금 업데이트 확인",command=lambda:self.start_update_check(manual=True)).pack(fill="x",pady=(8,0))
+        shortcut_text=("T Manual tab · S Start point · Esc Cancel pick · Home Fit view\n"
+                       "Canvas selection: Arrows 1mm / Shift 0.1mm · Del Delete · Ctrl+C/V Copy/Paste\n"
+                       "Manual placement: R Rotate 90° · F Flip left/right · Ctrl+click Multi-select\n"
+                       "Ctrl+Z/Y Undo/Redo · T/S: pick once, press again for the next point.\n"
+                       "Use letter shortcuts in English input mode; disabled while typing."
+                       if CURRENT_LANGUAGE=="en" else
+                       "T 수동탭 · S 시작점 · Esc 점 선택 취소 · Home 전체 보기\n"
+                       "화면 선택: 방향키 1mm / Shift 0.1mm · Del 삭제 · Ctrl+C/V 복사/붙여넣기\n"
+                       "수동 배치: R 90° 회전 · F 좌우 반전 · Ctrl+클릭 다중 선택\n"
+                       "Ctrl+Z/Y 되돌리기/다시 실행 · T/S: 1회 지정 후 다시 눌러 선택\n"
+                       "문자 단축키는 영문 입력 상태에서 사용 · 입력칸 편집 중에는 적용 안 함")
+        self.shortcut_help=ttk.Label(settings_tab,text=shortcut_text,justify="left",font=("맑은 고딕",9))
+        self.shortcut_help.pack(fill="x",padx=10,pady=(0,6),side="bottom")
+        self.shortcut_help.bind("<Configure>",lambda e:self.shortcut_help.configure(wraplength=max(120,e.width-4)))
         pan.bind("<Configure>",self.resize_panels)
         pan.bind("<ButtonRelease-1>",self.remember_panel_widths)
         pan.bind("<Double-Button-1>",self.reset_panel_widths)
@@ -6211,6 +6226,32 @@ class App(tk.Tk):
         self.selection_label.set(f"{self.selected.layer} | {self.selected.role} | 순번 {order_text} | 깊이 " +
                                  (f"{self.selected.target_depth:g}" if self.selected.target_depth else "관통"))
         self.redraw()
+
+    def pick_shortcut(self,event):
+        # Keep typing and modal/dialog keyboard navigation local to that widget.
+        if event.widget.winfo_toplevel() is not self:return
+        if event.widget.winfo_class() in ("Entry","TEntry","Text","TCombobox","Spinbox","TSpinbox"):return
+        alt_mask=0x20000 if self.tk.call("tk","windowingsystem")=="win32" else 0x0008
+        if event.state & (0x0004|alt_mask):return
+        if self.manual_array_drag is not None or self.canvas_selection_drag is not None:return
+        key=event.keysym.lower()
+        if key=="t":
+            if not self.manual_mode:self.toggle_manual()
+        elif key=="s":
+            if not self.start_mode:self.toggle_start()
+        elif key=="home":self.fit_view()
+        elif key=="escape":
+            self.manual_mode=False;self.start_mode=False;self.origin_mode=False
+            self.join_mode=False;self.join_first=None;self.measure_mode=False
+            for button,text in ((self.manual_btn,"수동 탭 추가: OFF"),(self.start_btn,"절삭 시작점 선택: OFF"),
+                                (self.origin_btn,"DXF XY 원점 선택: OFF"),(self.join_btn,"두 라인 선택 연결: OFF"),
+                                (self.measure_btn,"거리 측정: OFF")):
+                button.configure(text=text)
+            self.clear_measurement()
+            self.status.set("Point selection cancelled" if CURRENT_LANGUAGE=="en" else "점 선택을 취소했습니다.")
+        else:return
+        self.canvas.focus_set()
+        return "break"
 
     def leave_array_edit_for_pick(self):
         if self.manual_array_mode:
