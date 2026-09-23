@@ -25,10 +25,10 @@ with tempfile.TemporaryDirectory() as folder:
     contours=[cam.Contour([(x,0),(x+10,0),(x+10,10),(x,10)],forced_role='outer',layer=f'TEST_{i}') for i,x in enumerate((0,30,60))]
     app.set_single_part(contours,'synthetic',3);app.update()
     app.order_tree.selection_set(('c1','c2'));app.order_tree.focus('c1');app.tree_select();app.update()
+    panel=app.order_tree.master.master;panel.sashpos(0,140);panel.sashpos(1,480);app.update()
     before=app.job_signature(app.config())
     bbox=app.order_tree.bbox('c1','enabled')
-    result=app.tree_cell_click(SimpleNamespace(x=bbox[0]+5,y=bbox[1]+5,state=0))
-    assert result=='break'
+    app.order_tree.event_generate('<Button-1>',x=bbox[0]+bbox[2]//2,y=bbox[1]+bbox[3]//2,state=0)
     app.update()
     assert set(app.order_tree.selection())=={'c1','c2'}
     editor=app.tree_role_editor
@@ -52,5 +52,20 @@ with tempfile.TemporaryDirectory() as folder:
     app.order_tree.selection_set('c0');app.tree_select()
     app.commit_tree_enabled_editor('c2','제외');app.update()
     assert [c.enabled for c in app.contours]==[True,True,False]
+    # Canvas multi-selection uses the same batch buttons, including mixed states.
+    app.set_contour_selection([app.contours[0],app.contours[2]])
+    app.gcode_signature='old'
+    buttons=[w for frame in app.order_tree.master.winfo_children() for w in frame.winfo_children()
+             if isinstance(w,cam.ttk.Button)]
+    disable=next(w for w in buttons if w.cget('text')==cam.ui_text('선택 가공 미적용'))
+    enable=next(w for w in buttons if w.cget('text')==cam.ui_text('선택 가공 적용'))
+    disable.invoke();app.update()
+    assert [c.enabled for c in app.contours]==[False,True,False]
+    assert len(app.selected_contours)==2 and app.gcode_signature is None
+    saved=app.job_document();assert [c['enabled'] for c in saved['state']['contours']]==[False,True,False]
+    enable.invoke();app.update();assert all(c.enabled for c in app.contours)
+    assert len(app.selected_contours)==2
+    app.undo();assert [c.enabled for c in app.contours]==[False,True,False]
+    app.set_contour_selection([]);disable.invoke();assert [c.enabled for c in app.contours]==[False,True,False]
     app.destroy()
 print('GUI_ENABLED_V114_OK')
