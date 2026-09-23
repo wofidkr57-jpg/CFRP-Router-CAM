@@ -69,5 +69,45 @@ with tempfile.TemporaryDirectory() as tmp:
         app.redo();assert count()==5
         app.paste_selected_instances(SimpleNamespace(widget=app.object_qty_spin));assert count()==5
         app.example();app.paste_selected_instances();assert count()==1
+        app.manual_array_mode=False
+        app.contours[0].tabs=[10,20];app.contours[0].start_s=7
+        app.set_contour_selection([app.contours[1]],app.contours[1])
+        before=[list(c.points) for c in app.contours]
+        app.update();app.canvas.focus_force();app.update()
+        app.canvas.event_generate('<Right>');app.update()
+        for c,points in zip(app.contours,before):
+            assert all(abs(x-px-.1)<1e-8 and abs(y-py)<1e-8 for (x,y),(px,py) in zip(c.points,points))
+        assert app.contours[0].tabs==[10,20] and app.contours[0].start_s==7
+        app.canvas.event_generate('<Shift-Up>');app.update()
+        assert abs(app.contours[0].points[0][1]-before[0][0][1]-1)<1e-8
+        app.undo();app.undo();assert [c.points for c in app.contours]==before
+        app.redo();assert abs(app.contours[0].points[0][0]-before[0][0][0]-.1)<1e-8
+        app.manual_array_mode=True;app.manual_array_selected=cam.contour_group_key(app.contours[0])
+        app.canvas.event_generate('<Left>');app.update()
+        app.canvas.event_generate('<Down>');app.update()
+        assert abs(app.contours[0].points[0][0]-before[0][0][0])<1e-8
+        assert abs(app.contours[0].points[0][1]-before[0][0][1]+.1)<1e-8
+        before=[list(c.points) for c in app.contours]
+        app.nudge_selected_instances(SimpleNamespace(widget=app.object_qty_spin,state=0,keysym='Right'))
+        app.start_mode=True;app.canvas.event_generate('<Right>');app.update();app.start_mode=False
+        app.canvas.event_generate('<Control-Right>');app.update()
+        assert [c.points for c in app.contours]==before
+        # Windows hold delivers repeated KeyPress events; every repeat must move.
+        for _ in range(5):app.canvas.event_generate('<Right>');app.update()
+        assert abs(app.contours[0].points[0][0]-before[0][0][0]-.5)<1e-8
+        before=[list(c.points) for c in app.contours]
+        b=cam.contour_group_bounds(app.contours,app.manual_array_selected)
+        app.canvas.event_generate('<f>');app.update()
+        for c,points in zip(app.contours,before):
+            assert all(abs(x-(b[0]+b[2]-px))<1e-8 and abs(y-py)<1e-8 for (x,y),(px,py) in zip(c.points,points))
+        assert app.contours[0].tabs==[10,20] and app.contours[0].start_s==7
+        app.undo();assert [c.points for c in app.contours]==before
+        app.redo();app.canvas.event_generate('<F>');app.update()
+        assert all(abs(x-px)<1e-8 and abs(y-py)<1e-8 for c,points in zip(app.contours,before) for (x,y),(px,py) in zip(c.points,points))
+        app.canvas.event_generate('<r>');app.update()
+        assert [c.points for c in app.contours]!=before
+        app.undo()
+        app.manual_array_mode=False;app.canvas.event_generate('<f>');app.update()
+        assert all(abs(x-px)<1e-8 and abs(y-py)<1e-8 for c,points in zip(app.contours,before) for (x,y),(px,py) in zip(c.points,points))
         print('QUANTITY_DELETE_GUI_OK')
     finally:app.destroy()
