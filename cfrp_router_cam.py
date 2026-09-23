@@ -80,6 +80,10 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "추천 피드 적용": "Apply recommended feed",
+    "시험 기준: Ø2 / 24000rpm / 전 깊이 가공": "Trial basis: D2 / 24000 rpm / full depth",
+    "등록된 추천 없음 (2T / 3T / 6T)": "No preset (available: 2T / 3T / 6T)",
+    "두께·피드 숫자를 입력하세요.": "Enter numeric thickness and feed.",
     "내경 치수 보정 (mm)": "Internal size correction (mm)",
     "외경 치수 보정 (mm)": "External size correction (mm)",
     "치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 제외": "Size: + enlarge / - shrink; diameter/width; profiles only",
@@ -998,6 +1002,13 @@ def trim_small_self_loops(pts: Sequence[Point], max_cuts: int = 20) -> Tuple[Lis
             route,discard=loop_b,loop_a
         removed.append(discard+[discard[0]]);cuts.append(hit)
     return route,removed,cuts
+
+
+def thickness_feed_recommendation(stock:float)->Optional[int]:
+    """User supplied trial values, not interpolated or applied automatically."""
+    if not math.isfinite(stock):return None
+    return next((feed for thickness,feed in ((2.,600),(3.,550),(6.,500))
+                 if abs(stock-thickness)<1e-6),None)
 
 
 def dimension_correction(contour:Contour,cfg:Optional[dict]=None)->float:
@@ -4730,6 +4741,14 @@ class App(tk.Tk):
             entry.grid(row=r, column=1, padx=5)
             if key=="safe_z":self.safe_z_entry=entry
         r = len(rows)
+        self.feed_hint=DisplayStringVar(value="")
+        ttk.Label(controls,textvariable=self.feed_hint).grid(row=r,columnspan=2,sticky="w");r+=1
+        self.feed_recommend_btn=ttk.Button(controls,text="추천 피드 적용",command=self.apply_recommended_feed)
+        self.feed_recommend_btn.grid(row=r,columnspan=2,sticky="ew");r+=1
+        ttk.Label(controls,text="시험 기준: Ø2 / 24000rpm / 전 깊이 가공").grid(row=r,columnspan=2,sticky="w");r+=1
+        self.vars["stock"].trace_add("write",self.refresh_feed_recommendation)
+        self.vars["feed"].trace_add("write",self.refresh_feed_recommendation)
+        self.refresh_feed_recommendation()
         ttk.Label(controls,text="치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 제외").grid(row=r,columnspan=2,sticky="w");r+=1
         self.var("safe_z_auto",True,tk.BooleanVar)
         ttk.Checkbutton(controls,text="안전 Z 자동: 판 두께 × 2",variable=self.vars["safe_z_auto"]).grid(row=r,columnspan=2,sticky="w");r+=1
@@ -5052,6 +5071,24 @@ class App(tk.Tk):
             self.vars["wall_finish"].set(True)
         for attr in ("onion_start_text","onion_end_text"):
             if hasattr(self,attr):getattr(self,attr).configure(state="normal" if enabled else "disabled")
+
+    def refresh_feed_recommendation(self,*_):
+        try:
+            stock=float(self.vars["stock"].get());recommended=thickness_feed_recommendation(stock)
+            current=float(self.vars["feed"].get())
+            label=(f"{stock:g}T: recommended F{recommended} / current F{current:g}" if CURRENT_LANGUAGE=="en"
+                   else f"{stock:g}T 추천 F{recommended} · 현재 F{current:g}")
+            self.feed_hint.set(label if recommended is not None else "등록된 추천 없음 (2T / 3T / 6T)")
+            self.feed_recommend_btn.configure(state="normal" if recommended is not None else "disabled")
+        except (ValueError,tk.TclError):
+            self.feed_hint.set("두께·피드 숫자를 입력하세요.");self.feed_recommend_btn.configure(state="disabled")
+
+    def apply_recommended_feed(self):
+        try:recommended=thickness_feed_recommendation(float(self.vars["stock"].get()))
+        except (ValueError,tk.TclError):return
+        if recommended is None:return
+        self.vars["feed"].set(float(recommended))
+        self.status.set(f"두께별 추천 피드 F{recommended} 적용 · 사용자 지정 시험값")
 
     def sync_safe_z(self,*_):
         if "safe_z_auto" not in self.vars:return
@@ -5878,9 +5915,17 @@ class App(tk.Tk):
                                  (f"{self.selected.target_depth:g}" if self.selected.target_depth else "관통"))
         self.redraw()
 
+    def leave_array_edit_for_pick(self):
+        if self.manual_array_mode:
+            self.manual_array_mode=False;self.manual_array_drag=None;self.manual_array_selected=None
+            self.manual_array_btn.configure(text="수동 어레이 편집 (드래그 / R 회전)")
+            self.redraw(refresh_tree=False)
+
     def toggle_manual(self):
         self.manual_mode = not self.manual_mode
         if self.manual_mode:
+            self.leave_array_edit_for_pick()
+            self.start_mode=False;self.start_btn.configure(text="절삭 시작점 선택: OFF")
             self.join_mode = False; self.join_first = None
             self.join_btn.configure(text="두 라인 선택 연결: OFF")
             self.origin_mode = False; self.origin_btn.configure(text="DXF XY 원점 선택: OFF")
@@ -5891,6 +5936,8 @@ class App(tk.Tk):
         self.join_mode = not self.join_mode
         self.join_first = None
         if self.join_mode:
+            self.leave_array_edit_for_pick()
+            self.start_mode=False;self.start_btn.configure(text="절삭 시작점 선택: OFF")
             self.manual_mode = False
             self.manual_btn.configure(text="수동 탭 추가: OFF")
             self.origin_mode = False; self.origin_btn.configure(text="DXF XY 원점 선택: OFF")
@@ -5901,6 +5948,7 @@ class App(tk.Tk):
     def toggle_start(self):
         self.start_mode = not self.start_mode
         if self.start_mode:
+            self.leave_array_edit_for_pick()
             self.manual_mode = False; self.join_mode = False; self.join_first = None
             self.manual_btn.configure(text="수동 탭 추가: OFF")
             self.join_btn.configure(text="두 라인 선택 연결: OFF")
@@ -5915,6 +5963,7 @@ class App(tk.Tk):
             return
         self.origin_mode = not self.origin_mode
         if self.origin_mode:
+            self.leave_array_edit_for_pick()
             self.manual_mode = False; self.join_mode = False; self.join_first = None; self.start_mode = False
             self.measure_mode=False;self.measure_start=None;self.measure_btn.configure(text="거리 측정: OFF")
             self.manual_btn.configure(text="수동 탭 추가: OFF")
@@ -5926,6 +5975,7 @@ class App(tk.Tk):
     def toggle_measure(self):
         self.measure_mode=not self.measure_mode;self.measure_start=None
         if self.measure_mode:
+            self.leave_array_edit_for_pick()
             self.manual_mode=False;self.join_mode=False;self.join_first=None;self.start_mode=False;self.origin_mode=False
             self.manual_btn.configure(text="수동 탭 추가: OFF");self.join_btn.configure(text="두 라인 선택 연결: OFF")
             self.start_btn.configure(text="절삭 시작점 선택: OFF");self.origin_btn.configure(text="DXF XY 원점 선택: OFF")
@@ -5969,6 +6019,7 @@ class App(tk.Tk):
             q=(s0[0]+vx*t,s0[1]+vy*t)
             if EPS<t<1-EPS and den>EPS:mode="perpendicular";ln=math.sqrt(den);unit=(vx/ln,vy/ln)
         self.measurement={"a":a,"b":q,"mode":mode,"unit":unit};self.measure_start=None
+        self.measure_mode=False;self.measure_btn.configure(text="거리 측정: OFF")
         self.status.set(f"측정 {dist(a,q):.3f} mm | ΔX {abs(q[0]-a[0]):.3f} ΔY {abs(q[1]-a[1]):.3f}");self.redraw()
 
     def set_xy_origin(self, point: Point):
@@ -6012,7 +6063,9 @@ class App(tk.Tk):
             if gap > EPS: a.bridges.append(bridge)
             self.contours.remove(b)
             self.status.set(f"두 라인 연결 완료 | 연결 전 간격 {gap:.4f} mm")
-        classify_contours(self.contours); self.join_first = None; self.redraw()
+        classify_contours(self.contours); self.join_first = None
+        self.join_mode=False;self.join_btn.configure(text="두 라인 선택 연결: OFF")
+        self.redraw()
 
     def visible_contours(self) -> List[Contour]:
         return self.view_only if self.view_only is not None else self.contours
@@ -6670,6 +6723,7 @@ class App(tk.Tk):
                 else:
                     self.push_undo("절삭 시작점 변경")
                     best[1].start_s = best[2];self.set_contour_selection([best[1]],best[1])
+                    self.start_mode=False;self.start_btn.configure(text="절삭 시작점 선택: OFF")
                     self.status.set(f"절삭 시작점 설정 | Layer {best[1].layer}")
                     self.redraw(refresh_tree=False)
             elif self.join_mode:
@@ -6684,6 +6738,7 @@ class App(tk.Tk):
             elif self.manual_mode:
                 if best[1].closed and best[1].role == "outer" and best[1].tabs_enabled:
                     self.push_undo("수동 탭 추가")
+                    self.manual_mode=False;self.manual_btn.configure(text="수동 탭 추가: OFF")
                     best[1].tabs.append(best[2]);best[1].tabs.sort();best[1].tabs_cleared=False;self.redraw()
                     self.status.set(f"수동 탭 추가: {len(best[1].tabs)}개")
             else:
