@@ -5091,6 +5091,15 @@ class App(tk.Tk):
                 "Always verify the Z direction with an air-cut before machining."
             )
         ttk.Label(help_tab, text=help_text, justify="left", padding=12).pack(anchor="nw")
+        settings_host=settings_tab
+        self.settings_canvas=tk.Canvas(settings_host,highlightthickness=0,bg="#0b1220")
+        settings_scroll=ttk.Scrollbar(settings_host,orient="vertical",command=self.settings_canvas.yview)
+        settings_scroll.pack(side="right",fill="y");self.settings_canvas.pack(side="left",fill="both",expand=True)
+        self.settings_canvas.configure(yscrollcommand=settings_scroll.set)
+        settings_tab=ttk.Frame(self.settings_canvas)
+        settings_window=self.settings_canvas.create_window((0,0),window=settings_tab,anchor="nw")
+        settings_tab.bind("<Configure>",lambda e:self.settings_canvas.configure(scrollregion=self.settings_canvas.bbox("all")))
+        self.settings_canvas.bind("<Configure>",lambda e:self.settings_canvas.itemconfigure(settings_window,width=e.width))
         language_box=ttk.LabelFrame(settings_tab,text="언어 설정",padding=12);language_box.pack(fill="x",padx=10,pady=10)
         self.language_var=tk.StringVar(value="한국어" if self.language=="ko" else "English")
         ttk.Combobox(language_box,state="readonly",values=("한국어","English"),

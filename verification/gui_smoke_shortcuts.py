@@ -41,5 +41,11 @@ with tempfile.TemporaryDirectory() as tmp:
         key('Escape');assert not app.measure_mode and app.measure_start is None
         app.view=(1,999,999);key('Home');assert app.view!=(1,999,999)
         assert 'Ctrl+C/V' in app.shortcut_help.cget('text')
+        host=app.settings_canvas.master;host.master.select(host);app.update()
+        app.settings_canvas.yview_moveto(1);app.update()
+        help_label=app.shortcut_help
+        assert help_label.winfo_height()==help_label.winfo_reqheight()
+        assert help_label.winfo_rooty()>=app.settings_canvas.winfo_rooty()
+        assert help_label.winfo_rooty()+help_label.winfo_height()<=app.settings_canvas.winfo_rooty()+app.settings_canvas.winfo_height()
     finally:app.destroy()
 print('SHORTCUT_GUI_OK')
