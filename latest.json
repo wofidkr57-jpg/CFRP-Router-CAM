@@ -1,6 +1,6 @@
 {
-  "version": "1.24",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.24/CFRP_Router_CAM.exe",
-  "sha256": "16494438bf267777de7a92c3de336b54f644d0aa9ecc3765b41f29b260d2d81d",
-  "message": "두께별 추천 피드, 1회 점 선택, 선택 수량 미리보기와 Del/Ctrl+C/V 개체 편집을 추가했습니다. 붙여넣기 후 판재 배치를 확인하세요."
+  "version": "1.25",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.25/CFRP_Router_CAM.exe",
+  "sha256": "8814b656660828e5dd775f5c7de81c91e8dbf91ee303eb66a128beeeb3a0af32",
+  "message": "방향키를 누른 동안 연속 이동하며 Shift로 빠르게 이동합니다. 수동 배치 R은 회전, F는 좌우 반전입니다. 배치 후 간격과 판재 범위를 확인하세요."
 }
