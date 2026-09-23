@@ -49,7 +49,11 @@ jobs:
           GH_TOKEN: ${{ github.token }}
         run: |
           $tag = "v${{ steps.app.outputs.version }}"
-          $assets = gh release view $tag --json assets --jq '.assets | length' 2>$null
+          $releaseId = gh api "repos/${{ github.repository }}/releases/tags/$tag" --jq '.id' 2>$null
+          $assets = 0
+          if ($LASTEXITCODE -eq 0) {
+            $assets = gh api "repos/${{ github.repository }}/releases/$releaseId/assets" --jq 'length'
+          }
           if ($LASTEXITCODE -eq 0 -and [int]$assets -ge 3) {
             "exists=true" >> $env:GITHUB_OUTPUT
           } else {
@@ -161,18 +165,6 @@ jobs:
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
-      - name: Commit verified update manifest
-        if: steps.release.outputs.exists != 'true'
-        shell: pwsh
-        run: |
-          git config user.name "github-actions[bot]"
-          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
-          git add latest.json
-          if (-not (git diff --cached --quiet)) {
-            git commit -m "Point automatic updates to verified V${{ steps.app.outputs.version }} release"
-            git push origin HEAD:main
-          }
-
       - name: Create GitHub release
         if: steps.release.outputs.exists != 'true'
         shell: pwsh
@@ -197,5 +189,19 @@ jobs:
             "release/CFRP_Router_CAM_V${version}.exe" `
             "release/CFRP_Router_CAM_V${version}_source.zip" --clobber
           if ($LASTEXITCODE -ne 0) { throw "Release asset upload failed." }
-          $assets = gh release view $tag --json assets --jq '.assets | length'
+          $releaseId = gh api "repos/${{ github.repository }}/releases/tags/$tag" --jq '.id'
+          $assets = gh api "repos/${{ github.repository }}/releases/$releaseId/assets" --jq 'length' 
           if ($LASTEXITCODE -ne 0 -or [int]$assets -lt 3) { throw "Release assets are missing." }
+
+      - name: Commit verified update manifest
+        if: steps.release.outputs.exists != 'true'
+        shell: pwsh
+        run: |
+          git config user.name "github-actions[bot]"
+          git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+          git add latest.json
+          if (-not (git diff --cached --quiet)) {
+            git commit -m "Point automatic updates to verified V${{ steps.app.outputs.version }} release"
+            git push origin HEAD:main
+          }
+
