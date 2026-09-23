@@ -1203,6 +1203,22 @@ def rotate_contour_group(contours:Sequence[Contour],key:Tuple[int,int],degrees:f
     return changed
 
 
+def flip_contour_group(contours:Sequence[Contour],key:Tuple[int,int])->int:
+    bounds=contour_group_bounds(contours,key)
+    if bounds is None:return 0
+    center_sum=bounds[0]+bounds[2]
+    def flip(p):return (center_sum-p[0],p[1])
+    changed=0
+    for c in contours:
+        if contour_group_key(c)!=key:continue
+        # Keep vertex order: path distances for start points and tabs remain valid.
+        c.points=[flip(p) for p in c.points]
+        transform_pocket(c,flip)
+        c.bridges=[(flip(a),flip(b)) for a,b in c.bridges]
+        changed+=1
+    return changed
+
+
 def best_oriented_array_layout(stock_w:float,stock_h:float,gap:float,edge:float,
                                orientations:Sequence[Tuple[float,float,float]],
                                quantity:int=0)->List[Tuple[float,float,float]]:
@@ -4900,6 +4916,9 @@ class App(tk.Tk):
         self.canvas.bind("<Configure>", lambda e: self.redraw())
         self.canvas.bind("<ButtonPress-1>", self.canvas_press)
         self.canvas.bind("<Delete>",self.delete_selected_instances)
+        for key in ("f","F"):self.canvas.bind(f"<{key}>",self.flip_manual_array_selected)
+        for key in ("Left","Right","Up","Down"):
+            self.canvas.bind(f"<{key}>",self.nudge_selected_instances)
         for key in ("c","C"):self.canvas.bind(f"<Control-{key}>",self.copy_selected_instances)
         for key in ("v","V"):self.canvas.bind(f"<Control-{key}>",self.paste_selected_instances)
         self.canvas.bind("<B1-Motion>", self.canvas_left_drag)
@@ -5569,6 +5588,28 @@ class App(tk.Tk):
               else {contour_group_key(c) for c in self.selected_contours if c.object_id})
         return keys & set(contour_group_bounds_map(self.contours))
 
+    def nudge_selected_instances(self,event):
+        if event.widget is not self.canvas:return
+        if event.state & (0x0004|0x0008|0x20000):return "break"
+        if (self.start_mode or self.origin_mode or self.measure_mode or self.join_mode or self.manual_mode
+                or self.manual_array_drag is not None or self.canvas_selection_drag is not None):return "break"
+        keys=self.selected_instance_keys()
+        direction={"Left":(-1,0),"Right":(1,0),"Up":(0,1),"Down":(0,-1)}.get(event.keysym)
+        if not keys or direction is None:return "break"
+        step=1.0 if event.state & 0x0001 else 0.1
+        dx,dy=(v*step for v in direction)
+        self.push_undo("방향키 배치 이동")
+        if not self.nest_active:
+            self.sync_part_sources_from_preview();self.nest_source=copy.deepcopy(self.contours);self.nest_active=True
+        for key in keys:move_contour_group(self.contours,key,dx,dy)
+        self.measure_start=None;self.measurement=None
+        self.preview_cache.clear();self.collision_cache_key=None
+        self.redraw(refresh_tree=False)
+        self.status.set(f"Moved {len(keys)} instances | X {dx:+.1f} / Y {dy:+.1f} mm | Ctrl+Z to undo"
+                        if CURRENT_LANGUAGE=="en" else
+                        f"개체 {len(keys)}개 이동 | X {dx:+.1f} / Y {dy:+.1f} mm | Ctrl+Z로 되돌리기")
+        return "break"
+
     def copy_selected_instances(self,event=None):
         if event is not None and event.widget is not self.canvas:return
         keys=self.selected_instance_keys()
@@ -5963,6 +6004,18 @@ class App(tk.Tk):
             d,_=nearest_path_distance(c.points,p,c.closed)
             if best is None or d<best[0]:best=(d,contour_group_key(c))
         return best[1] if best and best[0]*self.view[0]<=15 else None
+
+    def flip_manual_array_selected(self,event=None):
+        if event is not None and event.widget is not self.canvas:return
+        if not self.manual_array_mode or self.manual_array_selected is None:return "break"
+        if self.manual_array_drag is not None:return "break"
+        self.push_undo("수동 배치 좌우 반전")
+        flip_contour_group(self.contours,self.manual_array_selected)
+        self.preview_cache.clear();self.collision_cache_key=None;self.measurement=None;self.measure_start=None
+        self.redraw(refresh_tree=False)
+        self.status.set("Flipped left/right | Ctrl+Z to undo" if CURRENT_LANGUAGE=="en" else
+                        "선택 개체 좌우 반전 | Ctrl+Z로 되돌리기")
+        return "break"
 
     def rotate_manual_array_selected(self,event=None):
         if not self.manual_array_mode or self.manual_array_selected is None:return None
@@ -6790,7 +6843,7 @@ class App(tk.Tk):
             self.manual_array_selected=key;self.manual_array_drag=None
             if key is not None:
                 self.manual_array_drag=(key,event.x,event.y,event.x,event.y)
-                self.status.set(f"선택 객체 #{key[1]} | 드래그 이동 · R키 90° 회전")
+                self.status.set(f"선택 객체 #{key[1]} | 방향키 길게: 연속 이동 · Shift: 빠르게 · R: 90° 회전 · F: 좌우 반전")
             else:self.status.set("배치할 객체의 경계 안을 클릭하세요.")
             self.redraw(refresh_tree=False);return
         if self.measure_mode or self.origin_mode or self.start_mode or self.join_mode or self.manual_mode:
