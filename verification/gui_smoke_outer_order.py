@@ -37,11 +37,32 @@ with tempfile.TemporaryDirectory() as tmp:
         assert a and b
         app.tree_cell_click(SimpleNamespace(x=a[0]+a[2]//2,y=a[1]+a[3]//2,state=0))
         event=SimpleNamespace(x=b[0]+b[2]//2,y=b[1]+b[3]//2,state=0)
-        app.drag_outer_order(event);app.drop_outer_order(event);app.update()
+        app.drag_outer_order(event);app.update()
+        assert app.order_insert_line.winfo_ismapped()
+        assert abs(app.order_insert_line.winfo_y()-(b[1]+b[3]-1))<=1
+        app.drop_outer_order(event);app.update()
+        assert not app.order_insert_line.winfo_ismapped()
         assert [c for c in cam.ordered_contours(app.contours) if c.role=='outer']==list(reversed(outers))
         assert all(c.role=='inner' for c in cam.ordered_contours(app.contours)[:4])
         assert [c.outer_cut_order for c in outers]==[2,1]
         app.undo();assert all(c.outer_cut_order is None for c in app.contours)
         app.redo();app.reset_outer_order();assert all(c.outer_cut_order is None for c in app.contours)
+        # Upper half means BEFORE, regardless of drag direction.
+        outers=[c for c in cam.ordered_contours(app.contours) if c.role=="outer"]
+        app.refresh_order_tree();app.update()
+        a=app.order_tree.bbox(row(outers[1]),'seq');b=app.order_tree.bbox(row(outers[0]),'seq')
+        app.tree_cell_click(SimpleNamespace(x=a[0]+10,y=a[1]+a[3]//2,state=0))
+        event=SimpleNamespace(x=b[0]+10,y=b[1]+2,state=0)
+        app.drag_outer_order(event);app.update()
+        assert abs(app.order_insert_line.winfo_y()-(b[1]-1))<=1
+        app.drop_outer_order(event);app.update()
+        assert [c for c in cam.ordered_contours(app.contours) if c.role=='outer']==list(reversed(outers))
+        app.move_outer_step(1);assert [c for c in cam.ordered_contours(app.contours) if c.role=='outer']==outers
+        app.move_outer_step(1);assert [c for c in cam.ordered_contours(app.contours) if c.role=='outer']==outers
+        # Dropping outside the list must not apply a stale insertion target.
+        app.order_drag=(outers[0],0,(outers[1],True))
+        ranks=[c.outer_cut_order for c in outers]
+        app.drop_outer_order(SimpleNamespace(x=-20,y=60));assert [c.outer_cut_order for c in outers]==ranks
+        assert app.order_scroll_after is None
         print('OUTER_ORDER_GUI_OK')
     finally:app.destroy()
