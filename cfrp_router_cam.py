@@ -594,6 +594,7 @@ class Contour:
     start_s: float = 0.0
     bridges: List[Tuple[Point, Point]] = field(default_factory=list)
     cut_order: Optional[int] = None
+    outer_cut_order: Optional[int] = None
     object_id: int = 0
     object_name: str = ""
     instance_id: int = 0
@@ -2278,6 +2279,16 @@ def ordered_contours(contours: Sequence[Contour],rapid_optimize:bool=True,
     if pockets:
         return pockets+ordered_contours([c for c in contours if c.operation!="pocket"],rapid_optimize,start_point)
     active=[c for c in contours if c.enabled]
+    fixed=[c for c in active if c.closed and c.role=="outer" and c.outer_cut_order is not None]
+    if fixed:
+        # Explicit outer order is a separate final phase: never release parts
+        # ahead of their inner features, and never optimize across fixed ranks.
+        other=[c for c in active if not (c.closed and c.role=="outer")]
+        prefix=ordered_contours(other,rapid_optimize,start_point)
+        fixed.sort(key=lambda c:(c.outer_cut_order,)+contour_auto_key(c))
+        remaining=[c for c in active if c.closed and c.role=="outer" and c.outer_cut_order is None]
+        anchor=fixed[-1].points[0] if fixed[-1].points else start_point
+        return prefix+fixed+ordered_contours(remaining,rapid_optimize,anchor)
     manual=sorted((c for c in active if c.cut_order is not None),
                   key=lambda c:(c.cut_order,)+contour_auto_key(c))
     automatic=[c for c in active if c.cut_order is None]
@@ -3253,6 +3264,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         wall_finish=wall_finish_for(c,target,stock,cfg);use_onion=onion_skin_for(c,target,stock,cfg)
         finish=wall_finish or use_onion
         order_note=str(c.cut_order) if c.cut_order is not None else "auto"
+        if c.closed and c.role=="outer" and c.outer_cut_order is not None:order_note=f"outer-{c.outer_cut_order}"
         object_note=f", object={nc_ascii_text(c.object_name)}, instance={c.instance_id}" if c.object_name else ""
         out.append(f"(Contour {ci}: {c.role}, order={order_note}, tool_d={fmt(effective_d)}, layer={nc_ascii_text(c.layer)}, depth={fmt(target)}, tabs={len(tabs)}, safety_check={'excluded' if c.safety_excluded else 'enabled'}, wall_finish={'yes' if wall_finish else 'no'}, onion_skin={'yes' if use_onion else 'no'}, trimmed={removed_count}{object_note})")
         if finish:
@@ -4964,17 +4976,25 @@ class App(tk.Tk):
         order_buttons=ttk.Frame(order_frame); order_buttons.pack(fill="x")
         ttk.Button(order_buttons,text="선택 윤곽만 보기",command=self.show_tree_selection).pack(side="left",fill="x",expand=True)
         ttk.Button(order_buttons,text="전체 보기",command=self.show_all_contours).pack(side="left",fill="x",expand=True,padx=(4,0))
-        ttk.Label(order_frame,text="‘윤곽’ / ‘가공 여부’ 셀 클릭: 판정 또는 적용/제외 선택",foreground="#91a0b8").pack(anchor="w",pady=(4,3))
+        ttk.Button(order_buttons,text="외곽 순서 자동",command=self.reset_outer_order).pack(side="left",padx=(4,0))
+        ttk.Label(order_frame,text="외곽 행 ‘순서’/이름 영역 드래그: 순서 변경 · 내부 먼저",foreground="#91a0b8").pack(anchor="w",pady=(4,3))
         self.tree_role_var=tk.StringVar(value="자동")
-        columns=("seq","manual","type","enabled","layer","depth","safety")
+        columns=("seq","manual","type","enabled","layer","depth","safety","part")
         self.order_tree=ttk.Treeview(order_frame,columns=columns,show="headings",selectmode="extended",height=7)
-        for col,title,width in (("seq","순서",45),("manual","지정",45),("type","윤곽",85),("enabled","가공 여부",65),("layer","Layer",90),("depth","깊이",55),("safety","검사",48)):
+        for col,title,width in (("seq","순서",45),("manual","지정",60),("type","윤곽",85),("enabled","가공 여부",65),("layer","Layer",90),("depth","깊이",55),("safety","검사",48),("part","개체",150)):
             self.order_tree.heading(col,text=title,command=lambda c=col:self.sort_order_tree(c)); self.order_tree.column(col,width=width,anchor="center",stretch=False)
         order_scroll=ttk.Scrollbar(order_frame,orient="vertical",command=self.order_tree.yview)
+        order_xscroll=ttk.Scrollbar(order_frame,orient="horizontal",command=self.order_tree.xview)
+        self.order_tree.configure(xscrollcommand=order_xscroll.set)
+        order_xscroll.pack(side="bottom",fill="x")
         self.order_tree.configure(yscrollcommand=order_scroll.set)
         order_scroll.pack(side="right",fill="y"); self.order_tree.pack(fill="both",expand=True)
         self.order_tree.bind("<<TreeviewSelect>>",self.tree_select)
         self.order_tree.bind("<Button-1>",self.tree_cell_click,add="+")
+        self.order_drag=None
+        self.order_tree.bind("<B1-Motion>",self.drag_outer_order)
+        self.order_tree.bind("<ButtonRelease-1>",self.drop_outer_order)
+        self.order_tree.tag_configure("order_drop",background="#24565c")
 
         notebook = ttk.Notebook(right_pan); right_pan.add(notebook, weight=2)
         preview_tab = ttk.Frame(notebook); post_tab = ttk.Frame(notebook); help_tab = ttk.Frame(notebook); settings_tab=ttk.Frame(notebook)
@@ -5235,7 +5255,7 @@ class App(tk.Tk):
                         "start_code","end_code","onion_split","onion_split_percent","onion_start_code","onion_end_code")
         contour_key=tuple((tuple((round(x,7),round(y,7)) for x,y in c.points),c.closed,c.role,
                            tuple(round(s,7) for s in c.tabs),c.layer,c.target_depth,c.tabs_enabled,
-                           c.tabs_cleared,c.enabled,c.safety_excluded,round(c.start_s,7),c.cut_order,c.operation,repr(c.pocket_holes),repr(c.pocket_stock))
+                           c.tabs_cleared,c.enabled,c.safety_excluded,round(c.start_s,7),c.cut_order,c.outer_cut_order,c.operation,repr(c.pocket_holes),repr(c.pocket_stock))
                           for c in self.contours)
         return hash((contour_key,tuple((key,repr(cfg.get(key))) for key in machining_keys)))
 
@@ -6404,7 +6424,10 @@ class App(tk.Tk):
         if self.tree_sort_col:
             def sort_key(c):
                 if self.tree_sort_col=="seq":return actual.get(id(c),10**9)
-                if self.tree_sort_col=="manual":return c.cut_order if c.cut_order is not None else 10**9
+                if self.tree_sort_col=="manual":
+                    rank=c.outer_cut_order if c.closed and c.role=="outer" and c.outer_cut_order is not None else c.cut_order
+                    return rank if rank is not None else 10**9
+                if self.tree_sort_col=="part":return (c.object_name,c.instance_id)
                 if self.tree_sort_col=="type":return "열린선" if not c.closed else c.role
                 if self.tree_sort_col=="layer":return c.layer.lower()
                 if self.tree_sort_col=="depth":return c.target_depth if c.target_depth is not None else 10**9
@@ -6419,13 +6442,14 @@ class App(tk.Tk):
             depth=f"{c.target_depth:g}" if c.target_depth is not None else "관통"
             seq=str(actual[id(c)]) if c.enabled else "-"
             manual=str(c.cut_order) if c.cut_order is not None else "자동"
+            if c.closed and c.role=="outer" and c.outer_cut_order is not None:manual=f"외{c.outer_cut_order}"
             iid=f"c{idx}"
             tags=[]
             if not c.enabled:tags.append("disabled")
             elif c.safety_excluded:tags.append("safety_excluded")
             self.order_tree.insert("", "end", iid=iid,
                                    values=(seq,ui_text(manual),ui_text(typ),ui_text("적용" if c.enabled else "제외"),c.layer,ui_text(depth),
-                                           ui_text("제외" if c.safety_excluded else "검사")),tags=tuple(tags))
+                                           ui_text("제외" if c.safety_excluded else "검사"),f"{c.object_name} #{c.instance_id}"),tags=tuple(tags))
             if id(c) in selected_ids:self.order_tree.selection_add(iid)
         self.order_tree.tag_configure("disabled",foreground="#888888")
         self.order_tree.tag_configure("safety_excluded",foreground="#a85b00")
@@ -6453,10 +6477,21 @@ class App(tk.Tk):
         self.redraw(refresh_tree=False)
 
     def tree_cell_click(self,event):
+        self.order_drag=None
         if self.order_tree.identify_region(event.x,event.y)!="cell":return
         column=self.order_tree.identify_column(event.x)
         item=self.order_tree.identify_row(event.y)
         if not item:return
+        if not event.state & 0x0005 and column not in ("#2","#3","#4"):
+            c=self.contours[int(item[1:])]
+            if c.enabled and c.closed and c.role=="outer" and c.operation!="pocket":
+                self.order_drag=(c,event.y,None)
+        if column=="#2" and not event.state & 0x0005:
+            c=self.contours[int(item[1:])]
+            if c.closed and c.role=="outer" and c.operation!="pocket":
+                self.order_tree.selection_set(item);self.order_tree.focus(item);self.tree_select()
+                self.after_idle(lambda i=item:self.open_outer_order_editor(i))
+                return "break"
         if column=="#4":
             # Ctrl/Shift are selection gestures. An ordinary click on an already
             # selected row keeps the full selection for a batch Include/Exclude.
@@ -6466,6 +6501,84 @@ class App(tk.Tk):
             self.after_idle(lambda i=item:self.open_tree_enabled_editor(i))
             return "break"
         if column=="#3":self.after_idle(lambda i=item:self.open_tree_role_editor(i))
+
+    def drag_outer_order(self,event):
+        if self.order_drag is None:return
+        source,start_y,target=self.order_drag
+        if abs(event.y-start_y)<5 and target is None:return
+        for iid in self.order_tree.get_children():
+            tags=tuple(t for t in self.order_tree.item(iid,"tags") if t!="order_drop")
+            self.order_tree.item(iid,tags=tags)
+        if event.y>self.order_tree.winfo_height()-3:self.order_tree.yview_scroll(1,"units")
+        elif event.y<25:self.order_tree.yview_scroll(-1,"units")
+        iid=self.order_tree.identify_row(event.y)
+        target=None
+        if iid:
+            candidate=self.contours[int(iid[1:])]
+            if candidate.enabled and candidate.closed and candidate.role=="outer" and candidate.operation!="pocket":
+                target=candidate
+                self.order_tree.item(iid,tags=tuple(self.order_tree.item(iid,"tags"))+("order_drop",))
+        self.order_drag=(source,start_y,target)
+        return "break"
+
+    def drop_outer_order(self,event):
+        drag=self.order_drag;self.order_drag=None
+        if drag is None:return
+        source,start_y,target=drag
+        for iid in self.order_tree.get_children():
+            self.order_tree.item(iid,tags=tuple(t for t in self.order_tree.item(iid,"tags") if t!="order_drop"))
+        if target is None or source is target or abs(event.y-start_y)<5:return
+        ordered=ordered_contours(self.contours,bool(self.vars["rapid_optimize"].get()))
+        outer=[c for c in ordered if c.closed and c.role=="outer" and c.operation!="pocket"]
+        if not any(c is source for c in outer) or not any(c is target for c in outer):return
+        # Compare actual cut order, not an optional display-column sort.
+        old=next(i for i,c in enumerate(outer) if c is source)
+        dest=next(i for i,c in enumerate(outer) if c is target)
+        outer.pop(old)
+        target_index=next(i for i,c in enumerate(outer) if c is target)
+        outer.insert(target_index+(1 if dest>old else 0),source)
+        self.push_undo("외곽 순서 드래그 변경")
+        for rank,c in enumerate(outer,1):c.outer_cut_order=rank
+        self.tree_sort_col=None;self.tree_sort_reverse=False;self.preview_order_cache_key=None
+        self.set_contour_selection([source],source);self.redraw()
+        self.status.set("외곽 순서 변경 완료 · 내부 먼저 / 지정 외곽 순서 고정 · Ctrl+Z 되돌리기")
+        return "break"
+
+    def reset_outer_order(self):
+        if not any(c.outer_cut_order is not None for c in self.contours):return
+        self.push_undo("외곽 순서 자동 복원")
+        for c in self.contours:c.outer_cut_order=None
+        self.tree_sort_col=None;self.preview_order_cache_key=None;self.redraw()
+
+    def open_outer_order_editor(self,item):
+        if not self.order_tree.exists(item):return
+        c=self.contours[int(item[1:])]
+        bbox=self.order_tree.bbox(item,"manual")
+        if not bbox:return
+        old=getattr(self,"tree_role_editor",None)
+        if old is not None and old.winfo_exists():old.destroy()
+        editor=ttk.Entry(self.order_tree,width=7);self.tree_role_editor=editor
+        editor.insert(0,"" if c.outer_cut_order is None else str(c.outer_cut_order))
+        editor.place(x=bbox[0],y=bbox[1],width=bbox[2],height=bbox[3])
+        editor.focus_set();editor.selection_range(0,"end")
+        def commit(event=None):
+            if editor.winfo_exists():self.set_outer_order(c,editor.get())
+        editor.bind("<Return>",commit)
+        editor.bind("<FocusOut>",commit)
+        editor.bind("<Escape>",lambda e:editor.destroy())
+
+    def set_outer_order(self,c,value):
+        if not any(c is q for q in self.contours) or not c.closed or c.role!="outer" or c.operation=="pocket":return
+        try:
+            value=value.strip();rank=int(value) if value else None
+            if rank is not None and rank<1:raise ValueError()
+        except ValueError:
+            self.status.set("외곽 순번은 1 이상의 정수 또는 빈칸으로 입력하세요.");return
+        if c.outer_cut_order!=rank:
+            self.push_undo("외곽 절단 순번 변경");c.outer_cut_order=rank
+        self.preview_order_cache_key=None;self.preview_cache.clear()
+        self.redraw()
+        self.status.set("외곽 순번 적용: 내부 먼저, 지정 외곽 순서 후 자동 외곽. 같은 번호는 자동 순서입니다.")
 
     def open_tree_enabled_editor(self,item):
         if not self.order_tree.exists(item):return
@@ -6829,7 +6942,7 @@ class App(tk.Tk):
             visible_ids={id(c) for c in visible}
             if len(self.preview_cache)>max(512,len(self.contours)*8):self.preview_cache.clear()
             rapid_order=bool(self.vars["rapid_optimize"].get())
-            order_signature=hash(tuple((id(c),c.cut_order,round(c.start_s,6),c.enabled)
+            order_signature=hash(tuple((id(c),c.cut_order,c.outer_cut_order,round(c.start_s,6),c.enabled)
                                        for c in self.contours))
             order_key=(geometry_signature,order_signature,rapid_order)
             if order_key!=self.preview_order_cache_key:
