@@ -80,6 +80,8 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "선택 가공 적용": "Include selected",
+    "선택 가공 미적용": "Exclude selected",
     "추천 피드 적용": "Apply recommended feed",
     "시험 기준: Ø2 / 24000rpm / 전 깊이 가공": "Trial basis: D2 / 24000 rpm / full depth",
     "등록된 추천 없음 (2T / 3T / 6T)": "No preset (available: 2T / 3T / 6T)",
@@ -5016,6 +5018,9 @@ class App(tk.Tk):
         ttk.Button(order_buttons,text="선택 윤곽만 보기",command=self.show_tree_selection).pack(side="left",fill="x",expand=True)
         ttk.Button(order_buttons,text="전체 보기",command=self.show_all_contours).pack(side="left",fill="x",expand=True,padx=(4,0))
         ttk.Button(order_buttons,text="외곽 순서 자동",command=self.reset_outer_order).pack(side="left",padx=(4,0))
+        machining_buttons=ttk.Frame(order_frame);machining_buttons.pack(fill="x",pady=(3,0))
+        ttk.Button(machining_buttons,text="선택 가공 적용",command=lambda:self.set_selected_machining(True)).pack(side="left",fill="x",expand=True)
+        ttk.Button(machining_buttons,text="선택 가공 미적용",command=lambda:self.set_selected_machining(False)).pack(side="left",fill="x",expand=True,padx=(4,0))
         ttk.Label(order_frame,text="⋮⋮ 순서/이름 드래그 → 노란 삽입선 위치에 놓기 · 내부 먼저",foreground="#91a0b8").pack(anchor="w",pady=(4,3))
         ttk.Button(order_buttons,text="↑",width=3,command=lambda:self.move_outer_step(-1)).pack(side="left",padx=2)
         ttk.Button(order_buttons,text="↓",width=3,command=lambda:self.move_outer_step(1)).pack(side="left")
@@ -6822,7 +6827,10 @@ class App(tk.Tk):
         editor=ttk.Combobox(self.order_tree,state="readonly",values=(ui_text("적용"),ui_text("제외")),textvariable=value)
         self.tree_role_editor=editor
         editor.place(x=bbox[0],y=bbox[1],width=bbox[2],height=bbox[3]);editor.focus_set()
-        editor.bind("<<ComboboxSelected>>",lambda e:self.commit_tree_enabled_editor(item,value.get()))
+        items=list(self.order_tree.selection())
+        if item not in items:items=[item]
+        targets=tuple(self.contours[int(i[1:])] for i in items)
+        editor.bind("<<ComboboxSelected>>",lambda e:self.set_selected_machining(editor.current()==0,targets))
         editor.bind("<Escape>",lambda e:editor.destroy())
         def post_list():
             if not editor.winfo_exists():return
@@ -6837,16 +6845,25 @@ class App(tk.Tk):
         if item not in items:items=[item]
         targets=[self.contours[int(i[1:])] for i in items
                  if i.startswith("c") and i[1:].isdigit() and int(i[1:])<len(self.contours)]
-        if not targets:return
-        enabled=mapping[label]
+        self.set_selected_machining(mapping[label],targets)
+
+    def set_selected_machining(self,enabled,targets=None):
+        if targets is None:targets=list(self.selected_contours)
+        valid={id(c) for c in self.contours}
+        targets=[c for c in targets if id(c) in valid]
+        if not targets:
+            self.status.set("먼저 화면 또는 목록에서 윤곽을 선택하세요.")
+            return
         if any(c.enabled!=enabled for c in targets):
-            self.push_undo("목록 가공 여부 변경")
+            self.push_undo("선택 윤곽 가공 여부 변경")
             for c in targets:c.enabled=enabled
         self.set_contour_selection(targets,targets[0])
         self.sel_enabled.set(enabled)
-        self.preview_cache.clear();self.collision_cache_key=None
+        self.preview_cache.clear();self.collision_cache_key=None;self.preview_order_cache_key=None
+        self.gcode_signature=None
         self.redraw()
-        self.status.set(f"Machining: {label} ({len(targets)})")
+        label="적용" if enabled else "미적용"
+        self.status.set(f"선택 {len(targets)}개 가공 {label} · Ctrl+Z 되돌리기")
 
     def toggle_selected_safety(self):
         items=list(self.order_tree.selection())
