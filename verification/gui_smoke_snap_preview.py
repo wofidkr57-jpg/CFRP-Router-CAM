@@ -25,6 +25,9 @@ with tempfile.TemporaryDirectory() as tmp:
         app.snap_cooldown={}
         dx,dy,hit=app.snap_manual_move({key},10,10);assert not hit and (dx,dy)==(10,10)
         app.vars['inner_size_adjust'].set(0);app.vars['outer_size_adjust'].set(0)
+        # Snap-distance checks use a fixed scale; rendering checks must fit the
+        # actual viewport, including the 1024px desktop on Windows CI.
+        app.view_initialized=False
         with mock.patch.object(cam,'tool_sweep_collisions',side_effect=AssertionError('heavy collision')):
             app.redraw()
         items=app.canvas.find_withtag('manual_offset');assert len(items)==3
