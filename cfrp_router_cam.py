@@ -80,6 +80,12 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "중간 공구 교체": "Mid-job tool replacement",
+    "가공거리 균등 분할 교체 사용": "Balance cutting distance between tools",
+    "공구당 최대 가공거리 (m)": "Maximum cutting distance per tool (m)",
+    "중간 교체 매크로": "Replacement macro",
+    "프로빙 후 복귀 높이 (기계 Z)": "Return height after probing (machine Z)",
+    "스핀들 안정 대기 (초)": "Spindle settling time (seconds)",
     "선택 가공 적용": "Include selected",
     "선택 가공 미적용": "Exclude selected",
     "추천 피드 적용": "Apply recommended feed",
@@ -2700,6 +2706,68 @@ def contour_wear_plan(c:Contour,cfg:dict,stock:float,extra:float,distance_before
     return midpoint_d,contour_cut_metrics(c,cfg,stock,extra,midpoint_d)
 
 
+def balanced_tool_groups(lengths:Sequence[float],limit:float)->List[Tuple[int,int]]:
+    """Fewest contiguous tool loads, with boundaries near equal remaining load."""
+    if not math.isfinite(limit) or limit<=0:raise ValueError("교체 기준 거리는 0보다 커야 합니다.")
+    if any(not math.isfinite(v) or v<0 or v>limit+EPS for v in lengths):
+        raise ValueError("단일 윤곽 가공거리가 교체 기준을 초과합니다. 기준을 늘리거나 형상을 분리하세요.")
+    n=len(lengths)
+    if not n:return []
+    prefix=[0.0]
+    for v in lengths:prefix.append(prefix[-1]+v)
+    needed=[0]*(n+1)
+    for i in range(n-1,-1,-1):
+        end=min(n,bisect.bisect_right(prefix,prefix[i]+limit+EPS)-1)
+        needed[i]=1+needed[max(i+1,end)]
+    groups=[];start=0;remaining=needed[0]
+    while remaining:
+        target=(prefix[n]-prefix[start])/remaining
+        endmax=min(n-remaining+1,bisect.bisect_right(prefix,prefix[start]+limit+EPS)-1)
+        candidates=(j for j in range(start+1,endmax+1) if needed[j]<=remaining-1)
+        end=min(candidates,key=lambda j:(abs(prefix[j]-prefix[start]-target),j))
+        groups.append((start,end));start=end;remaining-=1
+    return groups
+
+
+def tool_replacement_plan(ordered:Sequence[Contour],cfg:dict,stock:float,extra:float):
+    """Recompute contour diameters from zero for each balanced tool load."""
+    enabled=bool(cfg.get("tool_change_enabled"))
+    if enabled:
+        macro=str(cfg.get("tool_change_macro","")).strip()
+        if macro.upper()=="M881" and cfg.get("z_origin")!="Bottom":raise ValueError("기본 M881은 판재 바닥 기준입니다. Z 원점을 Bottom으로 맞추세요.")
+        if not re.fullmatch(r"M[1-9]\d{2,3}",macro,re.IGNORECASE):
+            raise ValueError("설정 탭에 중간 교체 매크로를 입력하세요. 예: M881")
+        if not math.isfinite(float(cfg.get("tool_change_return_z",-70))) or float(cfg.get("tool_change_return_z",-70))>=0:
+            raise ValueError("프로빙 후 복귀 높이는 확인된 음수 기계좌표 Z로 설정하세요.")
+        if not math.isfinite(float(cfg.get("tool_change_dwell",3))) or float(cfg.get("tool_change_dwell",3))<0:
+            raise ValueError("스핀들 안정 대기는 0 이상의 초로 설정하세요.")
+        if cfg.get("_machining_stage") not in ("rough","finish") and any(
+            c.role=="outer" and staged_finish_for(c,c.target_depth if c.target_depth is not None else stock+extra,stock,cfg) for c in ordered):
+            raise ValueError("중간 교체와 외곽 후정삭을 함께 쓰려면 어니언스킨 황삭/정삭 파일 분리를 사용하세요.")
+    def measure(groups):
+        planned=[];loads=[]
+        for start,end in groups:
+            distance=0.0
+            for c in ordered[start:end]:
+                diameter,metrics=contour_wear_plan(c,cfg,stock,extra,distance)
+                planned.append((diameter,metrics));distance+=metrics[0]/1000.0
+            loads.append(distance)
+        return planned,loads
+    if not enabled:
+        planned,loads=measure([(0,len(ordered))] if ordered else [])
+        return [],planned,loads
+    limit=float(cfg.get("tool_change_limit_m",6.5))
+    weights=[contour_wear_plan(c,cfg,stock,extra,0)[1][0]/1000 for c in ordered]
+    previous=None
+    for _ in range(12):
+        groups=balanced_tool_groups(weights,limit)
+        if groups==previous and all(v<=limit+EPS for v in loads):
+            return [start for start,end in groups[1:]],planned,loads
+        planned,loads=measure(groups)
+        previous=groups;weights=[metrics[0]/1000 for diameter,metrics in planned]
+    raise ValueError("교체 구간 계산이 수렴하지 않았습니다. 교체 기준 거리를 조금 줄이거나 늘려 다시 생성하세요.")
+
+
 def _gcode_route_worker(task)->Tuple[int,float,List[Point],int,float]:
     """CPU-heavy compensation stage; safe to run outside the Tk process."""
     ci,c,cfg,stock,extra,tool_d=task
@@ -2715,12 +2783,13 @@ def _gcode_route_worker(task)->Tuple[int,float,List[Point],int,float]:
 
 
 def prepare_gcode_routes(ordered:Sequence[Contour],cfg:dict,stock:float,extra:float,
-                         progress:Optional[Callable[[float,str],None]]=None
+                         progress:Optional[Callable[[float,str],None]]=None,wear_plan=None
                          )->List[Tuple[int,float,List[Point],int,float]]:
-    tasks=[];distance_m=0.0
-    for ci,c in enumerate(ordered,1):
-        tool_d,metrics=contour_wear_plan(c,cfg,stock,extra,distance_m)
-        tasks.append((ci,c,cfg,stock,extra,tool_d));distance_m+=metrics[0]/1000.0
+    tasks=[]
+    if wear_plan is None:_,plan,_=tool_replacement_plan(ordered,cfg,stock,extra)
+    else:plan=wear_plan
+    for ci,(c,(tool_d,metrics)) in enumerate(zip(ordered,plan),1):
+        tasks.append((ci,c,cfg,stock,extra,tool_d))
     workers=_route_parallel_workers(ordered,bool(cfg.get("auto_trim",False)));results=[]
     if workers>1:
         try:
@@ -3005,7 +3074,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
     closed_count=sum(bool(c.closed) for c in active)
     safety_excluded=sum(bool(c.safety_excluded) for c in active)
     wear_start=effective_tool_diameter(cfg,0.0)
-    wear_end=effective_tool_diameter(cfg,max(0.0,float(job_cut_m)))
+    wear_end=effective_tool_diameter(cfg,max(0.0,float(cfg.get("_tool_change_last_load",job_cut_m))))
     return [
         "(----- CAM SETTINGS BEGIN -----)",
         f"(UNITS: MM)",
@@ -3140,6 +3209,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     rapid_optimize=bool(cfg.get("rapid_optimize",True))
     ordered=ordered_contours(active,rapid_optimize,(origin_x,origin_y))
     if stage=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
+    change_indices,wear_plan,tool_loads=tool_replacement_plan(ordered,cfg,stock,extra)
+    if cfg.get("tool_change_enabled"):cfg["_tool_change_last_load"]=tool_loads[-1] if tool_loads else 0
     macros = {"{RPM}": str(int(cfg["rpm"])), "{SAFE_Z}": fmt(safe_machine_z),
               "{FEED}": fmt(cfg["feed"]), "{PLUNGE}": fmt(cfg["plunge"])}
     def expand(code: str) -> List[str]:
@@ -3172,8 +3243,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     while start_lines and (start_lines[0].strip()=="%" or re.fullmatch(r"O\d+",start_lines[0].strip(),re.IGNORECASE)):
         program_header.append(start_lines.pop(0))
     report(10,"가공 거리·시간 계산 중")
-    metres, minutes = machining_report(
-        contours,cfg,lambda value,message:report(10+value*.08,message))
+    metres=sum(metrics[0] for _,metrics in wear_plan)/1000.0
+    minutes=sum(metrics[1]+metrics[2] for _,metrics in wear_plan)
     job_label=nc_ascii_text(cfg.get("_job_label",""))
     job_note=nc_ascii_text(cfg.get("_job_note",""))
     job_header=([f"(Job part: {job_label})"] if job_label else [])+([f"({job_note})"] if job_note else [])
@@ -3186,7 +3257,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     current_xy:Point=(origin_x,origin_y)
     def emit_phase(c:Contour,route:List[Point],depths:Sequence[float],tab_distances:Sequence[float],
                    feed:float,label:str,sink:Optional[List[str]]=None)->str:
-        nonlocal current_xy
+        nonlocal current_xy,returning_from_change
         dst=out if sink is None else sink
         plan=lead_plan(c,route,cfg["lead"]) if c.closed else LeadPlan(route[0],"none")
         shifted=[(p[0]-origin_x,p[1]-origin_y) for p in route]
@@ -3194,8 +3265,9 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         center=None if plan.center is None else (plan.center[0]-origin_x,plan.center[1]-origin_y)
         p0=shifted[0];dst.append(f"(Phase: {label}, feed={fmt(feed)})")
         if plan.mode=="center-fallback":dst.append("(Lead-in auto: insufficient space -> safe interior center)")
-        dst.append(f"G0 Z{fmt(safe_machine_z)}")
+        if not returning_from_change:dst.append(f"G0 Z{fmt(safe_machine_z)}")
         dst.append(f"G0 X{fmt(lead[0])} Y{fmt(lead[1])}")
+        returning_from_change=False
         for pi,depth in enumerate(depths,1):
             active_tabs=list(tab_distances) if pi==len(depths) else []
             tab_flat=0.0 if cfg.get("tab_shape")=="Triangle" else cfg["tab_flat"]
@@ -3252,11 +3324,24 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         emit_phase(c,pts,[machine_z(target)],tabs,finish_feed,label+" - nominal wall/full depth")
 
     prepared_routes=prepare_gcode_routes(
-        ordered,cfg,stock,extra,lambda value,message:report(18+value*.20,message))
+        ordered,cfg,stock,extra,lambda value,message:report(18+value*.20,message),wear_plan=wear_plan)
+    returning_from_change=False
+    if cfg.get("tool_change_enabled"):
+        out.append(f"(BALANCED TOOL LOADS M: {', '.join(fmt(v) for v in tool_loads)})")
+        out.append(f"(MID JOB TOOL CHANGES: {len(change_indices)})")
     finish_tasks=[]
     if any(staged_finish_for(c,min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra),stock,cfg) for c in ordered):
         out.append("(Stage 1: complete internal features before outer-profile cutting)")
     for (ci,target,pts,removed_count,effective_d),c in zip(prepared_routes,ordered):
+        if ci-1 in change_indices:
+            out.extend([f"(TOOL CHANGE BEFORE CONTOUR {ci} - NEW TOOL / WEAR RESET)",
+                        f"G90 G0 Z{fmt(safe_machine_z)}","M5","M9",
+                        str(cfg["tool_change_macro"]).strip(),
+                        "G21 G90 G17 G94 G40 G49 G80 G54",
+                        f"G90 G53 G0 Z{fmt(float(cfg['tool_change_return_z']))}"])
+            if cfg.get("m8_enabled"):out.append("M8")
+            out.extend([f"S{int(cfg['rpm'])} M3",f"G4 P{fmt(float(cfg.get('tool_change_dwell',3)))}"])
+            returning_from_change=True
         report(38+42*ci/max(len(ordered),1),f"G-code 조립 {ci}/{len(ordered)}")
         if c.operation=="pocket":
             rough,finish,residual=pocket_plan(c,effective_d,cfg)
@@ -3271,7 +3356,9 @@ def generate_gcode(contours: List[Contour], cfg: dict,
                     out.append(f"(Pocket {label} pass {level}/{count})")
                     connection=level_link if index==0 and level>1 else link
                     if connection is None:
-                        out.extend([f"G0 Z{fmt(safe_machine_z)}",f"G0 X{fmt(points[0][0])} Y{fmt(points[0][1])}",
+                        if not returning_from_change:out.append(f"G0 Z{fmt(safe_machine_z)}")
+                        returning_from_change=False
+                        out.extend([f"G0 X{fmt(points[0][0])} Y{fmt(points[0][1])}",
                                     f"G0 Z{fmt(approach_machine_z)}",f"G1 Z{fmt(z)} F{fmt(cfg['plunge'])}"])
                     else:
                         out.append("(Pocket stay-down link)")
@@ -3314,7 +3401,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             finish_task=(ci,c,pts,target,tabs,order_note,object_note,removed_count,actual_allowance,wall_finish,use_onion)
             # Completing each internal wall now preserves the safe holes-first
             # order.  Only outer finishing/onion cleanup is deferred.
-            if c.role=="inner":emit_finish_task(finish_task)
+            if c.role=="inner" or (stage=="finish" and cfg.get("tool_change_enabled")):emit_finish_task(finish_task)
             else:finish_tasks.append(finish_task)
         else:
             depths=[machine_z(target*i/passes) for i in range(1,passes+1)]
@@ -3342,13 +3429,10 @@ def machining_report(contours: List[Contour], cfg: dict,
     origin=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
     ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin)
     if cfg.get("_machining_stage")=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
-    distance_m=0.0
-    for report_index,c in enumerate(ordered,1):
-        if progress:progress(report_index/max(len(active),1)*100.0,
-                             f"가공 거리 계산 {report_index}/{len(active)}")
-        _,metrics=contour_wear_plan(c,cfg,stock,cfg["extra"],distance_m)
+    _,plan,_=tool_replacement_plan(ordered,cfg,stock,cfg["extra"])
+    for report_index,(_,metrics) in enumerate(plan,1):
+        if progress:progress(report_index/max(len(active),1)*100.0,f"가공 거리 계산 {report_index}/{len(active)}")
         cut_mm+=metrics[0];cut_min+=metrics[1];plunge_min+=metrics[2]
-        distance_m+=metrics[0]/1000.0
     cut_min+=plunge_min;job_m=cut_mm/1000.0
     return job_m,cut_min
 
@@ -5164,6 +5248,20 @@ class App(tk.Tk):
         update_box=ttk.LabelFrame(settings_tab,text="프로그램 업데이트",padding=12);update_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Label(update_box,text=f"현재 버전: V{APP_VERSION}\n새 버전은 다운로드 검증 후 기존 EXE를 자동 교체합니다.",justify="left").pack(anchor="w")
         ttk.Button(update_box,text="지금 업데이트 확인",command=lambda:self.start_update_check(manual=True)).pack(fill="x",pady=(8,0))
+        change_box=ttk.LabelFrame(settings_tab,text="중간 공구 교체",padding=10);change_box.pack(fill="x",padx=10,pady=(0,10))
+        ttk.Checkbutton(change_box,text="가공거리 균등 분할 교체 사용",variable=self.var("tool_change_enabled",False,tk.BooleanVar)).grid(row=0,columnspan=2,sticky="w")
+        for row,(key,label,value,cls) in enumerate((
+            ("tool_change_limit_m","공구당 최대 가공거리 (m)",6.5,tk.DoubleVar),
+            ("tool_change_macro","중간 교체 매크로","M881",tk.StringVar),
+            ("tool_change_return_z","프로빙 후 복귀 높이 (기계 Z)",-70.0,tk.DoubleVar),
+            ("tool_change_dwell","스핀들 안정 대기 (초)",3.0,tk.DoubleVar)),1):
+            ttk.Label(change_box,text=label).grid(row=row,column=0,sticky="w")
+            ttk.Entry(change_box,width=12,textvariable=self.var(key,value,cls)).grid(row=row,column=1,sticky="ew",padx=5)
+        ttk.Label(change_box,text="18m / 최대 8m → 약 6m씩 3구간, 2회 교체\n"
+                  "윤곽 사이에서 교체 · 새 공구 지름은 공구 설정과 동일\n"
+                  "매크로: 교체 대기/재프로빙, XY 원점 유지, 실패 시 NC 정지 필수\n"
+                  "기본 M881은 BOTTOM 기준 · 교체/프로브 동작은 3D에서 재현하지 않음\n"
+                  "예상 시간에는 교체 대기/프로빙 시간이 포함되지 않음",justify="left",wraplength=400).grid(row=5,columnspan=2,sticky="w",pady=5)
         shortcut_text=("T Manual tab · S Start point · Esc Cancel pick · Home Fit view\n"
                        "Canvas selection: Arrows 1mm / Shift 0.1mm · Del Delete · Ctrl+C/V Copy/Paste\n"
                        "Manual placement: R Rotate 90° · F Flip left/right · Ctrl+click Multi-select\n"
@@ -5327,7 +5425,8 @@ class App(tk.Tk):
                         "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim",
                         "machine_home_enabled","machine_park_x","machine_park_y","machine_park_z",
-                        "start_code","end_code","onion_split","onion_split_percent","onion_start_code","onion_end_code")
+                        "start_code","end_code","onion_split","onion_split_percent","onion_start_code","onion_end_code",
+                        "tool_change_enabled","tool_change_limit_m","tool_change_macro","tool_change_return_z","tool_change_dwell")
         contour_key=tuple((tuple((round(x,7),round(y,7)) for x,y in c.points),c.closed,c.role,
                            tuple(round(s,7) for s in c.tabs),c.layer,c.target_depth,c.tabs_enabled,
                            c.tabs_cleared,c.enabled,c.safety_excluded,round(c.start_s,7),c.cut_order,c.outer_cut_order,c.operation,repr(c.pocket_holes),repr(c.pocket_stock))
@@ -5511,6 +5610,9 @@ class App(tk.Tk):
             if len(c.points)<2 or c.role not in ("inner","outer","pocket") or c.forced_role not in ("auto","inner","outer") or c.operation not in ("profile","pocket"):
                 raise ValueError("잘못된 윤곽 정보입니다.")
             if any(n is not None and n<1 for n in (c.cut_order,c.outer_cut_order)):raise ValueError("잘못된 가공 순서입니다.")
+        # V1.30 projects predate replacement controls; never enable motion on migration.
+        for k,v in {"tool_change_enabled":False,"tool_change_limit_m":6.5,"tool_change_macro":"M881",
+                    "tool_change_return_z":-70.0,"tool_change_dwell":3.0}.items():data["vars"].setdefault(k,v)
         if set(data["vars"])!=set(self.vars):raise ValueError("작업 설정 항목이 현재 버전과 맞지 않습니다.")
         for k,v in data["vars"].items():
             var=self.vars[k]
@@ -7461,7 +7563,17 @@ class App(tk.Tk):
                 return
             progress.set_progress(46,"예상 절삭거리 확인 중")
             reports=[machining_report(active,job_cfg) for _,job_cfg in jobs]
-            distance_jobs=[(label,report[0]) for (label,_),report in zip(jobs,reports)]
+            distance_jobs=[]
+            for (label,job_cfg),report in zip(jobs,reports):
+                if job_cfg.get("tool_change_enabled"):
+                    staged=stage_contours(active,job_cfg)
+                    origin=job_cfg.get("_xy_origin_override") or work_origin_for_contours(staged,job_cfg)
+                    ordered=ordered_contours(staged,job_cfg.get("rapid_optimize",True),origin)
+                    if job_cfg.get("_machining_stage")=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
+                    cuts,_,loads=tool_replacement_plan(ordered,job_cfg,job_cfg["stock"],job_cfg["extra"])
+                    distance_jobs.extend((f"{label} TOOL {i}",load) for i,load in enumerate(loads,1))
+                    warnings.append(f"{label}: 공구 {len(loads)}개 / 중간 교체 {len(cuts)}회 / 거리(m) "+", ".join(f"{v:.3f}" for v in loads))
+                else:distance_jobs.append((label,report[0]))
             distance_blocks,distance_warnings=machining_distance_guard(distance_jobs)
             if distance_blocks:
                 progress.close();progress=None

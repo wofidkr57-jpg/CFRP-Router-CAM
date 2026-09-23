@@ -93,6 +93,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_job_file.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
+          python verification/gui_smoke_tool_replacement.py
+          if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_shortcuts.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_outer_order.py
