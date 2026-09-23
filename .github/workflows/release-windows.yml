@@ -87,6 +87,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_placement_preview.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
+          python verification/gui_smoke_shortcuts.py
+          if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_outer_order.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_v113_pocket.py
@@ -153,7 +155,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "목록의 외곽 행을 위아래로 드래그하여 절단 순서를 지정할 수 있습니다. 내부 우선과 지정 순서를 유지하며 외곽 순서 자동 버튼으로 해제합니다."
+            message = "T 수동탭·S 시작점·Esc 점 선택 취소·Home 전체 보기를 추가했습니다. 설정 탭 아래에서 단축키를 확인하세요."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
