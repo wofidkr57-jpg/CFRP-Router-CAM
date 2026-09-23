@@ -5650,13 +5650,16 @@ class App(tk.Tk):
 
     def nudge_selected_instances(self,event):
         if event.widget is not self.canvas:return
-        if event.state & (0x0004|0x0008|0x20000):return "break"
+        # Windows Tk uses Mod1 (0x8) for Num Lock, not Alt.
+        # https://github.com/tcltk/tk/blob/core-8-6-branch/win/tkWinX.c
+        alt_mask=0x20000 if self.tk.call("tk","windowingsystem")=="win32" else 0x0008
+        if event.state & (0x0004|alt_mask):return "break"
         if (self.start_mode or self.origin_mode or self.measure_mode or self.join_mode or self.manual_mode
                 or self.manual_array_drag is not None or self.canvas_selection_drag is not None):return "break"
         keys=self.selected_instance_keys()
         direction={"Left":(-1,0),"Right":(1,0),"Up":(0,1),"Down":(0,-1)}.get(event.keysym)
         if not keys or direction is None:return "break"
-        step=1.0 if event.state & 0x0001 else 0.1
+        step=0.1 if event.state & 0x0001 else 1.0
         dx,dy=(v*step for v in direction)
         self.push_undo("방향키 배치 이동")
         if not self.nest_active:
@@ -6042,7 +6045,6 @@ class App(tk.Tk):
         except Exception as exc:
             messagebox.showerror("수동 어레이",str(exc));return
         self.manual_array_mode=True;self.manual_array_selected=None;self.manual_array_drag=None
-        self.snap_cooldown={}
         self.set_contour_selection([])
         self.manual_mode=False;self.join_mode=False;self.join_first=None;self.start_mode=False;self.origin_mode=False;self.measure_mode=False
         self.manual_btn.configure(text="수동 탭 추가: OFF");self.join_btn.configure(text="두 라인 선택 연결: OFF")
@@ -6052,28 +6054,6 @@ class App(tk.Tk):
 
     def manual_group_tag(self,key:Tuple[int,int])->str:
         return f"manual_group_{key[0]}_{key[1]}"
-
-    def snap_manual_move(self,keys,dx,dy):
-        cooldown=getattr(self,"snap_cooldown",{})
-        self.snap_cooldown=cooldown
-        if any(cooldown.get(k,0)>0 for k in keys):
-            for k in keys:cooldown[k]=max(0,cooldown.get(k,0)-1)
-            return dx,dy,False
-        if not self.sheet_size:return dx,dy,False
-        try:edge=max(0,float(self.vars["array_edge"].get()))
-        except (ValueError,tk.TclError):return dx,dy,False
-        bounds=[b for k,b in contour_group_bounds_map(self.contours).items() if k in keys]
-        if not bounds or not math.isfinite(edge):return dx,dy,False
-        x0=min(b[0] for b in bounds)+dx;y0=min(b[1] for b in bounds)+dy
-        x1=max(b[2] for b in bounds)+dx;y1=max(b[3] for b in bounds)+dy
-        sw,sh=self.sheet_size;threshold=min(2.0,8/max(self.view[0],EPS))
-        sx=min((edge-x0,sw-edge-x1),key=abs)
-        sy=min((edge-y0,sh-edge-y1),key=abs)
-        hitx=abs(sx)<=threshold and x1-x0<=sw-2*edge+EPS
-        hity=abs(sy)<=threshold and y1-y0<=sh-2*edge+EPS
-        if hitx or hity:
-            for k in keys:cooldown[k]=2
-        return dx+(sx if hitx else 0),dy+(sy if hity else 0),hitx or hity
 
     def draw_manual_offsets(self,visible):
         try:
@@ -6965,7 +6945,7 @@ class App(tk.Tk):
             self.set_contour_selection([c for c in self.contours if contour_group_key(c) in keys])
             if key is not None and key in keys:
                 self.manual_array_drag=(frozenset(keys),event.x,event.y,event.x,event.y)
-                self.status.set(f"개체 {len(keys)}개 선택 | Ctrl+클릭: 추가/해제 · 드래그/방향키: 함께 이동 · R/F: 각 개체 회전/반전")
+                self.status.set(f"개체 {len(keys)}개 선택 | Ctrl+클릭: 추가/해제 · 방향키 1mm / Shift 0.1mm · R/F: 회전/반전")
             else:self.status.set("배치할 객체의 경계 안을 클릭하세요.")
             self.redraw(refresh_tree=False);return
         if self.measure_mode or self.origin_mode or self.start_mode or self.join_mode or self.manual_mode:
@@ -6993,12 +6973,10 @@ class App(tk.Tk):
             key,sx,sy,lx,ly=self.manual_array_drag;self.manual_array_drag=None
             scale=max(self.view[0],EPS);dx=(event.x-sx)/scale;dy=(sy-event.y)/scale
             if abs(dx)>EPS or abs(dy)>EPS:
-                dx,dy,snapped=self.snap_manual_move(key,dx,dy)
                 self.push_undo("수동 배치 이동")
                 for item in key:move_contour_group(self.contours,item,dx,dy)
                 self.preview_cache.clear();self.collision_cache_key=None
-                self.status.set(f"개체 {len(key)}개 이동 | ΔX {dx:.3f} ΔY {dy:.3f} mm"+
-                                (" | 테두리 스냅 · 다음 2회 드래그 자유 조정" if snapped else ""))
+                self.status.set(f"개체 {len(key)}개 이동 | ΔX {dx:.3f} ΔY {dy:.3f} mm")
             self.redraw(refresh_tree=False);return
         if self.canvas_selection_drag is None:return
         sx,sy,_,_=self.canvas_selection_drag;self.canvas_selection_drag=None;self.canvas.delete("selection_box")

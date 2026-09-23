@@ -76,17 +76,17 @@ with tempfile.TemporaryDirectory() as tmp:
         app.update();app.canvas.focus_force();app.update()
         app.canvas.event_generate('<Right>');app.update()
         for c,points in zip(app.contours,before):
-            assert all(abs(x-px-.1)<1e-8 and abs(y-py)<1e-8 for (x,y),(px,py) in zip(c.points,points))
+            assert all(abs(x-px-1)<1e-8 and abs(y-py)<1e-8 for (x,y),(px,py) in zip(c.points,points))
         assert app.contours[0].tabs==[10,20] and app.contours[0].start_s==7
         app.canvas.event_generate('<Shift-Up>');app.update()
-        assert abs(app.contours[0].points[0][1]-before[0][0][1]-1)<1e-8
+        assert abs(app.contours[0].points[0][1]-before[0][0][1]-.1)<1e-8
         app.undo();app.undo();assert [c.points for c in app.contours]==before
-        app.redo();assert abs(app.contours[0].points[0][0]-before[0][0][0]-.1)<1e-8
+        app.redo();assert abs(app.contours[0].points[0][0]-before[0][0][0]-1)<1e-8
         app.manual_array_mode=True;app.manual_array_selected=cam.contour_group_key(app.contours[0])
         app.canvas.event_generate('<Left>');app.update()
         app.canvas.event_generate('<Down>');app.update()
         assert abs(app.contours[0].points[0][0]-before[0][0][0])<1e-8
-        assert abs(app.contours[0].points[0][1]-before[0][0][1]+.1)<1e-8
+        assert abs(app.contours[0].points[0][1]-before[0][0][1]+1)<1e-8
         before=[list(c.points) for c in app.contours]
         app.nudge_selected_instances(SimpleNamespace(widget=app.object_qty_spin,state=0,keysym='Right'))
         app.start_mode=True;app.canvas.event_generate('<Right>');app.update();app.start_mode=False
@@ -94,9 +94,19 @@ with tempfile.TemporaryDirectory() as tmp:
         assert [c.points for c in app.contours]==before
         # Windows hold delivers repeated KeyPress events; every repeat must move.
         for _ in range(5):app.canvas.event_generate('<Right>');app.update()
-        assert abs(app.contours[0].points[0][0]-before[0][0][0]-.5)<1e-8
+        assert abs(app.contours[0].points[0][0]-before[0][0][0]-5)<1e-8
         before=[list(c.points) for c in app.contours]
         b=cam.contour_group_bounds(app.contours,app.manual_array_selected)
+        if app.tk.call('tk','windowingsystem')=='win32':
+            # Actual Windows arrows include Extended; Num Lock adds Mod1.
+            for state,step in ((0x40008,1),(0x40009,.1),(0x4000a,1)):
+                x=app.contours[0].points[0][0]
+                app.canvas.event_generate('<KeyPress-Right>',state=state);app.update()
+                assert abs(app.contours[0].points[0][0]-x-step)<1e-8
+                app.undo()
+            app.manual_array_selected=cam.contour_group_key(app.contours[0])
+            app.canvas.event_generate('<KeyPress-Right>',state=0x60008);app.update()
+            assert [c.points for c in app.contours]==before
         app.canvas.event_generate('<f>');app.update()
         for c,points in zip(app.contours,before):
             assert all(abs(x-(b[0]+b[2]-px))<1e-8 and abs(y-py)<1e-8 for (x,y),(px,py) in zip(c.points,points))
