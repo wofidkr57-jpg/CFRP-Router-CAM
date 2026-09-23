@@ -26,10 +26,10 @@ with tempfile.TemporaryDirectory() as tmp:
         click(keys[1],True)
         before=copy.deepcopy(app.contours)
         e=event(keys[0]);app.canvas_press(e)
-        scale=app.view[0];end=SimpleNamespace(x=e.x+scale*2,y=e.y-scale*3,state=0)
+        scale=app.view[0];end=SimpleNamespace(x=e.x+scale*5,y=e.y-scale*6,state=0)
         app.canvas_left_drag(end);app.canvas_left_release(end)
         for c,old in zip(app.contours,before):
-            dx,dy=(2,3) if cam.contour_group_key(c) in keys[:2] else (0,0)
+            dx,dy=(5,6) if cam.contour_group_key(c) in keys[:2] else (0,0)
             assert all(abs(x-ox-dx)<1e-7 and abs(y-oy-dy)<1e-7 for (x,y),(ox,oy) in zip(c.points,old.points))
         app.undo();assert app.contours==before
         click(keys[0]);click(keys[1],True)

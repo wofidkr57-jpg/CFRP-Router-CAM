@@ -5089,6 +5089,8 @@ class App(tk.Tk):
         pan.bind("<ButtonRelease-1>",self.remember_panel_widths)
         pan.bind("<Double-Button-1>",self.reset_panel_widths)
         self.after_idle(self.reset_panel_widths)
+        for key in ("tool_d","inner_size_adjust","outer_size_adjust"):
+            self.vars[key].trace_add("write",lambda *_:self.schedule_view_redraw() if self.manual_array_mode else None)
 
     def controls_min_width(self):
         columns=[0,0];spans=0
@@ -6040,6 +6042,7 @@ class App(tk.Tk):
         except Exception as exc:
             messagebox.showerror("수동 어레이",str(exc));return
         self.manual_array_mode=True;self.manual_array_selected=None;self.manual_array_drag=None
+        self.snap_cooldown={}
         self.set_contour_selection([])
         self.manual_mode=False;self.join_mode=False;self.join_first=None;self.start_mode=False;self.origin_mode=False;self.measure_mode=False
         self.manual_btn.configure(text="수동 탭 추가: OFF");self.join_btn.configure(text="두 라인 선택 연결: OFF")
@@ -6049,6 +6052,55 @@ class App(tk.Tk):
 
     def manual_group_tag(self,key:Tuple[int,int])->str:
         return f"manual_group_{key[0]}_{key[1]}"
+
+    def snap_manual_move(self,keys,dx,dy):
+        cooldown=getattr(self,"snap_cooldown",{})
+        self.snap_cooldown=cooldown
+        if any(cooldown.get(k,0)>0 for k in keys):
+            for k in keys:cooldown[k]=max(0,cooldown.get(k,0)-1)
+            return dx,dy,False
+        if not self.sheet_size:return dx,dy,False
+        try:edge=max(0,float(self.vars["array_edge"].get()))
+        except (ValueError,tk.TclError):return dx,dy,False
+        bounds=[b for k,b in contour_group_bounds_map(self.contours).items() if k in keys]
+        if not bounds or not math.isfinite(edge):return dx,dy,False
+        x0=min(b[0] for b in bounds)+dx;y0=min(b[1] for b in bounds)+dy
+        x1=max(b[2] for b in bounds)+dx;y1=max(b[3] for b in bounds)+dy
+        sw,sh=self.sheet_size;threshold=min(2.0,8/max(self.view[0],EPS))
+        sx=min((edge-x0,sw-edge-x1),key=abs)
+        sy=min((edge-y0,sh-edge-y1),key=abs)
+        hitx=abs(sx)<=threshold and x1-x0<=sw-2*edge+EPS
+        hity=abs(sy)<=threshold and y1-y0<=sh-2*edge+EPS
+        if hitx or hity:
+            for k in keys:cooldown[k]=2
+        return dx+(sx if hitx else 0),dy+(sy if hity else 0),hitx or hity
+
+    def draw_manual_offsets(self,visible):
+        try:
+            diameter=float(self.vars["tool_d"].get())
+            cfg={k:float(self.vars[k].get()) for k in ("inner_size_adjust","outer_size_adjust")}
+            if not math.isfinite(diameter) or diameter<=0:return
+            if not all(math.isfinite(v) and abs(v)<diameter for v in cfg.values()):return
+        except (ValueError,tk.TclError):return
+        if len(self.preview_cache)>max(512,len(self.contours)*8):self.preview_cache.clear()
+        for c in visible:
+            if not c.enabled or len(c.points)<2 or c.operation=="pocket":continue
+            anchor=c.points[0]
+            relative=tuple((round(x-anchor[0],7),round(y-anchor[1],7)) for x,y in c.points)
+            key=("manual-offset",relative,c.closed,c.role,c.operation,diameter,tuple(cfg.items()))
+            route=self.preview_cache.get(key)
+            if route is None:
+                try:points=compensated_route(c,diameter,False,cfg=cfg)[0] if c.closed and c.operation!="pocket" else c.points
+                except (ValueError,IndexError):continue
+                route=[(x-anchor[0],y-anchor[1]) for x,y in points];self.preview_cache[key]=route
+            if len(route)<2:continue
+            points=route+[route[0]] if c.closed else route
+            xy=[v for x,y in points for v in self.transform((x+anchor[0],y+anchor[1]))]
+            self.canvas.create_line(*xy,fill="#ffb347",dash=(4,3),width=1,
+                                    tags=(self.manual_group_tag(contour_group_key(c)),"manual_offset"))
+        self.canvas.create_text(12,12,anchor="nw",fill="#ffb347",
+            text="공구 중심선 참고 · 리드인/마모/포켓/충돌검사 제외" if CURRENT_LANGUAGE!="en" else
+                 "Tool-center reference: excludes leads, wear, pockets and collision checks")
 
     def manual_group_at(self,p:Point)->Optional[Tuple[int,int]]:
         visible=self.visible_contours();bounds_by_key=contour_group_bounds_map(visible)
@@ -6767,6 +6819,7 @@ class App(tk.Tk):
                 self.canvas.create_polygon(x,y-7,x-6,y+5,x+6,y+5,fill="#ff4fd8",outline="white",tags=(group_tag,) if group_tag else ())
         self.canvas.addtag_all("view_live")
         detail_marker=self.canvas_item_marker()
+        if self.manual_array_mode and self.vars["show_toolpath"].get():self.draw_manual_offsets(visible)
         if not self.manual_array_mode and self.vars.get("show_toolpath") and self.vars["show_toolpath"].get():
             try:
                 preview_cfg={
@@ -6940,10 +6993,12 @@ class App(tk.Tk):
             key,sx,sy,lx,ly=self.manual_array_drag;self.manual_array_drag=None
             scale=max(self.view[0],EPS);dx=(event.x-sx)/scale;dy=(sy-event.y)/scale
             if abs(dx)>EPS or abs(dy)>EPS:
+                dx,dy,snapped=self.snap_manual_move(key,dx,dy)
                 self.push_undo("수동 배치 이동")
                 for item in key:move_contour_group(self.contours,item,dx,dy)
                 self.preview_cache.clear();self.collision_cache_key=None
-                self.status.set(f"개체 {len(key)}개 이동 | ΔX {dx:.3f} ΔY {dy:.3f} mm")
+                self.status.set(f"개체 {len(key)}개 이동 | ΔX {dx:.3f} ΔY {dy:.3f} mm"+
+                                (" | 테두리 스냅 · 다음 2회 드래그 자유 조정" if snapped else ""))
             self.redraw(refresh_tree=False);return
         if self.canvas_selection_drag is None:return
         sx,sy,_,_=self.canvas_selection_drag;self.canvas_selection_drag=None;self.canvas.delete("selection_box")
