@@ -1,4 +1,4 @@
-## 다음 업데이트: 좌우 패널 폭 자동 조절
+## V1.26: 패널 폭·다중 선택·스냅·공구 참고선
 
 수동 배치 드래그를 놓을 때 판재 테두리(설정한 가장자리 여유 안쪽)에 8화면 픽셀/최대 2mm 이내로 가까우면 스냅합니다. 스냅된 개체는 이후 두 번의 드래그에서 스냅을 쉬어 미세 조정할 수 있습니다. 다중 선택은 묶음 외곽 기준으로 붙으며 방향키는 스냅하지 않습니다. 이 기능은 공구/리드인 이탈 안전 판정이 아닙니다.
 
@@ -132,7 +132,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.25**입니다.
+현재 최신 버전은 **V1.26**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -154,7 +154,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.25 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.25/CFRP_Router_CAM_V1.25_source.zip)
+- [V1.26 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.26/CFRP_Router_CAM_V1.26_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
