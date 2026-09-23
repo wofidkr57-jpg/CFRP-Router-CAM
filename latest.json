@@ -1,6 +1,6 @@
 {
-  "version": "1.28",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.28/CFRP_Router_CAM.exe",
-  "sha256": "43c0297395a0a93beb5f77129352e68d9e44c3a5b933a9fbcc2d010c310e7bca",
-  "message": "목록의 외곽 행을 위아래로 드래그하여 절단 순서를 지정할 수 있습니다. 내부 우선과 지정 순서를 유지하며 외곽 순서 자동 버튼으로 해제합니다."
+  "version": "1.29",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.29/CFRP_Router_CAM.exe",
+  "sha256": "099364bf8bab8f61d1da29d88ca3bc9a7d25c9d6ffb2e0a0f94253f6ba9242d7",
+  "message": "T 수동탭·S 시작점·Esc 점 선택 취소·Home 전체 보기를 추가했습니다. 설정 탭 아래에서 단축키를 확인하세요."
 }
