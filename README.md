@@ -1,4 +1,4 @@
-## 다음 업데이트: 피드·점 선택·개체 편집
+## V1.24: 피드·점 선택·개체 편집
 
 우측 상단 선택 수량은 화살표 또는 입력 후 Enter/적용으로 화면에 반영됩니다. 기존 배치를 유지하며 늘린 개수만 옆/위에 임시 배치하고 줄이면 뒤쪽 복사본부터 제거합니다. 0은 해당 파츠를 화면에서 제외하며 다시 늘릴 수 있습니다. 자동 회전/촘촘한 탐색은 실행하지 않습니다.
 
@@ -118,7 +118,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.23**입니다.
+현재 최신 버전은 **V1.24**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -140,7 +140,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.23 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.23/CFRP_Router_CAM_V1.23_source.zip)
+- [V1.24 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.24/CFRP_Router_CAM_V1.24_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
