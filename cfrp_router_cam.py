@@ -5641,8 +5641,9 @@ class App(tk.Tk):
                             f"{part.name} 화면 수량: {quantity}개 | 판재 밖 {outside}개 | 추가 복사본은 임시 배치입니다. 자동/수동 어레이로 정리하세요.")
 
     def selected_instance_keys(self):
-        keys=({self.manual_array_selected} if self.manual_array_mode and self.manual_array_selected is not None
-              else {contour_group_key(c) for c in self.selected_contours if c.object_id})
+        keys={contour_group_key(c) for c in self.selected_contours if c.object_id}
+        if self.manual_array_mode and self.manual_array_selected is not None and self.manual_array_selected not in keys:
+            keys={self.manual_array_selected}
         return keys & set(contour_group_bounds_map(self.contours))
 
     def nudge_selected_instances(self,event):
@@ -6039,6 +6040,7 @@ class App(tk.Tk):
         except Exception as exc:
             messagebox.showerror("수동 어레이",str(exc));return
         self.manual_array_mode=True;self.manual_array_selected=None;self.manual_array_drag=None
+        self.set_contour_selection([])
         self.manual_mode=False;self.join_mode=False;self.join_first=None;self.start_mode=False;self.origin_mode=False;self.measure_mode=False
         self.manual_btn.configure(text="수동 탭 추가: OFF");self.join_btn.configure(text="두 라인 선택 연결: OFF")
         self.start_btn.configure(text="절삭 시작점 선택: OFF");self.origin_btn.configure(text="DXF XY 원점 선택: OFF");self.measure_btn.configure(text="거리 측정: OFF")
@@ -6067,7 +6069,7 @@ class App(tk.Tk):
         if not self.manual_array_mode or self.manual_array_selected is None:return "break"
         if self.manual_array_drag is not None:return "break"
         self.push_undo("수동 배치 좌우 반전")
-        flip_contour_group(self.contours,self.manual_array_selected)
+        for key in self.selected_instance_keys():flip_contour_group(self.contours,key)
         self.preview_cache.clear();self.collision_cache_key=None;self.measurement=None;self.measure_start=None
         self.redraw(refresh_tree=False)
         self.status.set("Flipped left/right | Ctrl+Z to undo" if CURRENT_LANGUAGE=="en" else
@@ -6078,7 +6080,7 @@ class App(tk.Tk):
         if not self.manual_array_mode or self.manual_array_selected is None:return None
         if event is not None and event.widget.winfo_class() in ("Entry","TEntry","Text","TCombobox","TSpinbox"):return None
         self.push_undo("수동 배치 90° 회전")
-        rotate_contour_group(self.contours,self.manual_array_selected,90.0)
+        for key in self.selected_instance_keys():rotate_contour_group(self.contours,key,90.0)
         self.preview_cache.clear();self.collision_cache_key=None;self.redraw(refresh_tree=False)
         self.status.set(f"선택 객체 #{self.manual_array_selected[1]} 90° 회전")
         return "break"
@@ -6731,6 +6733,7 @@ class App(tk.Tk):
             cy0=min(p[1] for p in contour.points);cy1=max(p[1] for p in contour.points)
             return cx1>=vx0 and cx0<=vx1 and cy1>=vy0 and cy0<=vy1
         visible=[c for c in all_visible if intersects_view(c)]
+        manual_keys=self.selected_instance_keys() if self.manual_array_mode else set()
         if len(self.part_objects)>1 or self.nest_active:
             groups={}
             for c in all_visible:
@@ -6741,7 +6744,7 @@ class App(tk.Tk):
                     if not pts:continue
                     gx0=min(p[0] for p in pts);gy0=min(p[1] for p in pts);gx1=max(p[0] for p in pts);gy1=max(p[1] for p in pts)
                     sx0,sy0=self.transform((gx0,gy0));sx1,sy1=self.transform((gx1,gy1));color=OBJECT_COLORS[(object_id-1)%len(OBJECT_COLORS)]
-                    key=(object_id,instance_id);tag=self.manual_group_tag(key);chosen=self.manual_array_mode and key==self.manual_array_selected
+                    key=(object_id,instance_id);tag=self.manual_group_tag(key);chosen=key in manual_keys
                     self.canvas.create_rectangle(sx0,sy1,sx1,sy0,outline="#42e695" if chosen else color,
                                                  width=3 if chosen else 1,dash=() if chosen else (3,4),tags=(tag,))
                     self.canvas.create_text(sx0+4,sy1+4,text=f"{name} #{instance_id}",fill="#42e695" if chosen else color,
@@ -6750,7 +6753,7 @@ class App(tk.Tk):
             group_tag=self.manual_group_tag(contour_group_key(c)) if c.object_id else ""
             xy=[]
             for p in c.points + ([c.points[0]] if c.closed else []): xy.extend(self.transform(p))
-            group_chosen=self.manual_array_mode and c.object_id and contour_group_key(c)==self.manual_array_selected
+            group_chosen=c.object_id and contour_group_key(c) in manual_keys
             color = "#42e695" if id(c) in selected_ids or group_chosen else ("#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d"))
             self.canvas.create_line(*xy, fill=color, width=3 if id(c) in selected_ids else 2,tags=(group_tag,) if group_tag else ())
             for a,b in c.bridges:
@@ -6898,10 +6901,18 @@ class App(tk.Tk):
         self.canvas.focus_set()
         if self.manual_array_mode:
             key=self.manual_group_at(self.inv_transform((event.x,event.y)))
-            self.manual_array_selected=key;self.manual_array_drag=None
-            if key is not None:
-                self.manual_array_drag=(key,event.x,event.y,event.x,event.y)
-                self.status.set(f"선택 객체 #{key[1]} | 방향키 길게: 연속 이동 · Shift: 빠르게 · R: 90° 회전 · F: 좌우 반전")
+            keys=self.selected_instance_keys();additive=bool(event.state & 0x0004)
+            if additive:
+                if key is not None:
+                    if key in keys:keys.remove(key)
+                    else:keys.add(key)
+            elif key not in keys:keys={key} if key is not None else set()
+            self.manual_array_selected=key if key in keys else next(iter(sorted(keys)),None)
+            self.manual_array_drag=None
+            self.set_contour_selection([c for c in self.contours if contour_group_key(c) in keys])
+            if key is not None and key in keys:
+                self.manual_array_drag=(frozenset(keys),event.x,event.y,event.x,event.y)
+                self.status.set(f"개체 {len(keys)}개 선택 | Ctrl+클릭: 추가/해제 · 드래그/방향키: 함께 이동 · R/F: 각 개체 회전/반전")
             else:self.status.set("배치할 객체의 경계 안을 클릭하세요.")
             self.redraw(refresh_tree=False);return
         if self.measure_mode or self.origin_mode or self.start_mode or self.join_mode or self.manual_mode:
@@ -6913,7 +6924,7 @@ class App(tk.Tk):
         if self.manual_array_mode:
             if self.manual_array_drag is None:return
             key,sx,sy,lx,ly=self.manual_array_drag
-            self.canvas.move(self.manual_group_tag(key),event.x-lx,event.y-ly)
+            for item in key:self.canvas.move(self.manual_group_tag(item),event.x-lx,event.y-ly)
             self.manual_array_drag=(key,sx,sy,event.x,event.y);return
         if self.canvas_selection_drag is None:return
         sx,sy,_,_=self.canvas_selection_drag;self.canvas_selection_drag=(sx,sy,event.x,event.y)
@@ -6929,9 +6940,10 @@ class App(tk.Tk):
             key,sx,sy,lx,ly=self.manual_array_drag;self.manual_array_drag=None
             scale=max(self.view[0],EPS);dx=(event.x-sx)/scale;dy=(sy-event.y)/scale
             if abs(dx)>EPS or abs(dy)>EPS:
-                self.push_undo("수동 배치 이동");move_contour_group(self.contours,key,dx,dy)
+                self.push_undo("수동 배치 이동")
+                for item in key:move_contour_group(self.contours,item,dx,dy)
                 self.preview_cache.clear();self.collision_cache_key=None
-                self.status.set(f"객체 #{key[1]} 이동 | ΔX {dx:.3f} ΔY {dy:.3f} mm")
+                self.status.set(f"개체 {len(key)}개 이동 | ΔX {dx:.3f} ΔY {dy:.3f} mm")
             self.redraw(refresh_tree=False);return
         if self.canvas_selection_drag is None:return
         sx,sy,_,_=self.canvas_selection_drag;self.canvas_selection_drag=None;self.canvas.delete("selection_box")
