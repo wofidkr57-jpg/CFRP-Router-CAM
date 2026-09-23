@@ -44,10 +44,10 @@ import multiprocessing as mp
 import tkinter as tk
 import tkinter.font as tkfont
 from concurrent.futures import ProcessPoolExecutor, as_completed
-from dataclasses import dataclass, field
+from dataclasses import dataclass, field, asdict, fields, is_dataclass
 from datetime import datetime
 from tkinter import filedialog, messagebox, ttk
-from typing import Callable, Dict, List, Optional, Sequence, Tuple
+from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union, get_args, get_origin, get_type_hints
 
 Point = Tuple[float, float]
 Point3 = Tuple[float, float, float]
@@ -630,6 +630,36 @@ class PartObject:
     # placement while remaining independently selectable/arrayable.
     layout_group: str = ""
     nest_offset: Optional[float] = None  # None inherits half the common array gap.
+
+
+def decode_job_value(value, kind):
+    """Strict, data-only project decoding. No executable object deserialization."""
+    origin=get_origin(kind);args=get_args(kind)
+    if origin is Union:
+        for choice in args:
+            try:return decode_job_value(value,choice)
+            except (ValueError,TypeError):pass
+        raise ValueError("Invalid optional project value")
+    if kind is type(None):
+        if value is not None:raise ValueError("Expected null")
+        return None
+    if origin in (list,tuple):
+        if not isinstance(value,list):raise ValueError("Expected project list")
+        if origin is tuple:
+            if len(value)!=len(args):raise ValueError("Invalid coordinate")
+            return tuple(decode_job_value(v,t) for v,t in zip(value,args))
+        return [decode_job_value(v,args[0]) for v in value]
+    if is_dataclass(kind):
+        hints=get_type_hints(kind)
+        if not isinstance(value,dict) or set(value)!=set(hints):raise ValueError("Invalid project fields")
+        return kind(**{k:decode_job_value(v,hints[k]) for k,v in value.items()})
+    if kind is float:
+        if type(value) not in (int,float) or not math.isfinite(value):raise ValueError("Invalid number")
+        return float(value)
+    if kind in (int,bool,str):
+        if type(value) is not kind:raise ValueError("Invalid project value type")
+        return value
+    raise ValueError("Unsupported project value")
 
 
 @dataclass
@@ -4605,6 +4635,7 @@ class App(tk.Tk):
         self.next_object_id = 1
         self.pending_imports: List[str] = []
         self.filename = ""
+        self.job_path="";self.saved_job_snapshot=None
         self.gcode = ""
         self.gcode_parts:List[Tuple[str,str]] = [];self.gcode_part_minutes:List[float]=[]
         self.gcode_job_minutes = 0.0
@@ -4656,6 +4687,8 @@ class App(tk.Tk):
         self._build()
         self.load_settings()
         self.protocol("WM_DELETE_WINDOW",self.on_close)
+        for key in ("s","S","o","O"):
+            self.bind(f"<Control-{key}>",self.job_shortcut)
         self.bind_all("<Control-z>", self.undo)
         self.bind_all("<Control-Z>", self.undo)
         self.bind_all("<Control-y>", self.redo)
@@ -4735,6 +4768,11 @@ class App(tk.Tk):
         ttk.Button(top,text="측정 지우기",command=self.clear_measurement).pack(side="left",padx=2)
         self.var("show_grid",True,tk.BooleanVar)
         ttk.Checkbutton(top,text="그리드",variable=self.vars["show_grid"],command=self.redraw).pack(side="left",padx=3)
+        jobs=ttk.Frame(self,padding=(6,0,6,4));jobs.pack(fill="x")
+        ttk.Button(jobs,text="작업 열기",command=self.open_job).pack(side="left")
+        ttk.Button(jobs,text="작업 저장",command=self.save_job).pack(side="left",padx=4)
+        ttk.Button(jobs,text="작업 다른 이름 저장",command=lambda:self.save_job(save_as=True)).pack(side="left")
+        self.job_label=ttk.Label(jobs,text="작업 파일: 저장 안 됨");self.job_label.pack(side="left",padx=10)
         self.status = DisplayStringVar(value="DXF 또는 STEP을 열어 주세요 (단위: mm)")
         ttk.Label(top, textvariable=self.status).pack(side="left", padx=12)
 
@@ -4978,7 +5016,9 @@ class App(tk.Tk):
         ttk.Button(order_buttons,text="선택 윤곽만 보기",command=self.show_tree_selection).pack(side="left",fill="x",expand=True)
         ttk.Button(order_buttons,text="전체 보기",command=self.show_all_contours).pack(side="left",fill="x",expand=True,padx=(4,0))
         ttk.Button(order_buttons,text="외곽 순서 자동",command=self.reset_outer_order).pack(side="left",padx=(4,0))
-        ttk.Label(order_frame,text="외곽 행 ‘순서’/이름 영역 드래그: 순서 변경 · 내부 먼저",foreground="#91a0b8").pack(anchor="w",pady=(4,3))
+        ttk.Label(order_frame,text="⋮⋮ 순서/이름 드래그 → 노란 삽입선 위치에 놓기 · 내부 먼저",foreground="#91a0b8").pack(anchor="w",pady=(4,3))
+        ttk.Button(order_buttons,text="↑",width=3,command=lambda:self.move_outer_step(-1)).pack(side="left",padx=2)
+        ttk.Button(order_buttons,text="↓",width=3,command=lambda:self.move_outer_step(1)).pack(side="left")
         self.tree_role_var=tk.StringVar(value="자동")
         columns=("seq","manual","type","enabled","layer","depth","safety","part")
         self.order_tree=ttk.Treeview(order_frame,columns=columns,show="headings",selectmode="extended",height=7)
@@ -4992,7 +5032,11 @@ class App(tk.Tk):
         order_scroll.pack(side="right",fill="y"); self.order_tree.pack(fill="both",expand=True)
         self.order_tree.bind("<<TreeviewSelect>>",self.tree_select)
         self.order_tree.bind("<Button-1>",self.tree_cell_click,add="+")
-        self.order_drag=None
+        self.order_drag=None;self.order_scroll_after=None
+        self.order_insert_line=tk.Frame(self.order_tree,bg="#ffd447",height=3)
+        for sequence,handler in (("<B1-Motion>",self.drag_outer_order),("<ButtonRelease-1>",self.drop_outer_order)):
+            self.order_insert_line.bind(sequence,lambda e,h=handler:h(type("Event",(),{
+                "x":e.x_root-self.order_tree.winfo_rootx(),"y":e.y_root-self.order_tree.winfo_rooty(),"state":e.state})()))
         self.order_tree.bind("<B1-Motion>",self.drag_outer_order)
         self.order_tree.bind("<ButtonRelease-1>",self.drop_outer_order)
         self.order_tree.tag_configure("order_drop",background="#24565c")
@@ -5118,13 +5162,15 @@ class App(tk.Tk):
         shortcut_text=("T Manual tab · S Start point · Esc Cancel pick · Home Fit view\n"
                        "Canvas selection: Arrows 1mm / Shift 0.1mm · Del Delete · Ctrl+C/V Copy/Paste\n"
                        "Manual placement: R Rotate 90° · F Flip left/right · Ctrl+click Multi-select\n"
-                       "Ctrl+Z/Y Undo/Redo · T/S: pick once, press again for the next point.\n"
+                       "Ctrl+S Save job · Ctrl+O Open job · Ctrl+Z/Y Undo/Redo\n"
+                       "T/S: pick once, press again for the next point.\n"
                        "Use letter shortcuts in English input mode; disabled while typing."
                        if CURRENT_LANGUAGE=="en" else
                        "T 수동탭 · S 시작점 · Esc 점 선택 취소 · Home 전체 보기\n"
                        "화면 선택: 방향키 1mm / Shift 0.1mm · Del 삭제 · Ctrl+C/V 복사/붙여넣기\n"
                        "수동 배치: R 90° 회전 · F 좌우 반전 · Ctrl+클릭 다중 선택\n"
-                       "Ctrl+Z/Y 되돌리기/다시 실행 · T/S: 1회 지정 후 다시 눌러 선택\n"
+                       "Ctrl+S 작업 저장 · Ctrl+O 작업 열기 · Ctrl+Z/Y 되돌리기/다시 실행\n"
+                       "T/S: 1회 지정 후 다시 눌러 선택\n"
                        "문자 단축키는 영문 입력 상태에서 사용 · 입력칸 편집 중에는 적용 안 함")
         self.shortcut_help=ttk.Label(settings_tab,text=shortcut_text,justify="left",font=("맑은 고딕",9))
         self.shortcut_help.pack(fill="x",padx=10,pady=(0,6),side="bottom")
@@ -5397,7 +5443,116 @@ class App(tk.Tk):
             try:self.write_settings_file(fallback,data)
             except OSError:raise portable_error
 
+    def job_shortcut(self,event):
+        if event.widget.winfo_toplevel() is not self:return
+        if event.keysym.lower()=="s":self.save_job()
+        else:self.open_job()
+        return "break"
+
+    def job_document(self):
+        state=self._history_state()
+        state["contours"]=[asdict(c) for c in state["contours"]]
+        state["part_objects"]=[asdict(p) for p in state["part_objects"]]
+        state["nest_source"]=None if state["nest_source"] is None else [asdict(c) for c in state["nest_source"]]
+        return {"format":"CFRP_CAM_JOB","schema":1,"app_version":APP_VERSION,"state":state,
+                "vars":{k:v.get() for k,v in self.vars.items()},
+                "codes":{attr:getattr(self,attr).get("1.0","end-1c") for attr in
+                         ("start_text","end_text","onion_start_text","onion_end_text")}}
+
+    def job_snapshot(self):
+        return json.dumps(self.job_document(),ensure_ascii=False,sort_keys=True,allow_nan=False)
+
+    def save_job(self,event=None,save_as=False):
+        path=getattr(self,"job_path","")
+        if save_as or not path:
+            path=filedialog.asksaveasfilename(title="작업 저장",defaultextension=".cfrpcam",
+                    filetypes=[("CarbonCAM 작업","*.cfrpcam")],initialfile=os.path.basename(path) if path else "작업.cfrpcam")
+        if not path:return False
+        try:
+            data=self.job_document()
+            json.dumps(data,allow_nan=False)
+            self.write_settings_file(os.path.abspath(path),data)
+        except (OSError,ValueError,TypeError,tk.TclError) as exc:
+            messagebox.showerror("작업 저장 실패",str(exc));return False
+        self.job_path=os.path.abspath(path);self.saved_job_snapshot=self.job_snapshot()
+        self.job_label.configure(text=f"작업 파일: {os.path.basename(path)}")
+        self.status.set("작업 저장 완료 · 형상/배치/탭/시작점/가공 설정 포함")
+        return True
+
+    def confirm_job_replace(self):
+        if not self.contours:return True
+        try:changed=self.job_snapshot()!=self.saved_job_snapshot
+        except (ValueError,TypeError,tk.TclError):changed=True
+        if not changed:return True
+        answer=messagebox.askyesnocancel("작업 저장","현재 작업을 저장하시겠습니까?")
+        if answer is None:return False
+        return self.save_job() if answer else True
+
+    def decode_job(self,data):
+        if not isinstance(data,dict) or data.get("format")!="CFRP_CAM_JOB" or data.get("schema")!=1:
+            raise ValueError("지원하지 않는 작업 파일 형식/버전입니다.")
+        state=data["state"]
+        schema={"contours":List[Contour],"part_objects":List[PartObject],"next_object_id":int,
+                "nest_source":Optional[List[Contour]],"nest_active":bool,"sheet_size":Optional[Tuple[float,float]],
+                "filename":str,"xy_origin":Optional[str]}
+        if set(state)!=set(schema):raise ValueError("작업 상태 항목이 올바르지 않습니다.")
+        result={k:decode_job_value(state[k],t) for k,t in schema.items()}
+        ids=[p.object_id for p in result["part_objects"]]
+        if len(set(ids))!=len(ids) or any(i<1 for i in ids) or result["next_object_id"]<=max(ids,default=0):
+            raise ValueError("잘못된 개체 번호입니다.")
+        if any(p.quantity<0 for p in result["part_objects"]):raise ValueError("잘못된 개체 수량입니다.")
+        all_contours=result["contours"]+(result["nest_source"] or [])+[c for p in result["part_objects"] for c in p.contours]
+        for c in all_contours:
+            if len(c.points)<2 or c.role not in ("inner","outer","pocket") or c.forced_role not in ("auto","inner","outer") or c.operation not in ("profile","pocket"):
+                raise ValueError("잘못된 윤곽 정보입니다.")
+            if any(n is not None and n<1 for n in (c.cut_order,c.outer_cut_order)):raise ValueError("잘못된 가공 순서입니다.")
+        if set(data["vars"])!=set(self.vars):raise ValueError("작업 설정 항목이 현재 버전과 맞지 않습니다.")
+        for k,v in data["vars"].items():
+            var=self.vars[k]
+            kind=bool if isinstance(var,tk.BooleanVar) else int if isinstance(var,tk.IntVar) else float if isinstance(var,tk.DoubleVar) else str
+            decode_job_value(v,kind)
+        if set(data["codes"])!={"start_text","end_text","onion_start_text","onion_end_text"} or not all(isinstance(v,str) for v in data["codes"].values()):
+            raise ValueError("잘못된 START/END 코드입니다.")
+        return result
+
+    def apply_job_values(self,data):
+        for k,v in data["vars"].items():self.vars[k].set(localized_enum_value(v) if k in ("xy_origin","finish_scope") else v)
+        for attr,text in data["codes"].items():
+            widget=getattr(self,attr);widget.configure(state="normal");widget.delete("1.0","end");widget.insert("1.0",text)
+        self.sync_onion_split()
+
+    def open_job(self,event=None):
+        path=filedialog.askopenfilename(title="작업 열기",filetypes=[("CarbonCAM 작업","*.cfrpcam")])
+        if not path:return False
+        try:
+            with open(path,encoding="utf-8") as f:data=json.load(f)
+            state=self.decode_job(data)
+        except (OSError,ValueError,TypeError,KeyError) as exc:
+            messagebox.showerror("작업 열기 실패",str(exc));return False
+        if not self.confirm_job_replace():return False
+        previous=self.job_document();previous_state=self._history_state()
+        try:
+            self.apply_job_values(data);self._restore_history_state(state);self.config()
+        except (ValueError,TypeError,tk.TclError) as exc:
+            self.apply_job_values(previous);self._restore_history_state(previous_state);messagebox.showerror("작업 열기 실패",str(exc));return False
+        self._restore_history_state(state)
+        self.manual_array_mode=False;self.manual_array_drag=None;self.manual_array_selected=None
+        self.manual_array_btn.configure(text="수동 어레이 편집 (드래그 / R 회전)")
+        self.canvas_selection_drag=None;self.selected=None;self.selected_contours=[];self.view_only=None
+        self.pick_shortcut(type("Event",(),{"widget":self.canvas,"state":0,"keysym":"Escape"})())
+        self.undo_stack.clear();self.redo_stack.clear();self.preview_cache.clear();self.collision_cache_key=None
+        self.preview_order_cache_key=None;self.tree_sort_col=None;self.order_drag=None
+        self.gcode="";self.gcode_parts=[];self.gcode_signature=None;self.instance_clipboard=[]
+        self.clear_order_drop()
+        self.text.delete("1.0","end");self.selection_label.set("선택 없음")
+        self.view_initialized=False;self.refresh_object_tree();self.redraw()
+        self.job_path=os.path.abspath(path);self.saved_job_snapshot=self.job_snapshot()
+        self.job_label.configure(text=f"작업 파일: {os.path.basename(path)}")
+        self.status.set("작업 불러오기 완료 · G-code는 현재 설정으로 다시 생성하세요.")
+        return True
+
     def on_close(self):
+        if not self.confirm_job_replace():return
         try:self.save_settings()
         except (OSError,ValueError,TypeError,tk.TclError):pass
         self.destroy()
@@ -6491,6 +6646,7 @@ class App(tk.Tk):
             typ="아일랜드 포켓" if c.operation=="pocket" else ("열린선" if not c.closed else ("내부" if c.role=="inner" else "외부"))
             depth=f"{c.target_depth:g}" if c.target_depth is not None else "관통"
             seq=str(actual[id(c)]) if c.enabled else "-"
+            if c.enabled and c.closed and c.role=="outer" and c.operation!="pocket":seq="⋮⋮ "+seq
             manual=str(c.cut_order) if c.cut_order is not None else "자동"
             if c.closed and c.role=="outer" and c.outer_cut_order is not None:manual=f"외{c.outer_cut_order}"
             iid=f"c{idx}"
@@ -6527,6 +6683,7 @@ class App(tk.Tk):
         self.redraw(refresh_tree=False)
 
     def tree_cell_click(self,event):
+        self.clear_order_drop()
         self.order_drag=None
         if self.order_tree.identify_region(event.x,event.y)!="cell":return
         column=self.order_tree.identify_column(event.x)
@@ -6552,47 +6709,70 @@ class App(tk.Tk):
             return "break"
         if column=="#3":self.after_idle(lambda i=item:self.open_tree_role_editor(i))
 
+    def clear_order_drop(self):
+        self.order_insert_line.place_forget()
+        if self.order_scroll_after is not None:
+            self.after_cancel(self.order_scroll_after);self.order_scroll_after=None
+
     def drag_outer_order(self,event):
         if self.order_drag is None:return
         source,start_y,target=self.order_drag
         if abs(event.y-start_y)<5 and target is None:return
-        for iid in self.order_tree.get_children():
-            tags=tuple(t for t in self.order_tree.item(iid,"tags") if t!="order_drop")
-            self.order_tree.item(iid,tags=tags)
-        if event.y>self.order_tree.winfo_height()-3:self.order_tree.yview_scroll(1,"units")
-        elif event.y<25:self.order_tree.yview_scroll(-1,"units")
-        iid=self.order_tree.identify_row(event.y)
+        self.clear_order_drop()
         target=None
-        if iid:
-            candidate=self.contours[int(iid[1:])]
-            if candidate.enabled and candidate.closed and candidate.role=="outer" and candidate.operation!="pocket":
-                target=candidate
-                self.order_tree.item(iid,tags=tuple(self.order_tree.item(iid,"tags"))+("order_drop",))
+        if 0<=event.x<self.order_tree.winfo_width() and 20<=event.y<self.order_tree.winfo_height():
+            iid=self.order_tree.identify_row(event.y)
+            if iid:
+                candidate=self.contours[int(iid[1:])];box=self.order_tree.bbox(iid)
+                if box and candidate.enabled and candidate.closed and candidate.role=="outer" and candidate.operation!="pocket":
+                    after=event.y>=box[1]+box[3]/2
+                    target=(candidate,after)
+                    self.order_insert_line.place(x=0,y=box[1]+(box[3] if after else 0)-1,
+                                                 width=self.order_tree.winfo_width(),height=3)
+                    self.order_insert_line.lift()
+            direction=1 if event.y>self.order_tree.winfo_height()-16 else -1 if event.y<38 else 0
+            if direction:
+                def scroll():
+                    self.order_scroll_after=None
+                    if self.order_drag is None:return
+                    self.order_tree.yview_scroll(direction,"units")
+                    self.drag_outer_order(event)
+                self.order_scroll_after=self.after(120,scroll)
         self.order_drag=(source,start_y,target)
         return "break"
 
-    def drop_outer_order(self,event):
-        drag=self.order_drag;self.order_drag=None
-        if drag is None:return
-        source,start_y,target=drag
-        for iid in self.order_tree.get_children():
-            self.order_tree.item(iid,tags=tuple(t for t in self.order_tree.item(iid,"tags") if t!="order_drop"))
-        if target is None or source is target or abs(event.y-start_y)<5:return
-        ordered=ordered_contours(self.contours,bool(self.vars["rapid_optimize"].get()))
-        outer=[c for c in ordered if c.closed and c.role=="outer" and c.operation!="pocket"]
-        if not any(c is source for c in outer) or not any(c is target for c in outer):return
-        # Compare actual cut order, not an optional display-column sort.
-        old=next(i for i,c in enumerate(outer) if c is source)
-        dest=next(i for i,c in enumerate(outer) if c is target)
-        outer.pop(old)
-        target_index=next(i for i,c in enumerate(outer) if c is target)
-        outer.insert(target_index+(1 if dest>old else 0),source)
-        self.push_undo("외곽 순서 드래그 변경")
+    def apply_outer_sequence(self,outer,source):
+        self.push_undo("외곽 순서 변경")
         for rank,c in enumerate(outer,1):c.outer_cut_order=rank
         self.tree_sort_col=None;self.tree_sort_reverse=False;self.preview_order_cache_key=None
         self.set_contour_selection([source],source);self.redraw()
         self.status.set("외곽 순서 변경 완료 · 내부 먼저 / 지정 외곽 순서 고정 · Ctrl+Z 되돌리기")
+
+    def drop_outer_order(self,event):
+        drag=self.order_drag;self.order_drag=None;self.clear_order_drop()
+        if drag is None:return
+        source,start_y,target=drag
+        if target is None or not (0<=event.x<self.order_tree.winfo_width() and 20<=event.y<self.order_tree.winfo_height()):return
+        candidate,after=target
+        if source is candidate:return "break"
+        # Match the visible insertion line even if the user sorted a column.
+        outer=[self.contours[int(i[1:])] for i in self.order_tree.get_children()]
+        outer=[c for c in outer if c.enabled and c.closed and c.role=="outer" and c.operation!="pocket"]
+        if not any(c is source for c in outer) or not any(c is candidate for c in outer):return
+        outer=[c for c in outer if c is not source]
+        target_index=next(i for i,c in enumerate(outer) if c is candidate)
+        outer.insert(target_index+int(after),source)
+        self.apply_outer_sequence(outer,source)
         return "break"
+
+    def move_outer_step(self,direction):
+        source=self.selected
+        outer=[self.contours[int(i[1:])] for i in self.order_tree.get_children()]
+        outer=[c for c in outer if c.enabled and c.closed and c.role=="outer" and c.operation!="pocket"]
+        index=next((i for i,c in enumerate(outer) if c is source),None)
+        if index is None or not 0<=index+direction<len(outer):return
+        outer[index],outer[index+direction]=outer[index+direction],outer[index]
+        self.apply_outer_sequence(outer,source)
 
     def reset_outer_order(self):
         if not any(c.outer_cut_order is not None for c in self.contours):return
@@ -7268,12 +7448,15 @@ class App(tk.Tk):
             distance_blocks,distance_warnings=machining_distance_guard(distance_jobs)
             if distance_blocks:
                 progress.close();progress=None
-                messagebox.showerror(
-                    "공구 교체 필요 - 생성 중지",
-                    "예상 절삭거리가 공구 교체 기준에 도달했습니다.\n\n"+
+                if not messagebox.askyesno(
+                    "공구 교체 기준 초과 - 생성 확인",
+                    "예상 절삭거리가 공구 교체 기준을 초과했습니다.\n\n"+
                     "\n".join(distance_blocks)+
-                    "\n\n작업을 나누고 새 공구로 각 파일을 생성하세요.")
-                return
+                    "\n\n공구 마모·버·파손 위험이 있습니다. 작업 분할과 새 공구 사용을 권장합니다."
+                    "\n이 경고는 실제 기계를 정지시키지 않습니다.\n\n기준을 초과한 가공 코드를 생성할까요?",
+                    default="no",icon="warning"):
+                    return
+                progress=ProgressDialog(self,"G-code 생성")
             warnings += distance_warnings
             if warnings:
                 progress.close();progress=None
@@ -7285,6 +7468,8 @@ class App(tk.Tk):
             for index,(label,job_cfg) in enumerate(jobs):
                 code=generate_gcode(active,job_cfg,
                     lambda value,message:progress.set_progress(48+(index+value/100)*50/len(jobs),f"{label} · {message}") if progress else None)
+                if distance_blocks:
+                    code=code.replace("\n","\n(WARNING: TOOL DISTANCE LIMIT OVERRIDE CONFIRMED - CHECK TOOL CONDITION)\n",1)
                 generated.append((label,code))
             self.gcode_parts=generated
             self.gcode_part_minutes=[report[1] for report in reports] if len(jobs)==2 else []
