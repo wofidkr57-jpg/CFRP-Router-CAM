@@ -4726,15 +4726,21 @@ class App(tk.Tk):
         ttk.Label(top, textvariable=self.status).pack(side="left", padx=12)
 
         pan = ttk.Panedwindow(self, orient="horizontal"); pan.pack(fill="both", expand=True)
+        self.main_pan=pan;self.panel_ratios=None;self.panel_width=0;self.panel_job=None
         control_holder = ttk.Frame(pan); pan.add(control_holder, weight=0)
         control_canvas = tk.Canvas(control_holder, width=285,bg="#0b1220",highlightthickness=0)
         control_scroll = ttk.Scrollbar(control_holder, orient="vertical", command=control_canvas.yview)
         control_canvas.configure(yscrollcommand=control_scroll.set)
-        control_scroll.pack(side="right", fill="y"); control_canvas.pack(side="left", fill="both", expand=True)
+        self.control_xscroll=ttk.Scrollbar(control_holder,orient="horizontal",command=control_canvas.xview)
+        control_canvas.configure(xscrollcommand=self.control_xscroll.set)
+        control_holder.rowconfigure(0,weight=1);control_holder.columnconfigure(0,weight=1)
+        control_scroll.grid(row=0,column=1,sticky="ns");control_canvas.grid(row=0,column=0,sticky="nsew")
+        self.control_xscroll.grid(row=1,column=0,sticky="ew");self.control_xscroll.grid_remove()
         controls = ttk.Frame(control_canvas, padding=8)
         control_window = control_canvas.create_window((0,0), window=controls, anchor="nw")
         controls.bind("<Configure>", lambda e: control_canvas.configure(scrollregion=control_canvas.bbox("all")))
-        control_canvas.bind("<Configure>", lambda e: control_canvas.itemconfigure(control_window, width=e.width))
+        self.control_canvas=control_canvas;self.controls=controls;self.control_window=control_window
+        control_canvas.bind("<Configure>",self.resize_controls)
         control_canvas.bind("<MouseWheel>", lambda e: control_canvas.yview_scroll(int(-e.delta/120), "units"))
         center = ttk.Frame(pan); pan.add(center, weight=3)
         right = ttk.Frame(pan); pan.add(right, weight=2)
@@ -5079,6 +5085,57 @@ class App(tk.Tk):
         update_box=ttk.LabelFrame(settings_tab,text="프로그램 업데이트",padding=12);update_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Label(update_box,text=f"현재 버전: V{APP_VERSION}\n새 버전은 다운로드 검증 후 기존 EXE를 자동 교체합니다.",justify="left").pack(anchor="w")
         ttk.Button(update_box,text="지금 업데이트 확인",command=lambda:self.start_update_check(manual=True)).pack(fill="x",pady=(8,0))
+        pan.bind("<Configure>",self.resize_panels)
+        pan.bind("<ButtonRelease-1>",self.remember_panel_widths)
+        pan.bind("<Double-Button-1>",self.reset_panel_widths)
+        self.after_idle(self.reset_panel_widths)
+
+    def controls_min_width(self):
+        columns=[0,0];spans=0
+        for widget in self.controls.winfo_children():
+            info=widget.grid_info()
+            if not info:continue
+            if int(info.get("columnspan",1))==1:
+                col=int(info.get("column",0))
+                if col<2:columns[col]=max(columns[col],widget.winfo_reqwidth()+10)
+            elif not isinstance(widget,ttk.Label):spans=max(spans,widget.winfo_reqwidth())
+        return max(sum(columns),spans)+20
+
+    def resize_controls(self,event=None):
+        viewport=self.control_canvas.winfo_width()
+        width=max(viewport,self.controls_min_width())
+        for widget in self.controls.winfo_children():
+            if isinstance(widget,ttk.Label) and int(widget.grid_info().get("columnspan",1))>1:
+                widget.configure(wraplength=max(100,width-24),justify="left")
+        self.control_canvas.itemconfigure(self.control_window,width=width)
+        if width>viewport+1:self.control_xscroll.grid()
+        else:self.control_xscroll.grid_remove();self.control_canvas.xview_moveto(0)
+
+    def resize_panels(self,event=None):
+        width=self.main_pan.winfo_width()
+        if width==self.panel_width:return
+        self.panel_width=width
+        if self.panel_job is not None:self.after_cancel(self.panel_job)
+        self.panel_job=self.after_idle(self.layout_panels)
+
+    def layout_panels(self):
+        self.panel_job=None;width=self.main_pan.winfo_width()
+        if width<10:return
+        if self.panel_ratios:
+            left,second=(round(v*width) for v in self.panel_ratios)
+        else:
+            left=min(self.controls_min_width()+24,int(width*.45))
+            second=width-min(max(340,int(width*.28)),int(width*.35))
+        left=max(120,min(left,width-260));second=max(left+140,min(second,width-120))
+        self.main_pan.sashpos(0,left);self.main_pan.sashpos(1,second)
+
+    def remember_panel_widths(self,event=None):
+        width=max(self.main_pan.winfo_width(),1)
+        self.panel_ratios=tuple(self.main_pan.sashpos(i)/width for i in (0,1))
+
+    def reset_panel_widths(self,event=None):
+        self.panel_ratios=None;self.layout_panels();self.resize_controls()
+        return "break"
 
     def apply_language(self):
         selected=str(self.language_var.get()).strip()
@@ -6503,6 +6560,7 @@ class App(tk.Tk):
         self.text.configure(font=("Consolas",size));self.start_text.configure(font=("Consolas",size));self.end_text.configure(font=("Consolas",size))
         ttk.Style(self).configure("Treeview",rowheight=max(20,size+10),font=("Segoe UI",size))
         ttk.Style(self).configure("Treeview.Heading",font=("Segoe UI",size,"bold"))
+        self.after_idle(self.reset_panel_widths)
         self.redraw()
         if not silent:self.status.set(f"화면 글자 크기 {size} 적용")
 
