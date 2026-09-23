@@ -75,11 +75,11 @@ class SelectionAndSplitTests(unittest.TestCase):
     def test_split_output_names_are_paired(self):
         self.assertEqual(
             cam.split_gcode_paths(r"C:\jobs\panel.nc"),
-            (r"C:\jobs\panel_PART1.nc", r"C:\jobs\panel_PART2.nc"),
+            (r"C:\jobs\panel_ROUGH.nc", r"C:\jobs\panel_FINISH.nc"),
         )
         self.assertEqual(
-            cam.split_gcode_paths(r"C:\jobs\panel_PART1.tap"),
-            (r"C:\jobs\panel_PART1.tap", r"C:\jobs\panel_PART2.tap"),
+            cam.split_gcode_paths(r"C:\jobs\panel_ROUGH.tap"),
+            (r"C:\jobs\panel_ROUGH.tap", r"C:\jobs\panel_FINISH.tap"),
         )
 
     def test_default_filename_uses_requested_format(self):

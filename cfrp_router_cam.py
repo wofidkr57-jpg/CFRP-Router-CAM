@@ -56,7 +56,7 @@ STEP_FACE_NORMAL_DOT = 0.999
 TOOL_WEAR_DEFAULT_LOSS_PER_10M = 0.079
 TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
-APP_VERSION = "1.21"
+APP_VERSION = "1.22"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -80,6 +80,18 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "촘촘한 배열 (실제 윤곽 / 180° 엇갈림)": "Contour nesting (180 degree interlocking)",
+    "촘촘한 모드: 파츠별 외곽 여유 합산 · 빈칸은 공통 간격의 절반": "Contour mode: add part offsets; blank = half the common gap",
+    "외곽 여유 mm": "Offset mm",
+    "선택 파츠 외곽 여유 (mm)": "Selected part offset (mm)",
+    "여유 적용": "Apply offset",
+    "빈칸=공통 간격의 절반 · 촘촘한 배열 전용": "Blank = half common gap; contour nesting only",
+    "배치 취소": "Cancel nesting",
+    "어니언스킨 황삭/정삭 파일 분리": "Onion skin: separate rough / finish files",
+    "분리 시 바닥 잔여 (%)": "Split: remaining floor (%)",
+    "분리: 전체 측면 정삭 · 마이크로탭 없음": "Split: all wall finishing, no microtabs",
+    "어니언스킨 START / END": "Onion skin START / END",
+    "정삭 파일 전용: 비워두면 기존 START/END 사용": "FINISH only: leave blank to use the existing START/END",
     "한국어": "Korean",
     "연산 중": "Working",
     "준비 중...": "Ready...",
@@ -202,7 +214,6 @@ _UI_EN_EXACT = {
     "가공 순서 / 윤곽 목록": "Cut Order / Contour List",
     "선택 윤곽만 보기": "Show Selected Contours",
     "전체 보기": "Show All",
-    "선택→PART1 / 나머지→PART2 G-code 생성": "Selected→PART1 / Remaining→PART2",
     "순서": "Order",
     "지정": "Manual",
     "깊이": "Depth",
@@ -305,6 +316,9 @@ _UI_EN_PHRASES = {
     "STEP 가져오기": "STEP Import",
     "2분할 G-code": "Split G-code",
     "2분할 G-code 저장": "Save Split G-code",
+    "정삭은 새 공구로 실행합니다. XY 원점을 유지하고 Z를 다시 설정하세요. 마이크로탭 없이 관통하므로 부품 고정을 확인하세요.": "Run FINISH with a new tool. Preserve XY zero and re-zero Z. Verify workholding: through cuts have no microtabs.",
+    "분리 가공 바닥 잔여율은 0 초과 100% 미만이어야 합니다.": "Split remaining floor must be greater than 0% and less than 100%.",
+    "분리 가공에는 어니언스킨을 남길 관통 외곽이 필요합니다.": "Split machining requires a through-cut outer profile for onion skin.",
     "예상 절삭거리 확인 중": "Checking estimated cutting distance",
 }
 
@@ -607,6 +621,7 @@ class PartObject:
     # Parts selected from one multi-body STEP keep their original relative XY
     # placement while remaining independently selectable/arrayable.
     layout_group: str = ""
+    nest_offset: Optional[float] = None  # None inherits half the common array gap.
 
 
 @dataclass
@@ -1263,6 +1278,98 @@ def _split_free_rectangles(free_rects:Sequence[Tuple[float,float,float,float]],
                     contained=True;break
         if not contained:cleaned.append(r)
     return cleaned
+
+
+def nesting_offset(part:PartObject,gap:float)->float:
+    value=float(gap/2 if part.nest_offset is None else part.nest_offset)
+    if not math.isfinite(value) or value<0:raise ValueError("외곽 여유는 0 이상의 유한한 값이어야 합니다.")
+    return value
+
+
+def nesting_outline(part:PartObject):
+    """Material envelope: fill holes so another part cannot be placed inside one."""
+    from shapely.geometry import Polygon
+    from shapely import union_all
+    polygons=[]
+    for c in part.contours:
+        if not c.closed:raise ValueError(f"{part.name}: 촘촘한 배열은 닫힌 외곽이 필요합니다.")
+        polygon=Polygon(c.points)
+        if not polygon.is_valid or polygon.area<=EPS:
+            raise ValueError(f"{part.name}: 유효하지 않은 외곽입니다. 형상을 먼저 복구하세요.")
+        polygons.append(polygon)
+    if not polygons:raise ValueError(f"{part.name}: 배열할 외곽이 없습니다.")
+    return union_all(polygons)
+
+
+def best_contour_nesting(parts:Sequence[PartObject],stock_w:float,stock_h:float,gap:float,edge:float,
+                         angles:Sequence[float],progress=None)->Tuple[List[NestPlacement],Dict[int,int]]:
+    """Bounded vertex-contact search; exact outlines validate every placement.
+
+    Offsets are nesting clearance only. Holes are filled, reflection is forbidden,
+    and candidate simplification never changes the source or collision geometry.
+    This heuristic does not promise a globally optimal packing.
+    """
+    from shapely.affinity import rotate,translate
+    values=(stock_w,stock_h,gap,edge)
+    if not all(math.isfinite(v) for v in values) or min(stock_w,stock_h)<=0 or min(gap,edge)<0:
+        raise ValueError("판재 크기와 여유 값을 확인하세요.")
+    if stock_w<=2*edge or stock_h<=2*edge:return [],{}
+    templates={};items=[];areas={}
+    for part in parts:
+        if not part.enabled or part.quantity<=0:continue
+        base=nesting_outline(part);areas[part.object_id]=base.area;clearance=nesting_offset(part,gap);choices=[]
+        for angle in dict.fromkeys(float(a)%360 for a in angles):
+            rotated=rotate(base,angle,origin=(0,0));x0,y0,x1,y1=rotated.bounds
+            shape=translate(rotated,-x0,-y0);w,h=x1-x0,y1-y0
+            if w+2*clearance>stock_w-2*edge+EPS or h+2*clearance>stock_h-2*edge+EPS:continue
+            # Mitred clearance envelope supplies contact candidates; exact distance
+            # below enforces offsets even where the candidate envelope is simplified.
+            envelope=shape.buffer(clearance,join_style=2) if clearance else shape
+            vertices=[]
+            for polygon in polygon_parts(envelope):
+                points=list(polygon.simplify(.02,preserve_topology=True).exterior.coords)[:-1]
+                stride=max(1,math.ceil(len(points)/24));vertices.extend(points[::stride])
+            choices.append((angle,shape,w,h,vertices,clearance))
+        templates[part.object_id]=choices
+        items.extend((part,i) for i in range(1,part.quantity+1))
+    if len(items)>1000:raise ValueError("촘촘한 배열 수량은 합계 1000개 이하로 지정하세요.")
+    # Large material envelopes first; stable ordering keeps identical inputs reproducible.
+    items.sort(key=lambda item:-areas[item[0].object_id])
+    placed=[];occupied=[];counts={};failed=set()
+    for index,(part,instance) in enumerate(items):
+        if part.object_id in failed:continue
+        best=None
+        for angle,shape,w,h,vertices,clearance in templates[part.object_id]:
+            low=edge+clearance;maxx=stock_w-edge-clearance-w;maxy=stock_h-edge-clearance-h
+            candidates={(low,low)}
+            for other,other_offset,other_vertices in occupied:
+                ox0,oy0,ox1,oy1=other.bounds
+                candidates.add((ox1+other_offset+clearance,low))
+                candidates.add((low,oy1+other_offset+clearance))
+                for px,py in other_vertices:
+                    for vx,vy in vertices:
+                        x,y=px-vx,py-vy
+                        if low-1e-7<=x<=maxx+1e-7 and low-1e-7<=y<=maxy+1e-7:
+                            candidates.add((max(low,x),max(low,y)))
+            for trial,(x,y) in enumerate(sorted(candidates,key=lambda p:(p[1],p[0]))):
+                if progress and trial%250==0:progress(index/max(1,len(items))*100,f"윤곽 배치 {index+1}/{len(items)}")
+                if x>maxx+1e-7 or y>maxy+1e-7:continue
+                score=(y+h,x+w,y,x,angle)
+                if best is not None and score>=best[0]:continue
+                candidate=translate(shape,x,y);valid=True
+                for other,other_offset,_ in occupied:
+                    required=clearance+other_offset
+                    if candidate.distance(other)<required-1e-7 or candidate.intersection(other).area>1e-8:
+                        valid=False;break
+                if valid:best=(score,angle,candidate,w,h,x,y,vertices,clearance)
+        if best is None:
+            failed.add(part.object_id);continue
+        _,angle,shape,w,h,x,y,vertices,clearance=best
+        placed.append(NestPlacement(part.object_id,instance,angle,x,y,w,h))
+        occupied.append((shape,clearance,[(vx+x,vy+y) for vx,vy in vertices]))
+        counts[part.object_id]=counts.get(part.object_id,0)+1
+        if progress:progress((index+1)/max(1,len(items))*100,f"윤곽 배치 {index+1}/{len(items)}")
+    return placed,counts
 
 
 def best_mixed_nesting(parts:Sequence[PartObject],stock_w:float,stock_h:float,gap:float,edge:float,
@@ -2402,6 +2509,12 @@ def effective_tool_diameter(cfg:dict,accumulated_cut_m:float)->float:
 
 def resolved_z_config(cfg:dict) -> dict:
     result=dict(cfg)
+    if result.get("onion_split"):
+        percent=float(result.get("onion_split_percent",10.0))
+        if not math.isfinite(percent) or not 0<percent<100:
+            raise ValueError("분리 가공 바닥 잔여율은 0 초과 100% 미만이어야 합니다.")
+        result.update(onion_skin_enabled=True,wall_finish=True,finish_scope="전체",
+                      onion_skin=float(result["stock"])*percent/100.0,tab_count=0)
     if result.get("safe_z_auto",False):
         result["safe_z"]=float(result["stock"])*2.0
     return result
@@ -2413,6 +2526,32 @@ def rapid_approach_clearance(cfg:dict) -> float:
     if not math.isfinite(value) or not math.isfinite(safe) or not 0<value<=safe:
         raise ValueError("급속 접근 여유는 0보다 크고 안전 Z 이하여야 합니다.")
     return value
+
+
+def stage_contours(contours:Sequence[Contour],cfg:dict)->List[Contour]:
+    active=[c for c in contours if c.enabled]
+    if cfg.get("_machining_stage")!="finish":return active
+    stock=cfg["stock"];extra=cfg["extra"]
+    return [c for c in active if staged_finish_for(
+        c,min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra),stock,cfg)]
+
+
+def machining_jobs(contours:Sequence[Contour],cfg:dict)->List[Tuple[str,dict]]:
+    """Build independent programs sharing the full job origin and fresh tools."""
+    cfg=resolved_z_config(cfg)
+    if not cfg.get("onion_split"):return [("FULL",cfg)]
+    active=stage_contours(contours,cfg)
+    if not any(onion_skin_for(c,c.target_depth if c.target_depth is not None else cfg["stock"]+cfg["extra"],cfg["stock"],cfg) for c in active):
+        raise ValueError("분리 가공에는 어니언스킨을 남길 관통 외곽이 필요합니다.")
+    origin=work_origin_for_contours(active,cfg)
+    rough=dict(cfg,_machining_stage="rough",_xy_origin_override=origin,
+               _job_label="ROUGH",_job_note="Run ROUGH first. Keep the workpiece fixed and preserve XY zero.")
+    finish=dict(cfg,_machining_stage="finish",_xy_origin_override=origin,
+                _job_label="FINISH - NEW TOOL",_job_note="Replace with a new tool of the configured diameter; re-zero Z only. Preserve XY zero and workholding.")
+    for key in ("start_code","end_code"):
+        override=str(cfg.get("onion_"+key,"")).strip()
+        if override:finish[key]=override
+    return [("ROUGH",rough),("FINISH",finish)]
 
 
 def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
@@ -2454,6 +2593,12 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
         rough_target=rough_target_for(target,stock,cfg,use_onion)
         plunge_min=sum(rapid_approach_clearance(cfg)+rough_target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
         plunge_min+=(rapid_approach_clearance(cfg)+target)/max(cfg["plunge"],EPS)
+        if cfg.get("_machining_stage")=="rough":
+            cut_mm=rough_mm;cut_min=rough_mm/max(cfg["feed"],EPS)
+            plunge_min-=(rapid_approach_clearance(cfg)+target)/max(cfg["plunge"],EPS)
+        elif cfg.get("_machining_stage")=="finish":
+            cut_mm=finish_mm;cut_min=finish_mm/max(cfg["feed"]*cfg["finish_feed_pct"]/100.0,EPS)
+            plunge_min=(rapid_approach_clearance(cfg)+target)/max(cfg["plunge"],EPS)
     else:
         cut_mm=route_len*passes+lead_one*(passes+1)
         cut_min=cut_mm/max(cfg["feed"],EPS)
@@ -2545,14 +2690,14 @@ def filename_minutes(minutes:float)->int:
 
 def split_gcode_paths(filename:str,minutes:Optional[Sequence[float]]=None)->Tuple[str,str]:
     root,ext=os.path.splitext(filename);ext=ext or ".nc"
-    root=re.sub(r"_(?:PART1|PART2)$","",root,flags=re.IGNORECASE)
+    root=re.sub(r"_(?:PART1|PART2|ROUGH|FINISH)$","",root,flags=re.IGNORECASE)
     if minutes is not None and len(minutes)==2:
         # The save dialog starts with the whole-job time. Replace that suffix
         # so each split file advertises its own estimated cutting time.
         root=re.sub(r"_\d+min$","",root,flags=re.IGNORECASE)
-        return (f"{root}_{filename_minutes(minutes[0])}min_PART1{ext}",
-                f"{root}_{filename_minutes(minutes[1])}min_PART2{ext}")
-    return f"{root}_PART1{ext}",f"{root}_PART2{ext}"
+        return (f"{root}_{filename_minutes(minutes[0])}min_ROUGH{ext}",
+                f"{root}_{filename_minutes(minutes[1])}min_FINISH{ext}")
+    return f"{root}_ROUGH{ext}",f"{root}_FINISH{ext}"
 
 
 def filename_component(value:str,fallback:str="job")->str:
@@ -2888,6 +3033,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         if progress:progress(value,message)
     report(2,"G-code 설정 준비 중")
     cfg=resolved_z_config(cfg)
+    stage=cfg.get("_machining_stage")
+    contours=stage_contours(contours,cfg)
     tolerance=path_tolerance(cfg)
     validate_preflight(cfg)
     pocket_errors=pocket_job_issues(contours,cfg)
@@ -2905,6 +3052,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     origin_x,origin_y=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
     rapid_optimize=bool(cfg.get("rapid_optimize",True))
     ordered=ordered_contours(active,rapid_optimize,(origin_x,origin_y))
+    if stage=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
     macros = {"{RPM}": str(int(cfg["rpm"])), "{SAFE_Z}": fmt(safe_machine_z),
               "{FEED}": fmt(cfg["feed"]), "{PLUNGE}": fmt(cfg["plunge"])}
     def expand(code: str) -> List[str]:
@@ -2998,6 +3146,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
 
     def resolved_tab_source(c:Contour)->List[float]:
         """Return stored/automatic tabs unless the user explicitly chose zero."""
+        if cfg.get("onion_split"):return []
         if not c.tabs_enabled or c.tabs_cleared:return []
         return list(c.tabs) if c.tabs else auto_tabs(c,cfg["tab_count"],cfg["tab_flat"],cfg["tab_ramp"])
 
@@ -3070,8 +3219,10 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             rough_tabs=[]
             if c.role=="outer" and tabs and not use_onion:
                 rough_tabs=[nearest_path_distance(rough,point_at(c.points,s,True)[0],True)[1] for s in source_tabs]
-            emit_phase(c,rough,rough_depths,rough_tabs,cfg["feed"],
-                       f"rough - axial remain {fmt(max(0.0,target-rough_target))} mm, radial remain {fmt(actual_allowance)} mm")
+            if stage!="finish":
+                emit_phase(c,rough,rough_depths,rough_tabs,cfg["feed"],
+                           f"rough - axial remain {fmt(max(0.0,target-rough_target))} mm, radial remain {fmt(actual_allowance)} mm")
+            if stage=="rough":continue
             finish_task=(ci,c,pts,target,tabs,order_note,object_note,removed_count,actual_allowance,wall_finish,use_onion)
             # Completing each internal wall now preserves the safe holes-first
             # order.  Only outer finishing/onion cleanup is deferred.
@@ -3081,7 +3232,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             depths=[machine_z(target*i/passes) for i in range(1,passes+1)]
             emit_phase(c,pts,depths,tabs,cfg["feed"],"standard cut")
     if finish_tasks:
-        out.append("(Stage 2: outer wall finishing and/or onion-skin cleanup; microtabs retained)")
+        out.append("(Stage 2: outer wall finishing and/or onion-skin cleanup; "+
+                   ("no microtabs)" if cfg.get("onion_split") else "microtabs retained)"))
         for finish_index,task in enumerate(finish_tasks,1):
             emit_finish_task(task,82+15*finish_index/max(len(finish_tasks),1),
                              f"외곽 정삭 생성 {finish_index}/{len(finish_tasks)}")
@@ -3094,11 +3246,14 @@ def machining_report(contours: List[Contour], cfg: dict,
                      progress:Optional[Callable[[float,str],None]]=None
                      ) -> Tuple[float, float]:
     """Return the current job's cutting distance and estimated cutting time."""
+    cfg=resolved_z_config(cfg)
+    contours=stage_contours(contours,cfg)
     cut_mm=0.0;cut_min=0.0;plunge_min=0.0;stock=cfg["stock"]
     active=[x for x in contours if x.enabled]
     override=cfg.get("_xy_origin_override")
     origin=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
     ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin)
+    if cfg.get("_machining_stage")=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
     distance_m=0.0
     for report_index,c in enumerate(ordered,1):
         if progress:progress(report_index/max(len(active),1)*100.0,
@@ -4396,7 +4551,6 @@ class App(tk.Tk):
         self.filename = ""
         self.gcode = ""
         self.gcode_parts:List[Tuple[str,str]] = [];self.gcode_part_minutes:List[float]=[]
-        self.gcode_split_mode = False
         self.gcode_job_minutes = 0.0
         self.gcode_signature = None
         self.undo_stack: List[Tuple[str, dict]] = []
@@ -4630,6 +4784,11 @@ class App(tk.Tk):
         ttk.Checkbutton(controls,text="황삭 측면여유 → 벽면 정삭",variable=self.vars["wall_finish"],command=self.redraw).grid(row=r,columnspan=2,sticky="w",pady=(4,1));r+=1
         self.var("onion_skin_enabled",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="외곽 관통부 어니언스킨",variable=self.vars["onion_skin_enabled"],command=self.redraw).grid(row=r,columnspan=2,sticky="w");r+=1
+        self.var("onion_split",False,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="어니언스킨 황삭/정삭 파일 분리",variable=self.vars["onion_split"],command=self.sync_onion_split).grid(row=r,columnspan=2,sticky="w");r+=1
+        ttk.Label(controls,text="분리 시 바닥 잔여 (%)").grid(row=r,column=0,sticky="w")
+        ttk.Entry(controls,width=12,textvariable=self.var("onion_split_percent",10.0)).grid(row=r,column=1,padx=5);r+=1
+        ttk.Label(controls,text="분리: 전체 측면 정삭 · 마이크로탭 없음").grid(row=r,columnspan=2,sticky="w");r+=1
         ttk.Label(controls,text="정삭 적용 범위").grid(row=r,column=0,sticky="w",pady=2)
         self.var("finish_scope","전체",tk.StringVar)
         ttk.Combobox(controls,width=11,state="readonly",textvariable=self.vars["finish_scope"],
@@ -4654,6 +4813,9 @@ class App(tk.Tk):
             ttk.Label(controls,text=label).grid(row=r,column=0,sticky="w",pady=2)
             ttk.Entry(controls,width=12,textvariable=self.var(key,val,cls)).grid(row=r,column=1,padx=5);r+=1
         self.var("array_rotate",True,tk.BooleanVar)
+        self.var("array_dense",False,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="촘촘한 배열 (실제 윤곽 / 180° 엇갈림)",variable=self.vars["array_dense"]).grid(row=r,columnspan=2,sticky="w");r+=1
+        ttk.Label(controls,text="촘촘한 모드: 파츠별 외곽 여유 합산 · 빈칸은 공통 간격의 절반").grid(row=r,columnspan=2,sticky="w");r+=1
         ttk.Checkbutton(controls,text="90° 회전 배치 허용",variable=self.vars["array_rotate"]).grid(row=r,columnspan=2,sticky="w");r+=1
         self.var("array_auto_rotate",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="자동 회전 최적화 (5° 단위)",variable=self.vars["array_auto_rotate"]).grid(row=r,columnspan=2,sticky="w");r+=1
@@ -4709,8 +4871,8 @@ class App(tk.Tk):
         right_pan = ttk.Panedwindow(right, orient="vertical"); right_pan.pack(fill="both", expand=True)
         object_frame=ttk.LabelFrame(right_pan,text="파일별 객체 / 배치 수량",padding=4)
         right_pan.add(object_frame,weight=1)
-        self.object_tree=ttk.Treeview(object_frame,columns=("name","qty","contours"),show="headings",height=5,selectmode="browse")
-        for col,title,width in (("name","객체",150),("qty","수량",45),("contours","윤곽",45)):
+        self.object_tree=ttk.Treeview(object_frame,columns=("name","qty","contours","offset"),show="headings",height=5,selectmode="browse")
+        for col,title,width in (("name","객체",150),("qty","수량",45),("contours","윤곽",45),("offset","외곽 여유 mm",95)):
             self.object_tree.heading(col,text=title);self.object_tree.column(col,width=width,anchor="w" if col=="name" else "center",stretch=col=="name")
         object_scroll=ttk.Scrollbar(object_frame,orient="vertical",command=self.object_tree.yview)
         self.object_tree.configure(yscrollcommand=object_scroll.set);object_scroll.pack(side="right",fill="y")
@@ -4721,13 +4883,17 @@ class App(tk.Tk):
         ttk.Spinbox(object_bar,from_=0,to=1000,width=6,textvariable=self.object_qty).pack(side="left",padx=3)
         ttk.Button(object_bar,text="적용",command=self.apply_object_quantity).pack(side="left")
         ttk.Button(object_bar,text="객체 삭제",command=self.remove_selected_object).pack(side="right")
+        offset_bar=ttk.Frame(object_frame);offset_bar.pack(fill="x",pady=3)
+        ttk.Label(offset_bar,text="선택 파츠 외곽 여유 (mm)").pack(side="left")
+        self.object_offset=tk.StringVar(value="")
+        ttk.Entry(offset_bar,width=8,textvariable=self.object_offset).pack(side="left",padx=3)
+        ttk.Button(offset_bar,text="여유 적용",command=self.apply_object_offset).pack(side="left")
+        ttk.Label(offset_bar,text="빈칸=공통 간격의 절반 · 촘촘한 배열 전용").pack(side="left",padx=5)
         order_frame = ttk.LabelFrame(right_pan, text="가공 순서 / 윤곽 목록", padding=4)
         right_pan.add(order_frame, weight=1)
         order_buttons=ttk.Frame(order_frame); order_buttons.pack(fill="x")
         ttk.Button(order_buttons,text="선택 윤곽만 보기",command=self.show_tree_selection).pack(side="left",fill="x",expand=True)
         ttk.Button(order_buttons,text="전체 보기",command=self.show_all_contours).pack(side="left",fill="x",expand=True,padx=(4,0))
-        ttk.Button(order_frame,text="선택→PART1 / 나머지→PART2 G-code 생성",
-                   command=lambda:self.make_gcode(split_selected=True),style="Accent.TButton").pack(fill="x",pady=(4,0))
         ttk.Label(order_frame,text="‘윤곽’ / ‘가공 여부’ 셀 클릭: 판정 또는 적용/제외 선택",foreground="#91a0b8").pack(anchor="w",pady=(4,3))
         self.tree_role_var=tk.StringVar(value="자동")
         columns=("seq","manual","type","enabled","layer","depth","safety")
@@ -4750,6 +4916,15 @@ class App(tk.Tk):
         sx = ttk.Scrollbar(preview_tab, orient="horizontal", command=self.text.xview)
         self.text.configure(yscrollcommand=sy.set, xscrollcommand=sx.set)
         sy.pack(side="right", fill="y"); sx.pack(side="bottom", fill="x"); self.text.pack(fill="both", expand=True)
+        onion_post=ttk.Frame(notebook)
+        notebook.add(onion_post,text="어니언스킨 START / END")
+        ttk.Label(onion_post,text="정삭 파일 전용: 비워두면 기존 START/END 사용").pack(anchor="w",padx=6,pady=6)
+        for label,attr in (("START G-code","onion_start_text"),("END G-code","onion_end_text")):
+            ttk.Label(onion_post,text=label).pack(anchor="w",padx=6)
+            widget=tk.Text(onion_post,height=7,font=("Consolas",9))
+            widget.pack(fill="both",expand=True,padx=6,pady=4)
+            setattr(self,attr,widget)
+        self.sync_onion_split()
         ttk.Label(post_tab, text="START G-code (비워두면 안전 기본값 사용)").pack(anchor="w", padx=6, pady=(6,0))
         self.start_text = tk.Text(post_tab, height=11, font=("Consolas", 9))
         self.start_text.configure(bg="#08101f",fg="#dce7f5",insertbackground="#dce7f5",selectbackground="#154c52",
@@ -4785,8 +4960,8 @@ class App(tk.Tk):
             "여러 파일 추가: 각 파일이 별도 객체가 됩니다.\n"
             "오른쪽 객체 목록에서 파일별 수량을 지정한 뒤 자동 어레이하세요.\n"
             "수동 어레이: 수량 지정 → 수동 어레이 시작 → 객체 드래그 이동, R키 90° 회전.\n"
-            "2분할 가공: 미리보기에서 PART1 윤곽을 창 선택한 뒤 2분할 생성 버튼을 누릅니다.\n"
-            "저장하면 *_PART1.nc와 *_PART2.nc가 함께 생성되며, PART2 전에 엔드밀 교체 후 Z만 다시 설정합니다.\n"
+            "어니언스킨 파일 분리: ROUGH 황삭 후 새 공구로 FINISH 정삭을 실행합니다.\n"
+            "분리 시 바닥 잔여율 기본 10%, 전체 측면 정삭이며 마이크로탭은 사용하지 않습니다. XY 원점과 고정을 유지하세요.\n"
             "공구·어레이·탭·원점·START/END 설정은 종료 시 자동 저장됩니다.\n"
             "\nSTEP 작업 순서:\n"
             "  1) STEP 열기 → 가공면 선택 → 선택면을 +Z/Z0 정렬\n"
@@ -4815,8 +4990,8 @@ class App(tk.Tk):
                 "Onion-skin finishing leaves bottom/wall allowance during roughing, then removes it\n"
                 "with a nominal full-depth finish pass while preserving microtabs.\n\n"
                 "Add Files creates one object per file. Set quantities in the object list, then array.\n"
-                "For split machining, window-select PART1 contours and use the split button.\n"
-                "Saving creates *_PART1.nc and *_PART2.nc. Before PART2, replace the tool and re-zero Z only.\n"
+                "Enable onion-skin split to save ROUGH and FINISH files. Default remaining floor is 10%.\n"
+                "Before FINISH, replace the tool and re-zero Z only. Preserve XY and workholding; no microtabs in split mode.\n"
                 "Tool, array, tab, origin and START/END settings are saved automatically.\n\n"
                 "STEP workflow:\n"
                 "  1) Open STEP, select machining faces and align the selected faces to +Z/Z0.\n"
@@ -4850,6 +5025,14 @@ class App(tk.Tk):
             messagebox.showerror("설정 오류",str(exc));return
         messagebox.showinfo("언어 설정","재시작 후 적용됩니다.")
 
+    def sync_onion_split(self):
+        enabled=bool(self.vars["onion_split"].get())
+        if enabled:
+            self.vars["onion_skin_enabled"].set(True)
+            self.vars["wall_finish"].set(True)
+        for attr in ("onion_start_text","onion_end_text"):
+            if hasattr(self,attr):getattr(self,attr).configure(state="normal" if enabled else "disabled")
+
     def sync_safe_z(self,*_):
         if "safe_z_auto" not in self.vars:return
         try:
@@ -4863,6 +5046,8 @@ class App(tk.Tk):
         cfg = resolved_z_config({k: v.get() for k, v in self.vars.items()})
         cfg["start_code"] = self.start_text.get("1.0", "end").strip()
         cfg["end_code"] = self.end_text.get("1.0", "end").strip()
+        cfg["onion_start_code"]=self.onion_start_text.get("1.0","end").strip()
+        cfg["onion_end_code"]=self.onion_end_text.get("1.0","end").strip()
         if (cfg["tool_d"] <= 0 or cfg["stock"] <= 0 or cfg["feed"] <= 0 or
                 cfg["plunge"] <= 0 or cfg["rpm"] <= 0 or cfg["safe_z"] <= 0):
             raise ValueError("공구, 판 두께, RPM, Feed, Plunge, 안전 Z는 0보다 커야 합니다.")
@@ -4902,7 +5087,7 @@ class App(tk.Tk):
                         "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim",
                         "machine_home_enabled","machine_park_x","machine_park_y","machine_park_z",
-                        "start_code","end_code")
+                        "start_code","end_code","onion_split","onion_split_percent","onion_start_code","onion_end_code")
         contour_key=tuple((tuple((round(x,7),round(y,7)) for x,y in c.points),c.closed,c.role,
                            tuple(round(s,7) for s in c.tabs),c.layer,c.target_depth,c.tabs_enabled,
                            c.tabs_cleared,c.enabled,c.safety_excluded,round(c.start_s,7),c.cut_order,c.operation,repr(c.pocket_holes),repr(c.pocket_stock))
@@ -4965,6 +5150,11 @@ class App(tk.Tk):
                 end_code=str(data["end_code"]).strip()
                 if end_code==LEGACY_DEFAULT_END_CODE:end_code=DEFAULT_END_CODE
                 self.end_text.delete("1.0","end");self.end_text.insert("1.0",end_code)
+            for key,attr in (("onion_start_code","onion_start_text"),("onion_end_code","onion_end_text")):
+                if hasattr(self,attr):
+                    widget=getattr(self,attr);widget.configure(state="normal")
+                    widget.delete("1.0","end");widget.insert("1.0",str(data.get(key,"")))
+            if hasattr(self,"sync_onion_split"):self.sync_onion_split()
             self.font_size_var.set(int(data.get("font_size",10)));self.apply_font_size(silent=True)
             # V1.03 and older stored settings under AppData.  On the first
             # V1.04 launch, copy those values beside the EXE when possible so
@@ -5006,6 +5196,8 @@ class App(tk.Tk):
               "font_size":int(self.font_size_var.get()),
               "start_code":self.start_text.get("1.0","end").strip(),
               "end_code":self.end_text.get("1.0","end").strip()}
+        for key,attr in (("onion_start_code","onion_start_text"),("onion_end_code","onion_end_text")):
+            if hasattr(self,attr):data[key]=getattr(self,attr).get("1.0","end").strip()
         portable=self.portable_settings_path()
         try:
             self.write_settings_file(portable,data)
@@ -5223,7 +5415,7 @@ class App(tk.Tk):
         self.object_tree.delete(*self.object_tree.get_children())
         for part in self.part_objects:
             iid=f"o{part.object_id}";tag=f"obj{part.object_id}"
-            self.object_tree.insert("","end",iid=iid,values=(part.name,part.quantity,len(part.contours)),tags=(tag,))
+            self.object_tree.insert("","end",iid=iid,values=(part.name,part.quantity,len(part.contours),"기본" if part.nest_offset is None else f"{part.nest_offset:g}"),tags=(tag,))
             self.object_tree.tag_configure(tag,foreground=OBJECT_TREE_COLORS[(part.object_id-1)%len(OBJECT_TREE_COLORS)])
         if selected_id and self.object_tree.exists(selected_id):self.object_tree.selection_set(selected_id)
 
@@ -5231,7 +5423,23 @@ class App(tk.Tk):
         items=self.object_tree.selection()
         if not items:return
         object_id=int(items[0][1:]);part=next((p for p in self.part_objects if p.object_id==object_id),None)
-        if part:self.object_qty.set(part.quantity)
+        if part:
+            self.object_qty.set(part.quantity)
+            self.object_offset.set("" if part.nest_offset is None else f"{part.nest_offset:g}")
+
+    def apply_object_offset(self):
+        items=self.object_tree.selection()
+        if not items:messagebox.showinfo("외곽 여유","객체 목록에서 파츠를 선택하세요.");return
+        try:
+            raw=self.object_offset.get().strip();value=float(raw) if raw else None
+            if value is not None and (not math.isfinite(value) or value<0):raise ValueError()
+        except (ValueError,tk.TclError):
+            messagebox.showerror("외곽 여유","0 이상의 숫자 또는 빈칸을 입력하세요.");return
+        part=next((p for p in self.part_objects if f"o{p.object_id}"==items[0]),None)
+        if part:
+            self.push_undo("파츠 외곽 여유")
+            part.nest_offset=value;self.refresh_object_tree()
+            self.status.set(f"{part.name}: 외곽 여유 적용. 자동 어레이를 다시 실행하면 배치에 반영됩니다.")
 
     def apply_object_quantity(self):
         items=self.object_tree.selection()
@@ -5357,7 +5565,33 @@ class App(tk.Tk):
             elif cfg["array_rotate"]:angles=(0,90)
             else:angles=(0,)
             parts=[p for p in self.part_objects if p.enabled]
-            if len(parts)==1:
+            if cfg.get("array_dense",False):
+                dense_parts=copy.deepcopy(parts);maximum=False
+                if len(dense_parts)==1:
+                    part=dense_parts[0]
+                    quantity=part.quantity if part.quantity_set else int(cfg["array_qty"])
+                    maximum=quantity==0 and not part.quantity_set
+                    part.quantity=1000 if maximum else quantity
+                requested={p.object_id:p.quantity for p in dense_parts}
+                if sum(requested.values())<=0:raise ValueError("배치 수량을 1개 이상 지정하세요.")
+                if sum(requested.values())>1000:raise ValueError("배치 수량은 합계 1000개 이하로 지정하세요.")
+                offsets=sorted(nesting_offset(p,cfg["array_gap"]) for p in dense_parts for _ in range(min(p.quantity,2)))
+                needed=cfg["tool_d"]+2*(cfg["finish_allowance"] if cfg.get("wall_finish") else 0.0)
+                if len(offsets)>1 and sum(offsets[:2])<needed-1e-7:
+                    if not messagebox.askokcancel("가공 간격 확인",f"외곽 여유 합계가 공구 지름과 황삭 여유를 고려한 {needed:g} mm보다 작은 조합이 있습니다.\n가공 경로 간섭을 확인해야 합니다. 이 간격으로 배치하시겠습니까?",parent=self):
+                        progress.close();return
+                dense_angles=tuple(dict.fromkeys(list(angles)+[a+180 for a in angles]))
+                cancelled=[False]
+                def cancel_dense():cancelled[0]=True
+                ttk.Button(progress,text="배치 취소",command=cancel_dense).pack(pady=(0,10))
+                progress.protocol("WM_DELETE_WINDOW",cancel_dense)
+                def dense_progress(value,message):
+                    progress.set_progress(10+value*.55,message)
+                    if cancelled[0]:raise ValueError("촘촘한 배열을 취소했습니다. 기존 배치는 유지됩니다.")
+                placements,placed_counts=best_contour_nesting(dense_parts,cfg["sheet_w"],cfg["sheet_h"],
+                    cfg["array_gap"],cfg["array_edge"],dense_angles,dense_progress)
+                if maximum:requested=dict(placed_counts)
+            elif len(parts)==1:
                 part=parts[0];quantity=part.quantity if part.quantity_set else int(cfg["array_qty"])
                 if part.quantity_set and quantity<=0:raise ValueError("선택 객체의 배치 수량이 0입니다.")
                 progress.set_progress(10,"회전별 크기 계산 중")
@@ -5396,7 +5630,8 @@ class App(tk.Tk):
             if len(placements)>1000:raise ValueError(f"예상 수량이 {len(placements)}개입니다. 수량을 1000 이하로 지정하세요.")
             part_by_id={p.object_id:p for p in parts}
             progress.set_progress(70,"회전된 가공물 준비 중")
-            templates={(p.object_id,p.angle):oriented_contour_group(part_by_id[p.object_id].contours,p.angle)[0] for p in placements}
+            templates={(oid,angle):oriented_contour_group(part_by_id[oid].contours,angle)[0]
+                       for oid,angle in dict.fromkeys((p.object_id,p.angle) for p in placements)}
         except Exception as exc:
             progress.close();messagebox.showerror("자동 어레이",str(exc));return
         self.push_undo("자동 어레이")
@@ -5427,7 +5662,8 @@ class App(tk.Tk):
         angle_text=", ".join(f"{a:g}°" for a in used_angles)
         mode="자동 회전" if cfg["array_auto_rotate"] else ("0°/90°" if cfg["array_rotate"] else "회전 없음")
         count_text=", ".join(f"{part_by_id[oid].name} {placed_counts.get(oid,0)}/{qty}" for oid,qty in requested.items())
-        self.status.set(f"자동 어레이 완료 | {len(placements)}개 | {count_text} | {mode} {angle_text} | 간격 {cfg['array_gap']:g} mm")
+        spacing="촘촘한 윤곽 / 파츠별 외곽 여유" if cfg.get("array_dense") else f"빠른 박스 / 간격 {cfg['array_gap']:g} mm"
+        self.status.set(f"자동 어레이 완료 | {len(placements)}개 | {count_text} | {angle_text} | {spacing}")
         progress.set_progress(100,"자동 어레이 완료");progress.close()
         missing=[f"{part_by_id[oid].name}: {placed_counts.get(oid,0)}/{qty}개" for oid,qty in requested.items() if placed_counts.get(oid,0)<qty]
         if missing:messagebox.showwarning("판재 공간 부족","다음 객체는 요청 수량을 모두 배치하지 못했습니다.\n\n"+"\n".join(missing))
@@ -6287,6 +6523,7 @@ class App(tk.Tk):
                     preview_cfg={"wall_finish":bool(self.vars["wall_finish"].get()),
                                  "finish_scope":self.vars["finish_scope"].get(),
                                  "finish_allowance":float(self.vars["finish_allowance"].get())}
+                    if self.vars["onion_split"].get():preview_cfg.update(wall_finish=True,finish_scope="전체")
                     show_rough=wall_finish_for(c,target,stock_value,preview_cfg)
                 except (tk.TclError,ValueError,KeyError):show_rough=False
                 if show_rough:
@@ -6426,7 +6663,7 @@ class App(tk.Tk):
         elif not (self.start_mode or self.join_mode or self.manual_mode):
             self.set_contour_selection([]);self.redraw(refresh_tree=False)
 
-    def make_gcode(self,split_selected=False):
+    def make_gcode(self):
         if not self.contours: messagebox.showinfo("안내", "먼저 DXF를 열어 주세요."); return
         progress:Optional[ProgressDialog]=None
         try:
@@ -6438,18 +6675,7 @@ class App(tk.Tk):
             if not active:
                 messagebox.showerror("가공 점검", "가공에 포함된 윤곽이 없습니다.")
                 return
-            part1:List[Contour]=[];part2:List[Contour]=[]
-            if split_selected:
-                selected_ids={id(c) for c in self.selected_contours}
-                part1=[c for c in active if id(c) in selected_ids]
-                part2=[c for c in active if id(c) not in selected_ids]
-                if not part1:
-                    messagebox.showinfo("2분할 G-code", "PART1으로 가공할 윤곽을 미리보기나 윤곽 목록에서 먼저 선택하세요.")
-                    return
-                if not part2:
-                    messagebox.showinfo("2분할 G-code", "가공 윤곽이 모두 선택되어 PART2가 비어 있습니다.\nPART1에 넣을 윤곽만 선택하세요.")
-                    return
-            part1_m=part1_min=part2_m=part2_min=job_m=job_min=0.0
+            jobs=machining_jobs(active,cfg)
             open_count = sum(not c.closed for c in active)
             warnings=[]
             if open_count:
@@ -6468,12 +6694,8 @@ class App(tk.Tk):
                 manual_orders.setdefault(contour_group_key(c),[]).append(c.cut_order)
             if any(len(values)!=len(set(values)) for values in manual_orders.values()):
                 warnings.append("한 객체 안에서 같은 수동 가공 순번이 중복되었습니다. 같은 번호 안에서는 자동 안전 순서를 사용합니다.")
-            if split_selected:
-                conflicts=split_outer_inner_conflicts(part1,part2)
-                if conflicts:
-                    warnings.append(
-                        f"2분할 순서 주의: PART1 외곽 안쪽의 내부 윤곽 {conflicts}개가 PART2에 있습니다. "
-                        "PART1에서 외곽을 먼저 자르면 소재가 분리될 수 있습니다.")
+            if cfg.get("onion_split"):
+                warnings.append("정삭은 새 공구로 실행합니다. XY 원점을 유지하고 Z를 다시 설정하세요. 마이크로탭 없이 관통하므로 부품 고정을 확인하세요.")
             too_small=[]; center_leads=0; fatal=pocket_job_issues(active,cfg); geometry_warnings=[]
             collision_map=tool_sweep_collisions(
                 active,cfg["tool_d"],cfg.get("auto_trim",False),
@@ -6503,15 +6725,8 @@ class App(tk.Tk):
                                      ("\n..." if len(fatal)>12 else "")+"\n\n공구 지름, 내부/외부 판정 또는 형상을 수정하세요.")
                 return
             progress.set_progress(46,"예상 절삭거리 확인 중")
-            if split_selected:
-                common_origin=work_origin_for_contours(active,cfg)
-                split_report_cfg=dict(cfg);split_report_cfg["_xy_origin_override"]=common_origin
-                part1_m,part1_min=machining_report(part1,split_report_cfg)
-                part2_m,part2_min=machining_report(part2,split_report_cfg)
-                distance_jobs=(("PART1",part1_m),("PART2",part2_m))
-            else:
-                job_m,job_min=machining_report(active,cfg)
-                distance_jobs=(("전체 작업",job_m),)
+            reports=[machining_report(active,job_cfg) for _,job_cfg in jobs]
+            distance_jobs=[(label,report[0]) for (label,_),report in zip(jobs,reports)]
             distance_blocks,distance_warnings=machining_distance_guard(distance_jobs)
             if distance_blocks:
                 progress.close();progress=None
@@ -6528,41 +6743,24 @@ class App(tk.Tk):
                     return
                 progress=ProgressDialog(self,"G-code 생성")
             progress.set_progress(48,"G-code 공구경로 생성 중")
-            if split_selected:
-                cfg1=dict(cfg);cfg1.update({
-                    "_xy_origin_override":common_origin,
-                    "_job_label":"PART1 OF 2 - SELECTED CONTOURS",
-                    "_job_note":"Run PART1 first. Keep the same XY work zero for PART2."})
-                cfg2=dict(cfg);cfg2.update({
-                    "_xy_origin_override":common_origin,
-                    "_job_label":"PART2 OF 2 - REMAINING CONTOURS",
-                    "_job_note":"Before PART2: replace the end mill and re-zero Z only; do not change XY work zero."})
-                code1=generate_gcode(
-                    part1,cfg1,
-                    lambda value,message:progress.set_progress(48+value*.25,f"PART1 · {message}") if progress else None)
-                code2=generate_gcode(
-                    part2,cfg2,
-                    lambda value,message:progress.set_progress(73+value*.25,f"PART2 · {message}") if progress else None)
-                self.gcode_parts=[("PART1",code1),("PART2",code2)]
-                self.gcode_part_minutes=[part1_min,part2_min]
-                self.gcode=("(===== PART1: SELECTED CONTOURS =====)\n"+code1+
-                            "\n\n(===== PART2: REMAINING CONTOURS =====)\n"+code2)
-            else:
-                code=generate_gcode(
-                    self.contours,cfg,
-                    lambda value,message:progress.set_progress(48+value*.50,message) if progress else None)
-                self.gcode_parts=[("FULL",code)];self.gcode_part_minutes=[];self.gcode=code
-            self.gcode_split_mode=bool(split_selected)
+            generated=[]
+            for index,(label,job_cfg) in enumerate(jobs):
+                code=generate_gcode(active,job_cfg,
+                    lambda value,message:progress.set_progress(48+(index+value/100)*50/len(jobs),f"{label} · {message}") if progress else None)
+                generated.append((label,code))
+            self.gcode_parts=generated
+            self.gcode_part_minutes=[report[1] for report in reports] if len(jobs)==2 else []
+            self.gcode="\n\n".join(code for _,code in generated)
             self.gcode_signature=requested_signature
             self.text.delete("1.0","end"); self.text.insert("1.0",self.gcode)
-            metres,minutes=(part1_m+part2_m,part1_min+part2_min) if split_selected else (job_m,job_min)
+            metres,minutes=sum(x[0] for x in reports),sum(x[1] for x in reports)
             self.gcode_job_minutes=minutes
             simulation_moves=[]
             for _,code in self.gcode_parts:simulation_moves.extend(parse_gcode_moves(code))
             rapid_mm=sum(math.hypot(m.end[0]-m.start[0],m.end[1]-m.start[1]) for m in simulation_moves if m.rapid)
             rapid_seconds=sum(m.seconds for m in simulation_moves if m.rapid)
             lead_note=f" | 리드인 중심 자동 {center_leads}개" if center_leads else ""
-            split_note=(f" | PART1 {len(part1)}개 / PART2 {len(part2)}개" if split_selected else "")
+            split_note=" | ROUGH / FINISH" if len(jobs)==2 else ""
             self.status.set(f"이번 {metres:.3f}m / {minutes:.1f}분{split_note} | 급속 XY {rapid_mm/1000:.3f}m / {rapid_seconds:.1f}초{lead_note}")
             progress.set_progress(100,"G-code 생성 완료")
         except Exception as exc:
@@ -6608,7 +6806,7 @@ class App(tk.Tk):
     def save_gcode(self):
         try:cfg=self.config();current_signature=self.job_signature(cfg)
         except Exception as exc:messagebox.showerror("설정 오류",str(exc));return
-        if not self.gcode or self.gcode_signature!=current_signature:self.make_gcode(split_selected=self.gcode_split_mode)
+        if not self.gcode or self.gcode_signature!=current_signature:self.make_gcode()
         if not self.gcode: return
         base=default_gcode_filename(self.part_objects,self.filename,self.contours,
                                     cfg["tool_d"],cfg["stock"],self.gcode_job_minutes)
@@ -6623,8 +6821,8 @@ class App(tk.Tk):
                     saved.append(part_fn)
                 self.status.set(f"2분할 저장 완료: {saved[0]} / {saved[1]}")
                 messagebox.showinfo("2분할 G-code 저장",
-                                    f"PART1과 PART2를 따로 저장했습니다.\n\n{saved[0]}\n{saved[1]}\n\n"
-                                    "PART1 완료 후 엔드밀을 교체하고 Z 원점만 다시 잡은 뒤 PART2를 실행하세요.\nXY 원점은 바꾸지 마세요.")
+                                    f"황삭과 정삭 파일을 따로 저장했습니다.\n\n{saved[0]}\n{saved[1]}\n\n"
+                                    "ROUGH 완료 후 새 엔드밀로 교체하고 Z 원점만 다시 잡은 뒤 FINISH를 실행하세요.\nXY 원점과 소재 고정을 유지하세요.")
             else:
                 code=self.gcode_parts[0][1] if self.gcode_parts else self.gcode
                 with open(fn,"w",encoding="ascii",errors="replace",newline="\n") as f:f.write(code)
@@ -6635,7 +6833,7 @@ class App(tk.Tk):
         try:cfg=self.config();current_signature=self.job_signature(cfg)
         except Exception as exc:messagebox.showerror("설정 오류",str(exc));return
         if not self.gcode or self.gcode_signature!=current_signature:
-            self.make_gcode(split_selected=self.gcode_split_mode)
+            self.make_gcode()
             if not self.gcode or self.gcode_signature!=current_signature:return
         else:self.status.set("검사 완료된 G-code 재사용 · 시뮬레이션 바로 열기")
         moves=[]
