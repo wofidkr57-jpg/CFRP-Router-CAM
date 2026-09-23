@@ -1,4 +1,4 @@
-## 다음 업데이트: 작업 파일·외곽 삽입선·거리 경고 확인
+## V1.30: 작업 파일·외곽 삽입선·거리 경고 확인
 
 상단 두 번째 줄의 `작업 저장`/`작업 열기`로 `.cfrpcam` 파일을 저장하고 이어서 편집할 수 있습니다. Ctrl+S 저장, Ctrl+O 열기와 다른 이름 저장을 지원합니다. 형상 자체, 배열과 원본 파츠, 판재/공구/가공 설정, 탭·시작점·외곽 순번, 일반/어니언스킨 START·END를 포함하므로 원본 DXF/STEP 없이 열 수 있습니다. STEP의 원래 3D 모델 편집 상태와 기존 NC, 되돌리기 이력은 포함하지 않으며 NC는 다시 생성합니다. 작업 열기/종료 시 변경된 작업의 저장 여부를 묻습니다. 이 파일은 개인정보나 도면을 포함할 수 있으므로 사용자가 지정한 로컬 위치에만 저장합니다.
 
@@ -156,7 +156,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.29**입니다.
+현재 최신 버전은 **V1.30**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -178,7 +178,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.29 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.29/CFRP_Router_CAM_V1.29_source.zip)
+- [V1.30 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.30/CFRP_Router_CAM_V1.30_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
