@@ -80,6 +80,9 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "내경 치수 보정 (mm)": "Internal size correction (mm)",
+    "외경 치수 보정 (mm)": "External size correction (mm)",
+    "치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 제외": "Size: + enlarge / - shrink; diameter/width; profiles only",
     "촘촘한 배열 (실제 윤곽 / 180° 엇갈림)": "Contour nesting (180 degree interlocking)",
     "촘촘한 모드: 파츠별 외곽 여유 합산 · 빈칸은 공통 간격의 절반": "Contour mode: add part offsets; blank = half the common gap",
     "외곽 여유 mm": "Offset mm",
@@ -997,10 +1000,21 @@ def trim_small_self_loops(pts: Sequence[Point], max_cuts: int = 20) -> Tuple[Lis
     return route,removed,cuts
 
 
+def dimension_correction(contour:Contour,cfg:Optional[dict]=None)->float:
+    if not cfg or not contour.closed or contour.operation=="pocket":return 0.0
+    value=float(cfg.get("inner_size_adjust" if contour.role=="inner" else "outer_size_adjust",0.0))
+    if not math.isfinite(value):raise ValueError("내경/외경 치수 보정은 유한한 숫자여야 합니다.")
+    return value
+
+
 def compensated_route(contour: Contour, tool_d: float, auto_trim: bool = False,
-                      source_points: Optional[Sequence[Point]] = None) -> Tuple[List[Point],List[List[Point]],List[Point]]:
+                      source_points: Optional[Sequence[Point]] = None,
+                      cfg:Optional[dict]=None) -> Tuple[List[Point],List[List[Point]],List[Point]]:
     pts=list(source_points) if source_points is not None else list(contour.points)
-    amount=tool_d/2 if contour.role=="outer" else -tool_d/2
+    adjustment=dimension_correction(contour,cfg)
+    equivalent=tool_d-adjustment if contour.role=="inner" else tool_d+adjustment
+    if equivalent<=EPS:raise ValueError("치수 보정이 공구 반경 보정을 뒤집습니다. 보정값을 줄이세요.")
+    amount=(tool_d/2 if contour.role=="outer" else -tool_d/2)+adjustment/2
     raw=offset_polygon(pts,amount)
     if auto_trim and self_intersection_count(raw):
         return trim_small_self_loops(raw)
@@ -1999,7 +2013,7 @@ def contour_toolpath_issues(contour: Contour, tool_d: float, auto_trim: bool = F
     expected="inner" if contour.depth%2 else "outer"
     if contour.forced_role in ("inner","outer") and contour.role!=expected:
         warnings.append(f"자동 판정 {expected} / 수동 지정 {contour.role} 충돌")
-    route,removed,cuts=compensated_route(contour,tool_d,auto_trim)
+    route,removed,cuts=compensated_route(contour,tool_d,auto_trim,cfg=pocket_cfg)
     if removed: warnings.append(f"꼬인 작은 루프 자동 절단 {len(removed)}곳")
     hits=self_intersection_count(route)
     if hits: errors.append(f"공구 보정경로 자기교차 {hits}곳 이상")
@@ -2009,7 +2023,7 @@ def contour_toolpath_issues(contour: Contour, tool_d: float, auto_trim: bool = F
     if contour.role=="inner":
         width=max(p[0] for p in contour.points)-min(p[0] for p in contour.points)
         height=max(p[1] for p in contour.points)-min(p[1] for p in contour.points)
-        if min(width,height)<=tool_d+EPS: errors.append("내부 형상 최소 크기가 공구 지름 이하")
+        if min(width,height)+dimension_correction(contour,pocket_cfg)<=tool_d+EPS: errors.append("치수 보정 후 내부 형상 최소 크기가 공구 지름 이하")
         samples=route+[((route[i][0]+route[(i+1)%len(route)][0])/2,
                         (route[i][1]+route[(i+1)%len(route)][1])/2) for i in range(len(route))]
         outside=sum(not point_in_poly(p,contour.points) for p in samples)
@@ -2141,13 +2155,13 @@ def _collision_worker(index:int)->Tuple[int,List[str]]:
 
 def tool_sweep_collisions(contours:Sequence[Contour],tool_d:float,auto_trim:bool=False,
                           progress:Optional[Callable[[float,str],None]]=None,
-                          use_parallel:bool=True)->Dict[int,List[str]]:
+                          use_parallel:bool=True,cfg:Optional[dict]=None)->Dict[int,List[str]]:
     """Find where the cutter-radius sweep of one path touches another model line."""
     active=[c for c in contours if c.enabled and c.operation!="pocket" and not c.safety_excluded and len(c.points)>=2]
     radius=max(0.0,tool_d/2.0)
     prepared=[]
     for c in active:
-        route=compensated_route(c,tool_d,auto_trim)[0] if c.closed else list(c.points)
+        route=compensated_route(c,tool_d,auto_trim,cfg=cfg)[0] if c.closed else list(c.points)
         rsegs=_path_segments(route,c.closed);gsegs=_path_segments(c.points,c.closed)
         rb=(min(p[0] for p in route)-radius,min(p[1] for p in route)-radius,
             max(p[0] for p in route)+radius,max(p[1] for p in route)+radius)
@@ -2576,7 +2590,7 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
     passes=1 if cfg["full_depth"] else max(1,cfg["passes"])
     target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
     if c.closed and len(c.points)>=3:
-        route,_,_=compensated_route(c,tool_d,cfg.get("auto_trim",False));route_len=path_length(route,True)
+        route,_,_=compensated_route(c,tool_d,cfg.get("auto_trim",False),cfg=cfg);route_len=path_length(route,True)
         plan=lead_plan(c,route,cfg["lead"])
         lead_one=(math.pi*.5*dist(plan.entry,plan.center)) if plan.center is not None else dist(plan.entry,route[0])
     else:
@@ -2625,7 +2639,7 @@ def _gcode_route_worker(task)->Tuple[int,float,List[Point],int,float]:
     if c.closed:
         want_ccw=(c.role=="inner") if cfg["climb"] else (c.role!="inner")
         pts=reverse_if_needed(pts,want_ccw)
-        pts,removed_loops,_=compensated_route(c,tool_d,cfg.get("auto_trim",False),pts)
+        pts,removed_loops,_=compensated_route(c,tool_d,cfg.get("auto_trim",False),pts,cfg=cfg)
         removed_count=len(removed_loops)
     return ci,target,pts,removed_count,tool_d
 
@@ -2949,6 +2963,9 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(XY_ORIGIN_MODE: {nc_ascii_text(cfg.get('xy_origin','DXF origin')).upper()})",
         f"(XY_ORIGIN_SOURCE_X_MM: {fmt(float(origin[0]))})",
         f"(XY_ORIGIN_SOURCE_Y_MM: {fmt(float(origin[1]))})",
+        f"(INNER_SIZE_ADJUST_MM: {fmt(float(cfg.get('inner_size_adjust',0)))})",
+        f"(OUTER_SIZE_ADJUST_MM: {fmt(float(cfg.get('outer_size_adjust',0)))})",
+        "(SIZE_ADJUST: DIAMETER/WIDTH; POSITIVE ENLARGES; PROFILES ONLY)",
         f"(PATH_TOLERANCE_MM: {fmt(path_tolerance(cfg))})",
         f"(POCKET_STAY_DOWN: {nc_yes_no(cfg.get('pocket_stay_down',True))})",
         f"(SAFE_Z_AUTO_STOCK_X2: {nc_yes_no(cfg.get('safe_z_auto',False))})",
@@ -4696,7 +4713,9 @@ class App(tk.Tk):
         right = ttk.Frame(pan); pan.add(right, weight=2)
 
         rows = [
-            ("공구 지름 (mm)", "tool_d", 2.0), ("RPM", "rpm", 22000.0),
+            ("공구 지름 (mm)", "tool_d", 2.0),
+            ("내경 치수 보정 (mm)", "inner_size_adjust", .10),
+            ("외경 치수 보정 (mm)", "outer_size_adjust", -.14), ("RPM", "rpm", 22000.0),
             ("Feed XY (mm/min)", "feed", 800.0), ("Plunge (mm/min)", "plunge", 200.0),
             ("판 두께 (mm)", "stock", 3.0), ("관통 여유 (mm)", "extra", 0.1),
             ("안전 Z (mm)", "safe_z", 6.0), ("Lead in/out (mm)", "lead", 1.0),
@@ -4711,6 +4730,7 @@ class App(tk.Tk):
             entry.grid(row=r, column=1, padx=5)
             if key=="safe_z":self.safe_z_entry=entry
         r = len(rows)
+        ttk.Label(controls,text="치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 제외").grid(row=r,columnspan=2,sticky="w");r+=1
         self.var("safe_z_auto",True,tk.BooleanVar)
         ttk.Checkbutton(controls,text="안전 Z 자동: 판 두께 × 2",variable=self.vars["safe_z_auto"]).grid(row=r,columnspan=2,sticky="w");r+=1
         self.vars["stock"].trace_add("write",self.sync_safe_z)
@@ -5054,6 +5074,10 @@ class App(tk.Tk):
         validate_preflight(cfg)
         rapid_approach_clearance(cfg)
         path_tolerance(cfg)
+        for key in ("inner_size_adjust","outer_size_adjust"):
+            value=float(cfg.get(key,0))
+            if not math.isfinite(value) or abs(value)>=min(cfg["tool_d"],cfg["tool_wear_min_d"] if cfg.get("tool_wear_enabled") else cfg["tool_d"]):
+                raise ValueError("치수 보정의 절댓값은 예상 최소 공구 지름보다 작아야 합니다.")
         if cfg["passes"] < 1:
             raise ValueError("패스 수는 1 이상이어야 합니다.")
         if (cfg["lead"] < 0 or cfg["tab_count"] < 0 or cfg["tab_flat"] < 0 or
@@ -5080,7 +5104,7 @@ class App(tk.Tk):
         return cfg
 
     def job_signature(self,cfg:dict):
-        machining_keys=("tool_d","tool_wear_enabled","tool_wear_loss_per_10m","tool_wear_min_d",
+        machining_keys=("inner_size_adjust","outer_size_adjust","tool_d","tool_wear_enabled","tool_wear_loss_per_10m","tool_wear_min_d",
                         "rpm","feed","plunge","stock","extra","safe_z","safe_z_auto","approach_z","lead","passes",
                         "path_tolerance","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
@@ -6446,22 +6470,28 @@ class App(tk.Tk):
         if not self.manual_array_mode and self.vars.get("show_toolpath") and self.vars["show_toolpath"].get():
             try:
                 preview_cfg={
+                    "inner_size_adjust":self.vars["inner_size_adjust"].get(),
+                    "outer_size_adjust":self.vars["outer_size_adjust"].get(),
                     "tool_d":self.vars["tool_d"].get(),
                     "tool_wear_enabled":self.vars["tool_wear_enabled"].get(),
                     "tool_wear_loss_per_10m":self.vars["tool_wear_loss_per_10m"].get(),
                     "tool_wear_min_d":self.vars["tool_wear_min_d"].get(),
                 }
                 preview_radius=effective_tool_diameter(preview_cfg,0.0)/2
-            except (tk.TclError, ValueError): preview_radius = 1.0
+                for key in ("inner_size_adjust","outer_size_adjust"):
+                    if not math.isfinite(preview_cfg[key]) or abs(preview_cfg[key])>=preview_radius*2:
+                        preview_cfg[key]=0.0
+            except (tk.TclError, ValueError): preview_radius = 1.0;preview_cfg={}
             auto_trim_value=bool(self.vars.get("auto_trim") and self.vars["auto_trim"].get())
             geometry_signature=hash(tuple((id(c),c.enabled,c.safety_excluded,c.closed,c.role,c.target_depth,
                 tuple((round(x,5),round(y,5)) for x,y in c.points)) for c in self.contours))
-            collision_key=(round(preview_radius*2,6),auto_trim_value,geometry_signature)
+            dimension_key=(preview_cfg.get("inner_size_adjust",0),preview_cfg.get("outer_size_adjust",0))
+            collision_key=(round(preview_radius*2,6),auto_trim_value,geometry_signature,dimension_key)
             if collision_key!=self.collision_cache_key:
                 # Interactive redraw must never spawn worker processes while a
                 # part is being dragged. Explicit safety/G-code checks use all cores.
                 self.collision_cache=tool_sweep_collisions(
-                    self.contours,preview_radius*2,auto_trim_value,use_parallel=False)
+                    self.contours,preview_radius*2,auto_trim_value,use_parallel=False,cfg=preview_cfg)
                 self.collision_cache_key=collision_key
             visible_ids={id(c) for c in visible}
             if len(self.preview_cache)>max(512,len(self.contours)*8):self.preview_cache.clear()
@@ -6498,14 +6528,14 @@ class App(tk.Tk):
                 anchor=c.points[0]
                 relative_points=tuple((round(x-anchor[0],7),round(y-anchor[1],7)) for x,y in c.points)
                 cache_key=(relative_points,c.closed,c.role,c.forced_role,c.depth,c.enabled,
-                           round(c.start_s,8),round(preview_radius,8),auto_trim)
+                           round(c.start_s,8),round(preview_radius,8),auto_trim,dimension_key)
                 cached=self.preview_cache.get(cache_key)
                 if cached is None:
-                    route,removed_loops,cut_points=compensated_route(c,preview_radius*2,auto_trim)
+                    route,removed_loops,cut_points=compensated_route(c,preview_radius*2,auto_trim,cfg=preview_cfg)
                     if c.start_s > EPS:
                         start_point=point_at(c.points,c.start_s,True)[0]
                         route=rotate_closed_path(route,nearest_path_distance(route,start_point,True)[1])
-                    errors,warnings=contour_toolpath_issues(c,preview_radius*2,auto_trim)
+                    errors,warnings=contour_toolpath_issues(c,preview_radius*2,auto_trim,pocket_cfg=preview_cfg)
                     rel_route=[(x-anchor[0],y-anchor[1]) for x,y in route]
                     rel_removed=[[(x-anchor[0],y-anchor[1]) for x,y in loop] for loop in removed_loops]
                     rel_cuts=[(x-anchor[0],y-anchor[1]) for x,y in cut_points]
@@ -6699,7 +6729,7 @@ class App(tk.Tk):
             too_small=[]; center_leads=0; fatal=pocket_job_issues(active,cfg); geometry_warnings=[]
             collision_map=tool_sweep_collisions(
                 active,cfg["tool_d"],cfg.get("auto_trim",False),
-                lambda value,message:progress.set_progress(5+value*.22,message) if progress else None)
+                lambda value,message:progress.set_progress(5+value*.22,message) if progress else None,cfg=cfg)
             for check_index,c in enumerate(active,1):
                 progress.set_progress(27+18*check_index/max(len(active),1),
                                       f"경로 안전검사 {check_index}/{len(active)}")
@@ -6713,7 +6743,7 @@ class App(tk.Tk):
                     height=max(p[1] for p in c.points)-min(p[1] for p in c.points)
                     if min(width,height) <= cfg["tool_d"] + EPS:
                         too_small.append(c.layer)
-                    route,_,_=compensated_route(c,cfg["tool_d"],cfg.get("auto_trim",False))
+                    route,_,_=compensated_route(c,cfg["tool_d"],cfg.get("auto_trim",False),cfg=cfg)
                     if lead_point(c,route,cfg["lead"])[1]=="center-fallback": center_leads+=1
             if too_small:
                 warnings.append(f"공구 지름보다 작거나 같은 내부 형상 {len(too_small)}개: 가공 불가 가능성")
@@ -6780,7 +6810,7 @@ class App(tk.Tk):
             progress=ProgressDialog(self,"경로 안전검사")
             collision_map=tool_sweep_collisions(
                 active,tool_d,auto_trim,
-                lambda value,message:progress.set_progress(value*.65,message) if progress else None)
+                lambda value,message:progress.set_progress(value*.65,message) if progress else None,cfg=cfg)
             errors=pocket_job_issues(active,cfg);warnings=[]
             for i,c in enumerate(active,1):
                 progress.set_progress(65+34*i/max(len(active),1),f"윤곽 안전검사 {i}/{len(active)}")
