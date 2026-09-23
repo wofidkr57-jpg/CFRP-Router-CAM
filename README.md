@@ -1,4 +1,4 @@
-## 다음 업데이트: 배치 키보드 편집
+## V1.25: 배치 키보드 편집
 
 화면에서 개체를 선택하고 방향키를 누르고 있으면 키 반복에 따라 계속 이동합니다. 기본 반복당 0.1mm, Shift를 함께 누르면 1mm입니다. 키를 놓으면 이동이 멈추며 Windows 키보드 반복 설정에 따라 시작 지연과 속도가 달라집니다. 다중 선택은 상대 위치를 유지합니다. 수동 배치 중 R은 90° 회전, F는 선택 개체 중심 기준 좌우 반전입니다. 내부 윤곽·탭·시작점·포켓도 함께 이동/반전하고 Ctrl+Z로 되돌릴 수 있습니다. 입력란 및 점 지정/드래그 중에는 방향키로 배치를 변경하지 않습니다. 이동·반전 후 판재 범위와 간격을 확인하세요.
 
@@ -122,7 +122,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.24**입니다.
+현재 최신 버전은 **V1.25**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -144,7 +144,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.24 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.24/CFRP_Router_CAM_V1.24_source.zip)
+- [V1.25 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.25/CFRP_Router_CAM_V1.25_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
