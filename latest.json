@@ -1,6 +1,6 @@
 {
-  "version": "1.27",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.27/CFRP_Router_CAM.exe",
-  "sha256": "ac4230226d2650b74b4b42be0a68be93e2dcdd62662aa909efcdae36a1a8ca26",
-  "message": "배치 스냅을 제거하고 Num Lock 상태의 방향키 무반응을 수정했습니다. 방향키 1mm, Shift+방향키 0.1mm 이동입니다. 공구 참고선은 유지됩니다."
+  "version": "1.28",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.28/CFRP_Router_CAM.exe",
+  "sha256": "43c0297395a0a93beb5f77129352e68d9e44c3a5b933a9fbcc2d010c310e7bca",
+  "message": "목록의 외곽 행을 위아래로 드래그하여 절단 순서를 지정할 수 있습니다. 내부 우선과 지정 순서를 유지하며 외곽 순서 자동 버튼으로 해제합니다."
 }
