@@ -1,6 +1,10 @@
+## V1.27: 배치 스냅 제거·방향키 수정
+
+배치 스냅을 제거하고 Num Lock이 켜졌을 때 방향키가 무시되던 문제를 수정했습니다. 기본 1mm, Shift 0.1mm로 이동합니다. 공구 참고선은 유지합니다.
+
 ## V1.26: 패널 폭·다중 선택·스냅·공구 참고선
 
-다음 업데이트에서 배치 스냅을 제거했습니다. 판재 테두리 근처에서도 드래그한 만큼 자유롭게 이동하며 공구 참고선은 유지합니다.
+V1.27에서 배치 스냅을 제거했습니다. 판재 테두리 근처에서도 드래그한 만큼 자유롭게 이동하며 공구 참고선은 유지합니다.
 
 수동 배치 중 `공구 보정경로/순서 표시`를 켜면 공구 지름·내외경 보정을 반영한 주황색 점선 중심선을 표시합니다. 드래그 중 함께 이동하고 공구 지름 변경 시 갱신합니다. 이는 간단한 윤곽 참고선이며 리드인·마모·포켓·전체 충돌 검사는 제외합니다. 일반 모드의 상세 미리보기 및 코드 생성 검사는 유지합니다.
 
@@ -132,7 +136,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.26**입니다.
+현재 최신 버전은 **V1.27**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -154,7 +158,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.26 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.26/CFRP_Router_CAM_V1.26_source.zip)
+- [V1.27 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.27/CFRP_Router_CAM_V1.27_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
