@@ -1,6 +1,6 @@
 {
-  "version": "1.21",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.21/CFRP_Router_CAM.exe",
-  "sha256": "fc52d8703d9a7d7bc3ef44cc7a895c30c70e1cab7b4698bda10c6adfac175a5b",
-  "message": "3D 시뮬레이션 전환 속도를 개선하고 8m 공구 경고와 10m G-code 생성 차단을 추가했습니다."
+  "version": "1.22",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.22/CFRP_Router_CAM.exe",
+  "sha256": "e158d02bd1b88b691e8916fc3faca960b00c15901ca68093bd0e3c673b418072",
+  "message": "어니언스킨 황삭/정삭 분리와 전용 START/END, 실제 윤곽 네스팅 및 파츠별 외곽 여유를 추가했습니다."
 }
