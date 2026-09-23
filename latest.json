@@ -1,6 +1,6 @@
 {
-  "version": "1.29",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.29/CFRP_Router_CAM.exe",
-  "sha256": "099364bf8bab8f61d1da29d88ca3bc9a7d25c9d6ffb2e0a0f94253f6ba9242d7",
-  "message": "T 수동탭·S 시작점·Esc 점 선택 취소·Home 전체 보기를 추가했습니다. 설정 탭 아래에서 단축키를 확인하세요."
+  "version": "1.30",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.30/CFRP_Router_CAM.exe",
+  "sha256": "77abc43159e98dbe7bb196556e980ef008420b3ed17e166193714cdf98cc3cd9",
+  "message": "작업 저장/열기(Ctrl+S/O), 외곽 순서 드래그 삽입선과 한 칸 이동을 추가했습니다. 10m 초과 작업도 경고 확인 후 생성할 수 있습니다."
 }
