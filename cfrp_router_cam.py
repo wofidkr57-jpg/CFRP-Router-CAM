@@ -39,9 +39,6 @@ import subprocess
 import sys
 import threading
 import time
-import tempfile
-import webbrowser
-from pathlib import Path
 import urllib.request
 import multiprocessing as mp
 import tkinter as tk
@@ -59,7 +56,7 @@ STEP_FACE_NORMAL_DOT = 0.999
 TOOL_WEAR_DEFAULT_LOSS_PER_10M = 0.079
 TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
-APP_VERSION = "1.32"
+APP_VERSION = "1.33"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -100,7 +97,7 @@ _UI_EN_EXACT = {
     "치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 포함": "Size: + enlarge / - shrink; diameter/width; includes pockets",
     "3D 뷰어": "3D viewer",
     "기본 3D 뷰어 열기": "Open classic 3D viewer",
-    "3D 시뮬레이션은 기본 브라우저에서 GPU 화면으로 엽니다.\n인터넷 전송 없음 · GPU 사용이 어려우면 기본 뷰어를 사용하세요.": "3D simulation opens a GPU view in your default browser.\nNo uploads; use the classic viewer if GPU is unavailable.",
+    "3D 시뮬레이션은 프로그램 내부 GPU 창에서 엽니다.\nGPU 사용이 어려우면 기본 3D 뷰어를 사용하세요.": "3D simulation opens an internal GPU window.\nUse the classic 3D viewer if GPU is unavailable.",
     "촘촘한 배열 (실제 윤곽 / 180° 엇갈림)": "Contour nesting (180 degree interlocking)",
     "촘촘한 모드: 파츠별 외곽 여유 합산 · 빈칸은 공통 간격의 절반": "Contour mode: add part offsets; blank = half the common gap",
     "외곽 여유 mm": "Offset mm",
@@ -4384,102 +4381,193 @@ class StepSetupDialog(tk.Toplevel):
 
 
 
-GPU_VIEWER_HTML = r'''<!doctype html>
-<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
-<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'">
-<title>CarbonCAM · GPU 공구 경로</title>
-<style>
-*{box-sizing:border-box}body{margin:0;background:#0b1220;color:#dce5ef;font:14px system-ui;display:flex;flex-direction:column;height:100vh}
-header{padding:12px 18px;background:#101d30;display:flex;gap:14px;align-items:center;flex-wrap:wrap}strong{color:#35e2ba}button,select{background:#24374e;color:inherit;border:1px solid #40546c;border-radius:5px;padding:7px 12px;cursor:pointer}button:hover{background:#36516d}label{display:flex;gap:6px;align-items:center}.grow{flex:1}#stage{position:relative;flex:1;min-height:150px}canvas{display:block;width:100%;height:100%;touch-action:none}#error{display:none;position:absolute;inset:25%;padding:24px;background:#3d1722;white-space:pre-wrap}footer{padding:10px 18px;background:#101d30;line-height:1.8}#seek{width:100%;accent-color:#35e2ba}small{color:#a5b5c8}#legend{position:absolute;top:12px;left:16px;pointer-events:none;color:#b8c8d9}.keys{color:#8fa4bc}
-</style>
-<header><strong>CarbonCAM · GPU 뷰어</strong><select id="mode" aria-label="표시 방식"><option value="line">공구경로</option><option value="depth">깊이맵</option></select><label><input id="rapid" type="checkbox" checked>급속 표시</label><button id="play">▶ 재생</button><button id="stop">처음</button><label>속도<select id="speed"><option>1</option><option selected>20</option><option>50</option><option>100</option></select></label><span class="grow"></span><button id="iso">등각</button><button id="top">Top</button><button id="front">Front</button><button id="fit">화면 맞춤</button></header>
-<div id="stage"><canvas id="view" aria-label="3D 공구 경로"></canvas><div id="legend"></div><div id="error" role="alert"></div></div>
-<footer><input id="seek" aria-label="재생 위치" type="range" min="0" step="0.001"><div id="status" role="status">경로 준비 중…</div><small>인터넷 전송 없이 이 파일 안에서 표시합니다. 기계좌표·매크로 내부 이동과 시간은 제외합니다. 깊이맵은 공구 폭을 이용한 근사 표시입니다.</small><div class="keys">왼쪽 드래그: 회전 · 오른쪽/가운데/Shift 드래그: 이동 · 휠: 확대 · Home: 화면 맞춤 · Space: 재생/정지 · ◆ 복귀점</div></footer>
-<script id="data" type="application/json">__DATA__</script><script>
-'use strict';
-const D=JSON.parse(document.getElementById('data').textContent),$=id=>document.getElementById(id),canvas=$('view');
-function fail(message){$('error').style.display='block';$('error').textContent=message+'\nCarbonCAM 설정의 기본 3D 뷰어를 사용할 수 있습니다.';canvas.dataset.ready='error';}
-try {
-const gl=canvas.getContext('webgl',{antialias:true,alpha:false});if(!gl)throw Error('이 브라우저에서 GPU 화면을 열 수 없습니다.');
-const vs=`attribute vec3 a_pos;attribute float a_time;attribute float a_depth;attribute float a_kind;uniform mat4 u_matrix;uniform float u_stock;varying float v_time;varying float v_depth;varying float v_kind;void main(){gl_Position=u_matrix*vec4(a_pos,1.0);if(a_kind==2.0)gl_Position.z=-min(a_depth/u_stock,1.0)*0.8;gl_PointSize=a_kind==4.0?13.0:8.0;v_time=a_time;v_depth=a_depth;v_kind=a_kind;}`;
-const fs=`precision highp float;uniform float u_elapsed;uniform float u_stock;uniform float u_rapid;varying float v_time;varying float v_depth;varying float v_kind;void main(){
- if(v_kind==1.0 && (u_rapid<0.5 || mod(gl_FragCoord.x+gl_FragCoord.y,10.0)<4.0))discard;
- vec3 color=vec3(.9,.28,.22);if(v_kind<1.5 && v_time>u_elapsed)color=vec3(.23,.3,.39);else if(v_kind==1.0)color=vec3(.58,.66,.76);
- if(v_kind==2.0){if(v_time>u_elapsed)discard;float d=min(v_depth/u_stock,1.0);color=mix(vec3(.0,.85,1.),vec3(.92,.24,.7),d);if(d>=.999)color=vec3(.02,.025,.03);}
- if(v_kind==3.0)color=vec3(.25,.37,.46);
- if(v_kind==4.0){if(length(gl_PointCoord-vec2(.5))>.5)discard;color=vec3(1.,.88,.15);}
- if(v_kind==5.0){if(abs(gl_PointCoord.x-.5)+abs(gl_PointCoord.y-.5)>.5)discard;color=vec3(.0,1.,.78);}
- gl_FragColor=vec4(color,1.);}`;
-function shader(type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;}
-const program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,vs));gl.attachShader(program,shader(gl.FRAGMENT_SHADER,fs));gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));gl.useProgram(program);
-const attrs=['a_pos','a_time','a_depth','a_kind'].map(n=>gl.getAttribLocation(program,n));
-const uniforms=Object.fromEntries(['u_matrix','u_elapsed','u_stock','u_rapid'].map(n=>[n,gl.getUniformLocation(program,n)]));
-let uploads=0,drawCalls=0;function buffer(data,dynamic=false){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,data,dynamic?gl.DYNAMIC_DRAW:gl.STATIC_DRAW);uploads++;return {b,n:data.length/6};}
-function render(b,mode){if(!b.n)return;gl.bindBuffer(gl.ARRAY_BUFFER,b.b);for(let i=0;i<4;i++){gl.enableVertexAttribArray(attrs[i]);gl.vertexAttribPointer(attrs[i],i===0?3:1,gl.FLOAT,false,24,i===0?0:(i+2)*4);}gl.drawArrays(mode,0,b.n);drawCalls++;}
-const count=D.moves.length/9,ends=new Float64Array(count),line=new Float32Array(count*12),depth=new Float32Array(count*36),markers=[];
-let total=0,lp=0,dp=0;const lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
-function vertex(array,offset,p,t,d,k){array.set([p[0],p[1],p[2],t,d,k],offset);return offset+6;}
-for(let i=0;i<count;i++){
- const j=i*9,a=D.moves.slice(j,j+3),b=D.moves.slice(j+3,j+6),t=total;total+=D.moves[j+6];ends[i]=total;const rapid=D.moves[j+7];
- for(const p of [a,b])for(let k=0;k<3;k++){lo[k]=Math.min(lo[k],p[k]);hi[k]=Math.max(hi[k],p[k]);}
- lp=vertex(line,lp,a,t,0,rapid);lp=vertex(line,lp,b,total,0,rapid);
- if(D.moves[j+8])markers.push(...a,t,0,5);
- const dx=b[0]-a[0],dy=b[1]-a[1],length=Math.hypot(dx,dy),da=Math.max(0,D.top-a[2]),db=Math.max(0,D.top-b[2]);
- if(!rapid && length>1e-7 && Math.max(da,db)>1e-7){
-  const nx=-dy/length*D.diameter/2,ny=dx/length*D.diameter/2;
-  const p=[a[0]+nx,a[1]+ny,D.top],q=[a[0]-nx,a[1]-ny,D.top],r=[b[0]+nx,b[1]+ny,D.top],s=[b[0]-nx,b[1]-ny,D.top];
-  for(const [v,time,d] of [[p,t,da],[q,t,da],[r,total,db],[r,total,db],[q,t,da],[s,total,db]])dp=vertex(depth,dp,v,time,d,2);
- }
-}
-const lines=buffer(line),depths=buffer(depth.subarray(0,dp)),restarts=buffer(new Float32Array(markers)),tool=buffer(new Float32Array(6),true);
-const edge=[],corners=[[lo[0],lo[1],D.top],[hi[0],lo[1],D.top],[hi[0],hi[1],D.top],[lo[0],hi[1],D.top]];
-for(let i=0;i<4;i++){const a=corners[i],b=corners[(i+1)%4],c=[...a];c[2]=D.top-D.stock;edge.push(...a,0,0,3,...b,0,0,3,...a,0,0,3,...c,0,0,3);}
-const stock=buffer(new Float32Array(edge)),center=lo.map((v,i)=>(v+hi[i])/2),span=Math.max(1,...hi.map((v,i)=>v-lo[i]));
-let az=-.61,el=.61,zoom=1,pan=[0,0],elapsed=total,playing=false,last=0,frame=0,drag=null;
-$('seek').max=total;$('seek').value=elapsed;canvas.dataset.ready='true';canvas.dataset.moves=count;canvas.dataset.uploads=uploads;canvas.dataset.depthVertices=depths.n;canvas.dataset.bounds=JSON.stringify([...lo,...hi]);
-function matrix(){const ca=Math.cos(az),sa=Math.sin(az),ce=Math.cos(el),se=Math.sin(el),w=canvas.width,h=canvas.height,s=1.6/span*zoom,sx=s*Math.min(w,h)/w,sy=s*Math.min(w,h)/h,sz=1/(span*5),x=center[0],y=center[1],z=center[2];return new Float32Array([ca*sx,sa*ce*sy,sa*se*sz,0,-sa*sx,ca*ce*sy,ca*se*sz,0,0,-se*sy,ce*sz,0,pan[0]-(ca*x-sa*y)*sx,pan[1]-(sa*ce*x+ca*ce*y-se*z)*sy,-(sa*se*x+ca*se*y+ce*z)*sz,1]);}
-function current(){let left=0,right=count-1;while(left<right){const mid=(left+right)>>1;if(ends[mid]<elapsed)left=mid+1;else right=mid;}const j=left*9,t0=left?ends[left-1]:0,f=Math.min(1,Math.max(0,(elapsed-t0)/Math.max(ends[left]-t0,1e-9)));return [0,1,2].map(k=>D.moves[j+k]+(D.moves[j+k+3]-D.moves[j+k])*f);}
-function draw(now){frame=0;if(playing){if(last)elapsed=Math.min(total,elapsed+(now-last)/1000*Number($('speed').value));last=now;if(elapsed>=total){playing=false;$('play').textContent='▶ 재생';}}else last=0;
- const ratio=Math.min(devicePixelRatio||1,2),w=Math.max(1,Math.round(canvas.clientWidth*ratio)),h=Math.max(1,Math.round(canvas.clientHeight*ratio));if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}gl.viewport(0,0,w,h);gl.clearColor(.035,.065,.10,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.useProgram(program);gl.uniformMatrix4fv(uniforms.u_matrix,false,matrix());gl.uniform1f(uniforms.u_elapsed,elapsed);gl.uniform1f(uniforms.u_stock,D.stock);gl.uniform1f(uniforms.u_rapid,$('rapid').checked?1:0);drawCalls=0;
- gl.disable(gl.DEPTH_TEST);render(stock,gl.LINES);const isDepth=$('mode').value==='depth';if(isDepth){gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);render(depths,gl.TRIANGLES);gl.disable(gl.DEPTH_TEST);}else render(lines,gl.LINES);
- render(restarts,gl.POINTS);const p=current();gl.bindBuffer(gl.ARRAY_BUFFER,tool.b);gl.bufferSubData(gl.ARRAY_BUFFER,0,new Float32Array([...p,elapsed,0,4]));render(tool,gl.POINTS);
- $('seek').value=elapsed;$('status').textContent=`이동 ${count.toLocaleString()}개 · ${elapsed.toFixed(1)} / ${total.toFixed(1)}초 · X ${p[0].toFixed(3)}  Y ${p[1].toFixed(3)}  Z ${p[2].toFixed(3)}`;
- $('legend').textContent=isDepth?'청록 → 자주: 깊이 증가 · 검정: 관통 · 밝게 남은 구간: 탭':'빨강: 절삭 · 회색 점선: 급속 · 노랑: 현재 공구';canvas.dataset.drawCalls=drawCalls;canvas.dataset.drawMs=(performance.now()-now).toFixed(2);canvas.dataset.frame=Number(canvas.dataset.frame||0)+1;
- if(playing)request();}
-function request(){if(!frame)frame=requestAnimationFrame(draw);}
-function fit(){zoom=1;pan=[0,0];request();}
-$('play').onclick=()=>{playing=!playing;if(playing && elapsed>=total)elapsed=0;last=0;$('play').textContent=playing?'⏸ 일시정지':'▶ 재생';request();};
-$('stop').onclick=()=>{playing=false;elapsed=0;$('play').textContent='▶ 재생';request();};
-$('seek').oninput=()=>{playing=false;elapsed=Number($('seek').value);$('play').textContent='▶ 재생';request();};
-$('mode').onchange=()=>{$('rapid').disabled=$('mode').value==='depth';request();};$('rapid').onchange=request;$('fit').onclick=fit;
-$('iso').onclick=()=>{az=-.61;el=.61;fit();};$('top').onclick=()=>{az=0;el=0;fit();};$('front').onclick=()=>{az=0;el=Math.PI/2;fit();};
-canvas.oncontextmenu=e=>e.preventDefault();canvas.onpointerdown=e=>{canvas.setPointerCapture(e.pointerId);drag={x:e.clientX,y:e.clientY,pan:e.button!==0||e.shiftKey};};
-canvas.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(drag.pan){pan[0]+=2*dx/canvas.clientWidth;pan[1]-=2*dy/canvas.clientHeight;}else{az+=dx*.008;el=Math.max(-Math.PI/2,Math.min(Math.PI/2,el+dy*.008));}drag.x=e.clientX;drag.y=e.clientY;request();};canvas.onpointerup=canvas.onpointercancel=()=>{drag=null;};
-canvas.addEventListener('wheel',e=>{e.preventDefault();const old=zoom;zoom=Math.max(.05,Math.min(100,zoom*Math.exp(-e.deltaY*.001)));const r=canvas.getBoundingClientRect(),x=2*(e.clientX-r.left)/r.width-1,y=1-2*(e.clientY-r.top)/r.height;pan=[x-(x-pan[0])*zoom/old,y-(y-pan[1])*zoom/old];request();},{passive:false});
-window.onresize=request;window.onkeydown=e=>{if(['INPUT','SELECT','BUTTON'].includes(e.target.tagName))return;if(e.code==='Space'){e.preventDefault();$('play').click();}if(e.code==='Home'){e.preventDefault();fit();}};
-canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();playing=false;fail('GPU 연결이 중단됐습니다. 페이지를 새로고침하세요.');});request();
-}catch(e){fail(String(e.message||e));}
-</script></html>'''
-
-
-def gpu_viewer_html(moves:Sequence[Move3D],cfg:dict)->str:
-    """Self-contained offline viewer; no external scripts, uploads or local server."""
+def native_toolpath_buffers(moves,cfg,color_for_depth,tab_indices=()):
+    """Build immutable line/depth batches once; never join disconnected moves."""
+    import numpy as np
     if not moves:raise ValueError("표시할 가공 경로가 없습니다.")
-    stock=float(cfg["stock"]);diameter=float(cfg["tool_d"])
+    stock=float(cfg['stock']);diameter=float(cfg['tool_d'])
     if not all(math.isfinite(v) and v>0 for v in (stock,diameter)):raise ValueError("Invalid viewer dimensions")
-    packed=[]
-    for m in moves:
+    count=len(moves);line=np.empty((count*2,9),dtype='float32');depth=np.empty((count*6,9),dtype='float32')
+    markers=[];tabs=[];run=0.;dp=0;top=stock if cfg.get('z_origin')=='Bottom' else 0.
+    lo=[math.inf]*3;hi=[-math.inf]*3
+    for i,m in enumerate(moves):
         if not all(math.isfinite(v) for v in (*m.start,*m.end,m.seconds)) or m.seconds<0:raise ValueError("Invalid viewer move")
-        packed.extend((*m.start,*m.end,m.seconds,int(m.rapid),int(bool(m.restart))))
-    payload={"moves":packed,"stock":stock,"diameter":diameter,"top":stock if cfg.get("z_origin")=="Bottom" else 0}
-    return GPU_VIEWER_HTML.replace("__DATA__",json.dumps(payload,separators=(",",":"),allow_nan=False))
+        a=m.start;b=m.end;t=run;run+=m.seconds;kind=int(m.rapid)
+        line[i*2]=(*a,t,0,kind,0,0,0);line[i*2+1]=(*b,run,0,kind,0,0,0)
+        for p in (a,b):
+            for k in range(3):lo[k]=min(lo[k],p[k]);hi[k]=max(hi[k],p[k])
+        if m.restart:markers.append((*a,t,0,5,0,0,0))
+        dx=b[0]-a[0];dy=b[1]-a[1];length=math.hypot(dx,dy)
+        da=max(0,top-a[2]);db=max(0,top-b[2]);removed=min(stock,max(da,db))
+        if m.rapid or length<EPS or removed<EPS:continue
+        hexcolor=color_for_depth(removed);rgb=tuple(int(hexcolor[k:k+2],16)/255 for k in (1,3,5))
+        nx=-dy/length*diameter/2;ny=dx/length*diameter/2
+        p=(a[0]+nx,a[1]+ny,top);q=(a[0]-nx,a[1]-ny,top)
+        r=(b[0]+nx,b[1]+ny,top);s=(b[0]-nx,b[1]-ny,top)
+        for v,time_,d in ((p,t,da),(q,t,da),(r,run,db),(r,run,db),(q,t,da),(s,run,db)):
+            depth[dp]=(*v,time_,d,2,*rgb);dp+=1
+        if i in tab_indices:
+            tabs.extend(((a[0],a[1],top,t,0,6,0,0,0),(b[0],b[1],top,run,0,6,0,0,0)))
+    margin=max(hi[0]-lo[0],hi[1]-lo[1],1)*.04
+    corners=[(lo[0]-margin,lo[1]-margin,top),(hi[0]+margin,lo[1]-margin,top),
+             (hi[0]+margin,hi[1]+margin,top),(lo[0]-margin,hi[1]+margin,top)]
+    edges=[]
+    for i,a in enumerate(corners):
+        b=corners[(i+1)%4];c=(a[0],a[1],top-stock);d=(b[0],b[1],top-stock)
+        edges.extend([(*v,0,0,3,0,0,0) for v in (a,b,a,c,c,d)])
+    rows=lambda values:np.asarray(values,dtype='float32').reshape((-1,9))
+    return dict(line=line,depth=np.ascontiguousarray(depth[:dp]),markers=rows(markers),
+                tabs=rows(tabs),stock=rows(edges),bounds=tuple(lo+hi),total=run)
 
 
-def open_gpu_viewer(moves:Sequence[Move3D],cfg:dict)->str:
-    folder=Path(tempfile.mkdtemp(prefix="CarbonCAM_viewer_"));path=folder/"toolpath.html"
-    path.write_text(gpu_viewer_html(moves,cfg),encoding="utf-8")
-    if not webbrowser.open(path.as_uri(),new=2):raise OSError("기본 브라우저를 열지 못했습니다.")
-    return str(path)
+class NativeToolpathGL:
+    """Windows OpenGL on a Tk child HWND; no browser, HTML, network or extra runtime."""
+    VERTEX=b'''#version 120
+attribute vec3 a_pos;attribute float a_time;attribute float a_depth;attribute float a_kind;attribute vec3 a_color;
+uniform mat4 u_matrix;uniform float u_stock;varying float v_time;varying float v_kind;varying vec3 v_color;
+void main(){gl_Position=u_matrix*vec4(a_pos,1.0);if(a_kind==2.0)gl_Position.z=-min(a_depth/u_stock,1.0)*.8;
+gl_PointSize=a_kind==4.0?13.0:8.0;v_time=a_time;v_kind=a_kind;v_color=a_color;}'''
+    FRAGMENT=b'''#version 120
+uniform float u_elapsed;uniform float u_rapid;varying float v_time;varying float v_kind;varying vec3 v_color;
+void main(){if(v_kind==1.0&&(u_rapid<.5||mod(gl_FragCoord.x+gl_FragCoord.y,10.0)<4.0))discard;
+vec3 color=vec3(1.,.38,.34);if(v_kind<1.5&&v_time>u_elapsed)color=vec3(.19,.22,.26);else if(v_kind==1.0)color=vec3(.54,.59,.64);
+if(v_kind==2.0){if(v_time>u_elapsed)discard;color=v_color;}
+if(v_kind==3.0)color=vec3(.32,.40,.46);
+if(v_kind==4.0){if(length(gl_PointCoord-vec2(.5))>.5)discard;color=vec3(1.,.88,.15);}
+if(v_kind==5.0){if(abs(gl_PointCoord.x-.5)+abs(gl_PointCoord.y-.5)>.5)discard;color=vec3(0.,1.,.78);}
+if(v_kind==6.0){if(v_time>u_elapsed)discard;color=vec3(1.,.82,.10);}
+gl_FragColor=vec4(color,1.);}'''
+
+    def __init__(self,surface,batches):
+        if sys.platform!='win32':raise RuntimeError('Windows GPU viewer unavailable')
+        self.surface=surface;self.hdc=None;self.context=None;self.program=0;self.shaders=[];self.buffers={}
+        self.uploads=0;self.draw_calls=0;self.closed=False;self.batches=batches
+        self.user=ctypes.WinDLL('user32',use_last_error=True);self.gdi=ctypes.WinDLL('gdi32',use_last_error=True)
+        self.gl=ctypes.WinDLL('opengl32',use_last_error=True)
+        V=ctypes.c_void_p;I=ctypes.c_int;U=ctypes.c_uint;F=ctypes.c_float
+        def api(lib,name,result,args):
+            fn=getattr(lib,name);fn.restype=result;fn.argtypes=args;return fn
+        self.getdc=api(self.user,'GetDC',V,[V]);self.releasedc=api(self.user,'ReleaseDC',I,[V,V])
+        self.choose=api(self.gdi,'ChoosePixelFormat',I,[V,V]);self.setpixel=api(self.gdi,'SetPixelFormat',I,[V,I,V])
+        self.getpixel=api(self.gdi,'GetPixelFormat',I,[V]);self.swap=api(self.gdi,'SwapBuffers',I,[V])
+        self.create=api(self.gl,'wglCreateContext',V,[V]);self.delete=api(self.gl,'wglDeleteContext',I,[V])
+        self.make=api(self.gl,'wglMakeCurrent',I,[V,V]);self.proc=api(self.gl,'wglGetProcAddress',V,[ctypes.c_char_p])
+        self.current_context=api(self.gl,'wglGetCurrentContext',V,[]);self.current_dc=api(self.gl,'wglGetCurrentDC',V,[])
+        surface.update_idletasks();self.hwnd=int(surface.winfo_id());old=(self.current_dc(),self.current_context())
+        try:
+            self.hdc=self.getdc(self.hwnd)
+            if not self.hdc:raise OSError('GPU display DC unavailable')
+            # PIXELFORMATDESCRIPTOR: WORD/WORD/DWORD, twenty BYTEs, three DWORDs.
+            class PFD(ctypes.Structure):
+                _fields_=[('size',ctypes.c_ushort),('version',ctypes.c_ushort),('flags',U),
+                          ('bytes',ctypes.c_ubyte*20),('layer',U),('visible',U),('damage',U)]
+            pfd=PFD();pfd.size=ctypes.sizeof(PFD);pfd.version=1;pfd.flags=0x25;pfd.bytes[1]=24;pfd.bytes[15]=24
+            if not self.getpixel(self.hdc):
+                pixel=self.choose(self.hdc,ctypes.byref(pfd))
+                if not pixel or not self.setpixel(self.hdc,pixel,ctypes.byref(pfd)):raise OSError('GPU pixel format unavailable')
+            self.context=self.create(self.hdc)
+            if not self.context or not self.make(self.hdc,self.context):raise OSError('GPU context unavailable')
+            def load(name,result,args):
+                try:return api(self.gl,name,result,args)
+                except AttributeError:
+                    address=self.proc(name.encode('ascii'))
+                    if address in (None,0,1,2,3,ctypes.c_void_p(-1).value):raise RuntimeError('OpenGL 2.1 required: '+name)
+                    return ctypes.WINFUNCTYPE(result,*args)(address)
+            signatures={
+                'glCreateShader':(U,[U]),'glShaderSource':(None,[U,I,V,V]),'glCompileShader':(None,[U]),
+                'glGetShaderiv':(None,[U,U,V]),'glGetShaderInfoLog':(None,[U,I,V,V]),'glDeleteShader':(None,[U]),
+                'glCreateProgram':(U,[]),'glAttachShader':(None,[U,U]),'glLinkProgram':(None,[U]),
+                'glGetProgramiv':(None,[U,U,V]),'glGetProgramInfoLog':(None,[U,I,V,V]),'glDeleteProgram':(None,[U]),
+                'glUseProgram':(None,[U]),'glGetAttribLocation':(I,[U,ctypes.c_char_p]),
+                'glGetUniformLocation':(I,[U,ctypes.c_char_p]),'glUniformMatrix4fv':(None,[I,I,ctypes.c_ubyte,V]),
+                'glUniform1f':(None,[I,F]),'glGenBuffers':(None,[I,V]),'glBindBuffer':(None,[U,U]),
+                'glBufferData':(None,[U,ctypes.c_ssize_t,V,U]),'glBufferSubData':(None,[U,ctypes.c_ssize_t,ctypes.c_ssize_t,V]),
+                'glDeleteBuffers':(None,[I,V]),'glEnableVertexAttribArray':(None,[U]),
+                'glVertexAttribPointer':(None,[U,I,U,ctypes.c_ubyte,I,V]),'glDrawArrays':(None,[U,I,I]),
+                'glViewport':(None,[I,I,I,I]),'glClearColor':(None,[F,F,F,F]),'glClear':(None,[U]),
+                'glEnable':(None,[U]),'glDisable':(None,[U]),'glDepthFunc':(None,[U]),
+                'glLineWidth':(None,[F]),'glGetString':(ctypes.c_char_p,[U]),'glGetError':(U,[]),
+                'glReadPixels':(None,[I,I,I,I,U,U,V]),'glPixelStorei':(None,[U,I]),'glReadBuffer':(None,[U]),'glFinish':(None,[])}
+            for name,(result,args) in signatures.items():setattr(self,name,load(name,result,args))
+            self.renderer=self.glGetString(0x1F01).decode('utf-8','replace')
+            for kind,source in ((0x8B31,self.VERTEX),(0x8B30,self.FRAGMENT)):
+                shader=self.glCreateShader(kind);self.shaders.append(shader)
+                pointer=ctypes.c_char_p(source);self.glShaderSource(shader,1,ctypes.byref(pointer),None);self.glCompileShader(shader)
+                ok=I();self.glGetShaderiv(shader,0x8B81,ctypes.byref(ok))
+                if not ok.value:
+                    log=ctypes.create_string_buffer(4096);self.glGetShaderInfoLog(shader,4096,None,log);raise RuntimeError(log.value.decode())
+            self.program=self.glCreateProgram()
+            for shader in self.shaders:self.glAttachShader(self.program,shader)
+            self.glLinkProgram(self.program);ok=I();self.glGetProgramiv(self.program,0x8B82,ctypes.byref(ok))
+            if not ok.value:
+                log=ctypes.create_string_buffer(4096);self.glGetProgramInfoLog(self.program,4096,None,log);raise RuntimeError(log.value.decode())
+            self.attrs=[self.glGetAttribLocation(self.program,n) for n in (b'a_pos',b'a_time',b'a_depth',b'a_kind',b'a_color')]
+            self.uniforms={n:self.glGetUniformLocation(self.program,n.encode()) for n in ('u_matrix','u_stock','u_elapsed','u_rapid')}
+            for name in ('line','depth','markers','tabs','stock'):self.upload(name,batches[name])
+            import numpy as np
+            self.upload('tool',np.zeros((1,9),dtype='float32'),True)
+            self.glEnable(0x8642);self.glEnable(0x8861)  # shader point size and sprites
+            self.glDisable(0x0BD0)  # avoid driver dithering in depth colours
+            if self.glGetError():raise RuntimeError('GPU initialization failed')
+        except Exception:
+            self.close();raise
+        finally:self.make(*old)
+
+    def upload(self,name,data,dynamic=False):
+        buffer=ctypes.c_uint();self.glGenBuffers(1,ctypes.byref(buffer));self.buffers[name]=(buffer,len(data))
+        self.glBindBuffer(0x8892,buffer.value);self.glBufferData(0x8892,data.nbytes,data.ctypes.data,0x88E8 if dynamic else 0x88E4);self.uploads+=1
+
+    def batch(self,name,mode):
+        buffer,count=self.buffers[name]
+        if not count:return
+        self.glBindBuffer(0x8892,buffer.value)
+        for location,size,offset in zip(self.attrs,(3,1,1,1,3),(0,12,16,20,24)):
+            if location>=0:self.glEnableVertexAttribArray(location);self.glVertexAttribPointer(location,size,0x1406,0,36,offset)
+        self.glDrawArrays(mode,0,count);self.draw_calls+=1
+
+    def draw(self,matrix,width,height,elapsed,stock,rapid,depth,current,readback=False):
+        import numpy as np
+        if self.closed:return None
+        old=(self.current_dc(),self.current_context())
+        if not self.make(self.hdc,self.context):raise OSError('GPU context lost')
+        try:
+            self.glViewport(0,0,width,height);self.glClearColor(.067,.086,.11,1);self.glClear(0x4000|0x100)
+            self.glUseProgram(self.program);self.draw_calls=0
+            mat=np.asarray(matrix,dtype='float32');self.glUniformMatrix4fv(self.uniforms['u_matrix'],1,0,mat.ctypes.data)
+            for name,value in (('u_stock',stock),('u_elapsed',elapsed),('u_rapid',int(rapid))):self.glUniform1f(self.uniforms[name],value)
+            self.glDisable(0x0B71);self.glLineWidth(1);self.batch('stock',1)
+            if depth:
+                self.glEnable(0x0B71);self.glDepthFunc(0x0203);self.batch('depth',4);self.glDisable(0x0B71)
+                self.glLineWidth(3);self.batch('tabs',1);self.glLineWidth(1)
+            else:self.batch('line',1)
+            self.batch('markers',0)
+            point=np.asarray([(*current,elapsed,0,4,0,0,0)],dtype='float32')
+            self.glBindBuffer(0x8892,self.buffers['tool'][0].value);self.glBufferSubData(0x8892,0,point.nbytes,point.ctypes.data);self.batch('tool',0)
+            error=self.glGetError()
+            if error:raise RuntimeError(f'GPU rendering error {error}')
+            pixels=None
+            if readback:
+                pixels=np.empty((height,width,3),dtype='uint8');self.glPixelStorei(0x0D05,1);self.glReadBuffer(0x0405)
+                self.glReadPixels(0,0,width,height,0x1907,0x1401,pixels.ctypes.data);self.glFinish();pixels=pixels[::-1].copy()
+            if not self.swap(self.hdc):raise OSError('GPU presentation failed')
+            return pixels
+        finally:self.make(*old)
+
+    def close(self):
+        if self.closed:return
+        self.closed=True
+        if self.context:
+            old=(self.current_dc(),self.current_context())
+            if self.make(self.hdc,self.context):
+                for buffer,_ in self.buffers.values():self.glDeleteBuffers(1,ctypes.byref(buffer))
+                if self.program:self.glDeleteProgram(self.program)
+                for shader in self.shaders:
+                    if hasattr(self,'glDeleteShader'):self.glDeleteShader(shader)
+                self.make(None,None)
+            self.delete(self.context)
+            if old[1]!=self.context:self.make(*old)
+            self.context=None
+        if self.hdc:self.releasedc(self.hwnd,self.hdc);self.hdc=None
 
 
 class Toolpath3D(tk.Toplevel):
@@ -4528,13 +4616,23 @@ class Toolpath3D(tk.Toplevel):
         # Keep the viewport size stable across mode switches (projection cache).
         self.legend.pack(side="left",fill="y")
         self.legend.bind("<Configure>",lambda e:self.draw_depth_legend())
-        self.canvas=tk.Canvas(viewer,bg="#11161c",highlightthickness=0);self.canvas.pack(side="left",fill="both",expand=True)
+        self.canvas=self.make_surface(viewer);self.canvas.pack(side="left",fill="both",expand=True)
         self.canvas.bind("<Configure>",self.request_draw);self.canvas.bind("<ButtonPress-1>",self.rotate_start)
         self.canvas.bind("<B1-Motion>",self.rotate_move);self.canvas.bind("<ButtonPress-2>",self.pan_start)
         self.canvas.bind("<B2-Motion>",self.pan_move);self.canvas.bind("<MouseWheel>",self.wheel)
-        self.protocol("WM_DELETE_WINDOW",self.close);self.mode_changed();self.after(30,self.tick)
+        self.protocol("WM_DELETE_WINDOW",self.close);self.mode_changed();self.tick_job=self.after(30,self.tick)
 
+    def make_surface(self,parent):return tk.Canvas(parent,bg="#11161c",highlightthickness=0)
     def close(self):self.playing=False;self.destroy()
+    def destroy(self):
+        self.playing=False
+        for name in ('draw_job','tick_job'):
+            job=getattr(self,name,None)
+            if job is not None:
+                try:self.after_cancel(job)
+                except tk.TclError:pass
+                setattr(self,name,None)
+        super().destroy()
     def set_view(self,az,el):
         self.az=math.radians(az);self.el=math.radians(el);self.panx=self.pany=0.0;self.zoom=1.0;self.request_draw()
     def play(self):
@@ -4688,6 +4786,7 @@ class Toolpath3D(tk.Toplevel):
         if self.sim_mode.get() not in ("깊이맵","Depth map"):
             self.legend.itemconfigure("all",state="hidden")
     def tick(self):
+        self.tick_job=None
         if not self.winfo_exists():return
         if self.playing:
             now=time.monotonic();last=self._last_tick
@@ -4696,7 +4795,7 @@ class Toolpath3D(tk.Toplevel):
             if self.sim_time>=self.total_time:
                 self.sim_time=self.total_time;self.playing=False;self._last_tick=None
             self._set_timeline(self.sim_time);self.update_frame()
-        self.after(30,self.tick)
+        self.tick_job=self.after(30,self.tick)
 
     def data_bounds(self):
         pts=[p for m in self.moves for p in (m.start,m.end)]
@@ -4875,6 +4974,94 @@ class Toolpath3D(tk.Toplevel):
         self.canvas.create_text(x+10,y-12,text=f"X{current[0]:.2f} Y{current[1]:.2f} Z{current[2]:.2f}",
                                 fill="white",anchor="w",tags="dynamic")
         self.info.set(f"{self.sim_mode.get()} | 이동 {done}/{len(self.moves)}   시간 {elapsed:.1f}/{self.total_time:.1f}초   Z+ 윗면 / 아래쪽 바닥·탭   좌드래그: 회전 · 가운데드래그: 이동 · 휠: 확대")
+
+
+class NativeToolpath3D(Toolpath3D):
+    """Reuse the program's simulation controls, with a batched native GPU surface."""
+    def __init__(self,parent,moves,cfg):
+        self.gpu=None;self._closed=False;self._render_key=None;self._initializing=True
+        try:
+            super().__init__(parent,moves,cfg)
+            batches=native_toolpath_buffers(moves,cfg,self.color_for_depth,self.tab_move_indices)
+            self.gpu=NativeToolpathGL(self.canvas,batches)
+            self.canvas.bind('<Expose>',self.request_draw)
+            self.canvas.bind('<ButtonPress-3>',self.pan_start);self.canvas.bind('<B3-Motion>',self.pan_move)
+            self.bind('<Home>',lambda e:self.set_view(-35,-35))
+            self.sim_time=self.total_time;self._set_timeline(self.sim_time)
+            self.draw()
+            self._initializing=False
+            self.bind('<Destroy>',self._on_destroy,add='+')
+        except Exception:
+            self.destroy();raise
+
+    def make_surface(self,parent):return tk.Frame(parent,bg='#11161c',highlightthickness=0)
+
+    def _on_destroy(self,event):
+        if event.widget is self:self._dispose()
+
+    def _dispose(self):
+        if self._closed:return
+        self._closed=True;self.playing=False
+        if getattr(self,'tick_job',None) is not None:
+            try:self.after_cancel(self.tick_job)
+            except tk.TclError:pass
+            self.tick_job=None
+        if self.draw_job is not None:
+            try:self.after_cancel(self.draw_job)
+            except tk.TclError:pass
+            self.draw_job=None
+        if self.gpu:self.gpu.close();self.gpu=None
+
+    def destroy(self):
+        self._dispose();super().destroy()
+
+    def close(self):self.destroy()
+
+    def wheel(self,event):
+        old=self.zoom;new=max(.15,min(12,old*(1.15 if event.delta>0 else 1/1.15)))
+        ratio=new/old;w=max(self.canvas.winfo_width(),100);h=max(self.canvas.winfo_height(),100)
+        dx=event.x-w/2;dy=event.y-h/2
+        self.panx=dx-ratio*(dx-self.panx);self.pany=dy-ratio*(dy-self.pany);self.zoom=new;self.request_draw()
+
+    def projection_matrix(self):
+        lo=self.bounds[:3];hi=self.bounds[3:];cx,cy,cz=[(a+b)/2 for a,b in zip(lo,hi)]
+        w=max(self.canvas.winfo_width(),100);h=max(self.canvas.winfo_height(),100)
+        span=max(1,*[b-a for a,b in zip(lo,hi)]);s=min(w,h)*.72/span*self.zoom
+        sx=2*s/w;sy=2*s/h;sz=1/(span*5)
+        ca,sa=math.cos(self.az),math.sin(self.az);ce,se=math.cos(self.el),math.sin(self.el)
+        return [ca*sx,sa*ce*sy,sa*se*sz,0,-sa*sx,ca*ce*sy,ca*se*sz,0,0,-se*sy,ce*sz,0,
+                2*self.panx/w-(ca*cx-sa*cy)*sx,-2*self.pany/h-(sa*ce*cx+ca*ce*cy-se*cz)*sy,
+                -(sa*se*cx+ca*se*cy+ce*cz)*sz,1]
+
+    def current_point(self):
+        done=bisect.bisect_right(self.cumulative,self.sim_time)
+        if done>=len(self.moves):return self.moves[-1].end
+        move=self.moves[done];t0=self.cumulative[done]-move.seconds
+        fraction=max(0,min(1,(self.sim_time-t0)/max(move.seconds,EPS)))
+        return tuple(move.start[k]+(move.end[k]-move.start[k])*fraction for k in range(3))
+
+    def draw(self,readback=False):
+        if not self.gpu or self._closed:return None
+        w=max(self.canvas.winfo_width(),1);h=max(self.canvas.winfo_height(),1);point=self.current_point()
+        try:
+            pixels=self.gpu.draw(self.projection_matrix(),w,h,self.sim_time,float(self.cfg['stock']),
+                                 self.show_rapid.get(),self.sim_mode.get() in ('깊이맵','Depth map'),point,readback)
+        except (OSError,RuntimeError) as exc:
+            if self._initializing:raise
+            # A failed driver still opens an internal viewer; never launch a browser.
+            parent=self.master;moves=self.moves;cfg=self.cfg;position=self.sim_time;self.close()
+            view=Toolpath3D(parent,moves,cfg);view.sim_time=position;view._set_timeline(position);view.update_frame()
+            if hasattr(parent,'status'):parent.status.set(f'GPU 표시 실패 · 기본 3D 뷰어 사용: {exc}')
+            return None
+        done=bisect.bisect_right(self.cumulative,self.sim_time)
+        self.info.set(f'{self.sim_mode.get()} | 이동 {done}/{len(self.moves)} · {self.sim_time:.1f}/{self.total_time:.1f}초 · '
+                      f'X{point[0]:.2f} Y{point[1]:.2f} Z{point[2]:.2f} · 좌드래그: 회전 · 가운데/우드래그: 이동 · 휠: 확대')
+        self._render_key=(self.sim_time,self.sim_mode.get(),self.show_rapid.get())
+        return pixels
+
+    def update_frame(self):
+        key=(self.sim_time,self.sim_mode.get(),self.show_rapid.get())
+        if key!=self._render_key:self.draw()
 
 
 class App(tk.Tk):
@@ -5423,7 +5610,7 @@ class App(tk.Tk):
         ttk.Button(font_box,text="글자 크기 적용",command=self.apply_font_size).grid(row=1,column=0,columnspan=2,sticky="ew",pady=(8,0))
         ttk.Label(settings_tab,text="버튼, 입력칸, 윤곽 목록, G-code 미리보기에 적용됩니다.",padding=10).pack(anchor="w")
         viewer_box=ttk.LabelFrame(settings_tab,text="3D 뷰어",padding=10);viewer_box.pack(fill="x",padx=10,pady=(0,10))
-        ttk.Label(viewer_box,text="3D 시뮬레이션은 기본 브라우저에서 GPU 화면으로 엽니다.\n인터넷 전송 없음 · GPU 사용이 어려우면 기본 뷰어를 사용하세요.",wraplength=390).pack(anchor="w")
+        ttk.Label(viewer_box,text="3D 시뮬레이션은 프로그램 내부 GPU 창에서 엽니다.\nGPU 사용이 어려우면 기본 3D 뷰어를 사용하세요.",wraplength=390).pack(anchor="w")
         ttk.Button(viewer_box,text="기본 3D 뷰어 열기",command=lambda:self.open_3d(use_gpu=False)).pack(fill="x",pady=(6,0))
         update_box=ttk.LabelFrame(settings_tab,text="프로그램 업데이트",padding=12);update_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Label(update_box,text=f"현재 버전: V{APP_VERSION}\n새 버전은 다운로드 검증 후 기존 EXE를 자동 교체합니다.",justify="left").pack(anchor="w")
@@ -7874,8 +8061,8 @@ class App(tk.Tk):
         if not moves:
             messagebox.showerror("3D 시뮬레이션","표시할 G0/G1 이동을 찾지 못했습니다.");return
         if use_gpu:
-            try:open_gpu_viewer(moves,cfg);self.status.set("GPU 뷰어를 기본 브라우저에서 열었습니다. 인터넷 전송 없이 표시합니다.");return
-            except (OSError,ValueError) as exc:self.status.set(f"GPU 뷰어 열기 실패 · 기본 뷰어 사용: {exc}")
+            try:NativeToolpath3D(self,moves,cfg);self.status.set("프로그램 내부 GPU 시뮬레이션을 열었습니다.");return
+            except (OSError,RuntimeError,ValueError,tk.TclError) as exc:self.status.set(f"GPU 표시 초기화 실패 · 기본 3D 뷰어 사용: {exc}")
         Toolpath3D(self,moves,cfg)
 
 
