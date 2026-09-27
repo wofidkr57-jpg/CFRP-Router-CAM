@@ -1,6 +1,6 @@
 {
-  "version": "1.32",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.32/CFRP_Router_CAM.exe",
-  "sha256": "3b9a812caaca5c20ce2b794f5c27c765d2fea23318d185809000102ac37e5271",
-  "message": "포켓·카운터보어 치수 및 마모 보정을 추가했습니다. 경로를 재사용하는 오프라인 GPU 뷰어를 제공하며 설정에서 기존 3D 뷰어도 열 수 있습니다."
+  "version": "1.33",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.33/CFRP_Router_CAM.exe",
+  "sha256": "ed641193974ef6695148675c1a063a350749ea5611f13abd7005f5f074255b6b",
+  "message": "3D 시뮬레이션을 프로그램 내부 GPU 창으로 변경했습니다. 외부 브라우저를 열지 않으며 GPU 사용이 어려우면 기존 내부 뷰어로 전환합니다. 포켓 치수·마모 보정도 유지합니다."
 }
