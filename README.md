@@ -1,4 +1,8 @@
-## 다음 업데이트: 균등 거리 공구 교체와 다중 선택 가공
+## V1.31: 좌표계 미리보기·날짜 저장·균등 거리 공구 교체
+
+G53 기계좌표와 교체 매크로 내부 이동은 작업좌표 경로에 그리지 않습니다. 알 수 없는 위치에서 다음 작업점까지 임의로 연결하지 않고, 작업좌표가 다시 확인되면 표시를 재개하며 복귀 위치에 ◆를 표시합니다. 기계 이동은 깊이맵/화면 맞춤/재생 시간에서 제외됩니다. G53이 포함된 출력 NC는 그대로 유지됩니다. 기계좌표·매크로의 실제 동작을 검증하는 시뮬레이터는 아닙니다.
+
+처음 작업을 저장하면 `YYYYMMDD_작업.cfrpcam`을 기본 이름으로 제안하며 저장 위치는 사용자가 고릅니다. 이미 열거나 저장한 작업은 같은 파일에 저장됩니다. 원본 DXF/STEP은 덮어쓰지 않습니다.
 
 설정 탭의 `중간 공구 교체`에서 사용 여부와 공구당 최대 가공거리(기본 6.5m), 호출 매크로(기본 M881), 재프로빙 후 기계좌표 복귀 Z(기본 -70), 스핀들 안정 대기(기본 3초)를 설정합니다. 기본은 꺼짐입니다. 설정과 작업 파일에 저장되며 기존 작업 파일을 열면 꺼짐으로 복원됩니다.
 
@@ -168,7 +172,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.30**입니다.
+현재 최신 버전은 **V1.31**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -190,7 +194,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.30 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.30/CFRP_Router_CAM_V1.30_source.zip)
+- [V1.31 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.31/CFRP_Router_CAM_V1.31_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.

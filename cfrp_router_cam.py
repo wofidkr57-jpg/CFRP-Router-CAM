@@ -56,7 +56,7 @@ STEP_FACE_NORMAL_DOT = 0.999
 TOOL_WEAR_DEFAULT_LOSS_PER_10M = 0.079
 TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
-APP_VERSION = "1.30"
+APP_VERSION = "1.31"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -3459,11 +3459,18 @@ class Move3D:
     end: Tuple[float,float,float]
     rapid: bool
     seconds: float
+    restart: str = ""
 
 
-def parse_gcode_moves(code: str, rapid_feed: float = 3000.0) -> List[Move3D]:
-    """Parse the GRBL subset emitted by this app into timed 3D moves."""
+def parse_gcode_moves(code: str, rapid_feed: float = 3000.0,
+                      omitted:Optional[List[str]]=None) -> List[Move3D]:
+    """Work-coordinate preview only: unknown machine/macro travel breaks the path."""
     pos=[0.0,0.0,0.0]; motion=0; feed=800.0; moves=[]
+    known=[True,True,True];absolute=True;unit=1.0;work_system=54.0;arc_absolute=False
+    pending=""
+    def append_move(start,end,rapid,seconds):
+        nonlocal pending
+        moves.append(Move3D(tuple(start),tuple(end),rapid,seconds,pending));pending=""
     for raw in code.splitlines():
         # Both parenthesized and semicolon-to-EOL comments are common in CNC
         # programs.  Coordinates mentioned in a comment must never become a
@@ -3473,12 +3480,45 @@ def parse_gcode_moves(code: str, rapid_feed: float = 3000.0) -> List[Move3D]:
         if not line:continue
         words=re.findall(r"([A-Z])\s*(-?(?:\d+(?:\.\d*)?|\.\d+))",line)
         values={k:float(v) for k,v in words}
-        if "G" in values and int(values["G"]) in (0,1,2,3):motion=int(values["G"])
-        if "F" in values:feed=max(values["F"],EPS)
+        gcodes=[float(v) for k,v in words if k=="G"]
+        mcodes=[float(v) for k,v in words if k=="M"]
+        # A block may contain several G words; order must not hide G53 or G0.
+        for g in gcodes:
+            if g in (0,1,2,3):motion=int(g)
+            elif g==80:motion=None
+            elif g==90:absolute=True
+            elif g==91:absolute=False
+            elif g==90.1:arc_absolute=True
+            elif g==91.1:arc_absolute=False
+            elif g==20:unit=25.4
+            elif g==21:unit=1.0
+            elif g in (54,55,56,57,58,59,59.1,59.2,59.3) and g!=work_system:
+                work_system=g;known=[False]*3;pending="좌표계 변경"
+        if "F" in values:feed=max(values["F"]*unit,EPS)
+        macro=any(m==6 or m>=100 for m in mcodes)
+        reset=any(g in (10,28,28.1,30,30.1,52,92,92.1,92.2,92.3) or 38<=g<39 for g in gcodes)
+        if macro or reset or 53 in gcodes:
+            reason="공구 교체/매크로" if macro else "기계좌표/원점 이동"
+            if omitted is not None:omitted.append(reason)
+            if macro or reset:known=[False]*3
+            else:
+                for i,axis in enumerate("XYZ"):
+                    if axis in values:known[i]=False
+            if pending!="공구 교체/매크로":pending=reason
+            continue
         if not any(k in values for k in ("X","Y","Z")):continue
-        new=[values.get("X",pos[0]),values.get("Y",pos[1]),values.get("Z",pos[2])]
+        if motion is None:continue
+        was_known=all(known);new=list(pos)
+        for i,axis in enumerate("XYZ"):
+            if axis in values:
+                if absolute:new[i]=values[axis]*unit;known[i]=True
+                elif known[i]:new[i]+=values[axis]*unit
+        if not was_known or not all(known):
+            # Re-anchor from explicit work coordinates, never invent a return line.
+            pos=new;continue
         if motion in (2,3) and ("I" in values or "J" in values):
-            cx=pos[0]+values.get("I",0.0);cy=pos[1]+values.get("J",0.0)
+            cx=values.get("I",pos[0]/unit)*unit if arc_absolute else pos[0]+values.get("I",0.0)*unit
+            cy=values.get("J",pos[1]/unit)*unit if arc_absolute else pos[1]+values.get("J",0.0)*unit
             radius=math.hypot(pos[0]-cx,pos[1]-cy);a0=math.atan2(pos[1]-cy,pos[0]-cx);a1=math.atan2(new[1]-cy,new[0]-cx)
             sweep=a1-a0
             if motion==2:
@@ -3489,13 +3529,13 @@ def parse_gcode_moves(code: str, rapid_feed: float = 3000.0) -> List[Move3D]:
             for i in range(1,segments+1):
                 f=i/segments;q=[cx+radius*math.cos(a0+sweep*f),cy+radius*math.sin(a0+sweep*f),pos[2]+(new[2]-pos[2])*f]
                 length=math.sqrt(sum((q[j]-prev[j])**2 for j in range(3)))
-                if length>EPS:moves.append(Move3D(tuple(prev),tuple(q),False,length/feed*60.0))
+                if length>EPS:append_move(prev,q,False,length/feed*60.0)
                 prev=q
             pos=new;continue
         length=math.sqrt(sum((new[i]-pos[i])**2 for i in range(3)))
         if length>EPS:
             rate=rapid_feed if motion==0 else feed
-            moves.append(Move3D(tuple(pos),tuple(new),motion==0,length/rate*60.0))
+            append_move(pos,new,motion==0,length/rate*60.0)
         pos=new
     return moves
 
@@ -4346,6 +4386,8 @@ class Toolpath3D(tk.Toplevel):
             ttk.Button(bar,text=label,command=lambda v=view:self.set_view(*v)).pack(side="right",padx=2)
         self.info=DisplayStringVar(value="")
         ttk.Label(self,textvariable=self.info,padding=(7,2)).pack(fill="x")
+        if cfg.get("_preview_omitted"):
+            ttk.Label(self,text="작업좌표 경로만 표시 · 기계좌표/매크로 이동·시간 제외 · ◆ 가공 복귀",padding=(7,2)).pack(fill="x")
         self.timeline=tk.DoubleVar(value=0.0)
         self.slider=ttk.Scale(self,from_=0,to=max(self.total_time,.001),variable=self.timeline,command=self.scrub)
         self.slider.pack(fill="x",padx=7,pady=(0,4))
@@ -4560,6 +4602,9 @@ class Toolpath3D(tk.Toplevel):
                                          fill="#303841",dash=(3,4),width=1,
                                          tags=("path_rapid" if m.rapid else "path_cut",))
             self.move_items.append(item)
+            if m.restart:
+                x,y=self.project(m.start,b)
+                self.canvas.create_text(x,y,text="◆",fill="#00ffce",tags="restart_marker")
         self.depth_items=[None]*len(self.moves)
         self.depth_layer_tags={}
         legend="빨강: 절삭 · 회색 점선: 급속 · 노랑: 현재 공구" if path_mode else "왼쪽 색상: 제거 깊이 · 검정: 관통 · 밝은 노랑: 남은 탭"
@@ -5570,7 +5615,7 @@ class App(tk.Tk):
         path=getattr(self,"job_path","")
         if save_as or not path:
             path=filedialog.asksaveasfilename(title="작업 저장",defaultextension=".cfrpcam",
-                    filetypes=[("CarbonCAM 작업","*.cfrpcam")],initialfile=os.path.basename(path) if path else "작업.cfrpcam")
+                    filetypes=[("CarbonCAM 작업","*.cfrpcam")],initialfile=os.path.basename(path) if path else datetime.now().strftime("%Y%m%d_작업.cfrpcam"))
         if not path:return False
         try:
             data=self.job_document()
@@ -7688,8 +7733,9 @@ class App(tk.Tk):
             self.make_gcode()
             if not self.gcode or self.gcode_signature!=current_signature:return
         else:self.status.set("검사 완료된 G-code 재사용 · 시뮬레이션 바로 열기")
-        moves=[]
-        for _,code in self.gcode_parts or [("FULL",self.gcode)]:moves.extend(parse_gcode_moves(code))
+        moves=[];omitted=[]
+        for _,code in self.gcode_parts or [("FULL",self.gcode)]:moves.extend(parse_gcode_moves(code,omitted=omitted))
+        cfg["_preview_omitted"]=omitted
         if not moves:
             messagebox.showerror("3D 시뮬레이션","표시할 G0/G1 이동을 찾지 못했습니다.");return
         Toolpath3D(self,moves,cfg)

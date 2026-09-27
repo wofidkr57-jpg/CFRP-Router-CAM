@@ -1,5 +1,6 @@
 """Portable job roundtrip, failed open/save, and cutting-distance consent."""
 import os,sys,tempfile,json,copy
+from datetime import datetime
 from pathlib import Path
 from unittest import mock
 sys.path.insert(0,str(Path(__file__).resolve().parents[1]))
@@ -19,7 +20,13 @@ with tempfile.TemporaryDirectory() as tmp:
         app.onion_start_text.configure(state='normal');app.onion_start_text.insert('end','(FINISH START)')
         expected=app.job_snapshot();code=cam.generate_gcode(app.contours,app.config())
         path=str(Path(tmp)/'roundtrip.cfrpcam')
-        with mock.patch.object(cam.filedialog,'asksaveasfilename',return_value=path):assert app.save_job()
+        with mock.patch.object(cam,'datetime') as clock, mock.patch.object(cam.filedialog,'asksaveasfilename',return_value=path) as dialog:
+            clock.now.return_value=datetime(2026,9,27)
+            assert app.save_job()
+            assert dialog.call_args.kwargs['initialfile']=='20260927_작업.cfrpcam'
+        with mock.patch.object(cam.filedialog,'asksaveasfilename') as dialog:
+            assert app.save_job()
+            assert not dialog.called
         document=json.loads(Path(path).read_text(encoding='utf-8'))
         # The schema also restores projected pockets without the source STEP.
         pocket=cam.Contour([(0.,0.),(20.,0.),(20.,20.)],role='pocket',operation='pocket',pocket_holes=[[(1.,1.),(2.,1.),(2.,2.)]],pocket_max_depth=1.)
