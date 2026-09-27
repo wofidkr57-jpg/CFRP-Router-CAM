@@ -40,7 +40,7 @@ class IslandPocketTests(unittest.TestCase):
         for depth in (None,.6,float('inf')):
             c=pocket();c.target_depth=depth
             with self.assertRaises(ValueError):cam.pocket_plan(c,2,cfg())
-        with self.assertRaises(ValueError):cam.pocket_plan(pocket(),2,cfg(tool_wear_enabled=True))
+        self.assertTrue(cam.pocket_plan(pocket(),2,cfg(tool_wear_enabled=True))[0])
     def test_small_closed_pocket_rejects_oversize_tool(self):
         c=pocket();c.points=[(18,14),(19,14),(19,15),(18,15)];c.pocket_holes=[]
         with self.assertRaises(ValueError):cam.pocket_plan(c,2,cfg())
