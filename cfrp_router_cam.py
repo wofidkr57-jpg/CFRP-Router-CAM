@@ -39,6 +39,9 @@ import subprocess
 import sys
 import threading
 import time
+import tempfile
+import webbrowser
+from pathlib import Path
 import urllib.request
 import multiprocessing as mp
 import tkinter as tk
@@ -94,7 +97,10 @@ _UI_EN_EXACT = {
     "두께·피드 숫자를 입력하세요.": "Enter numeric thickness and feed.",
     "내경 치수 보정 (mm)": "Internal size correction (mm)",
     "외경 치수 보정 (mm)": "External size correction (mm)",
-    "치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 제외": "Size: + enlarge / - shrink; diameter/width; profiles only",
+    "치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 포함": "Size: + enlarge / - shrink; diameter/width; includes pockets",
+    "3D 뷰어": "3D viewer",
+    "기본 3D 뷰어 열기": "Open classic 3D viewer",
+    "3D 시뮬레이션은 기본 브라우저에서 GPU 화면으로 엽니다.\n인터넷 전송 없음 · GPU 사용이 어려우면 기본 뷰어를 사용하세요.": "3D simulation opens a GPU view in your default browser.\nNo uploads; use the classic viewer if GPU is unavailable.",
     "촘촘한 배열 (실제 윤곽 / 180° 엇갈림)": "Contour nesting (180 degree interlocking)",
     "촘촘한 모드: 파츠별 외곽 여유 합산 · 빈칸은 공통 간격의 절반": "Contour mode: add part offsets; blank = half the common gap",
     "외곽 여유 mm": "Offset mm",
@@ -1701,10 +1707,39 @@ def cut_xyz_lines(points:Sequence[Point3],feed:float,tolerance:float) -> List[st
     return out
 
 
-def pocket_free_area(c:Contour,tool_d:float):
+def pocket_target_area(c:Contour,tool_d:float,cfg:Optional[dict]=None):
+    """Correct cavity walls and protected islands independently; stock edges stay open."""
+    from shapely.geometry import Polygon
+    from shapely import union_all
+    cfg=cfg or {};stock=Polygon(c.pocket_stock);area=Polygon(c.points,c.pocket_holes)
+    if not area.is_valid or area.is_empty or not stock.is_valid:
+        raise ValueError("Invalid island pocket boundary.")
+    inner=float(cfg.get("inner_size_adjust",0));outer=float(cfg.get("outer_size_adjust",0))
+    if any(not math.isfinite(v) or abs(v)>=tool_d for v in (inner,outer)):
+        raise ValueError("포켓 치수 보정의 절댓값은 가정 공구 지름보다 작아야 합니다.")
+    if abs(inner)<EPS and abs(outer)<EPS:return area
+    margin=tool_d*2+abs(inner)+abs(outer)
+    outside=stock.buffer(margin,quad_segs=32).difference(stock)
+    boundary=Polygon(c.points)
+    # Do not turn the disconnected outside-stock ring into a new pocket fringe.
+    connected=union_all([p for p in polygon_parts(boundary.union(outside))
+                         if p.intersection(boundary).area>EPS])
+    cavity=connected.buffer(inner/2,quad_segs=32)
+    if not stock.is_empty:cavity=cavity.intersection(stock)
+    islands=[]
+    for ring in c.pocket_holes:
+        island=Polygon(ring).buffer(outer/2,quad_segs=32)
+        if island.is_empty:raise ValueError("외경 보정 후 포켓 돌출부가 사라집니다. 보정값을 줄이세요.")
+        islands.append(island)
+    result=cavity.difference(union_all(islands)) if islands else cavity
+    if result.is_empty or not result.is_valid:raise ValueError("치수 보정 후 포켓 영역이 사라집니다.")
+    return result
+
+
+def pocket_free_area(c:Contour,tool_d:float,cfg:Optional[dict]=None):
     from shapely.geometry import Polygon
     stock=Polygon(c.pocket_stock)
-    return Polygon(c.points,c.pocket_holes).union(stock.buffer(tool_d,quad_segs=32).difference(stock))
+    return pocket_target_area(c,tool_d,cfg).union(stock.buffer(tool_d,quad_segs=32).difference(stock))
 
 
 def pocket_link_schedule(c:Contour,rough,finish,tool_d:float,cfg:dict):
@@ -1715,7 +1750,7 @@ def pocket_link_schedule(c:Contour,rough,finish,tool_d:float,cfg:dict):
     """
     from shapely.geometry import LineString,Polygon,Point as ShapelyPoint
     from shapely.ops import nearest_points
-    free=pocket_free_area(c,tool_d);r=tool_d/2
+    free=pocket_free_area(c,tool_d,cfg);r=tool_d/2
     max_step=tool_d*float(cfg.get("pocket_stepover",40))/100+.0001
     schedule=[];previous=None;cleared=Polygon()
     for label,paths in (("rough",rough),("finish",finish)):
@@ -1783,8 +1818,6 @@ def validate_pocket(c:Contour,cfg:dict) -> None:
                               ("pocket_finish",.1,0,1000)):
         value=float(cfg.get(key,default))
         if not math.isfinite(value) or not lo<=value<=hi:raise ValueError(f"Invalid {key}.")
-    if cfg.get("tool_wear_enabled"):
-        raise ValueError("Disable tool wear compensation for island pocket jobs in V1.13.")
 
 
 def pocket_plan(c:Contour,tool_d:float,cfg:dict):
@@ -1793,7 +1826,7 @@ def pocket_plan(c:Contour,tool_d:float,cfg:dict):
     from shapely import union_all
     validate_pocket(c,cfg)
     if not math.isfinite(tool_d) or tool_d<=0:raise ValueError("Invalid pocket tool diameter.")
-    area=Polygon(c.points,c.pocket_holes);stock=Polygon(c.pocket_stock)
+    area=pocket_target_area(c,tool_d,cfg);stock=Polygon(c.pocket_stock)
     if not area.is_valid or area.is_empty or not stock.is_valid:
         raise ValueError("Invalid island pocket boundary.")
     r=tool_d/2;guard=.001+r*.0013
@@ -1834,7 +1867,7 @@ def pocket_plan(c:Contour,tool_d:float,cfg:dict):
     return rough,finish,residual
 
 
-def pocket_job_issues(contours:Sequence[Contour],cfg:dict) -> List[str]:
+def pocket_job_issues(contours:Sequence[Contour],cfg:dict,diameters:Optional[dict]=None) -> List[str]:
     """Check pocket sweeps against OTHER placed bodies, including disabled profiles."""
     from shapely.geometry import Polygon,LineString
     from shapely import union_all
@@ -1842,12 +1875,13 @@ def pocket_job_issues(contours:Sequence[Contour],cfg:dict) -> List[str]:
     for c in contours:
         if not c.enabled or c.operation!="pocket":continue
         try:
-            rough,finish,_=pocket_plan(c,cfg["tool_d"],cfg)
+            diameter=cfg["tool_d"] if diameters is None else diameters.get(id(c),cfg["tool_d"])
+            rough,finish,_=pocket_plan(c,diameter,cfg)
             stock=Polygon(c.pocket_stock)
-            schedule,level_link=pocket_link_schedule(c,rough,finish,cfg["tool_d"],cfg)
+            schedule,level_link=pocket_link_schedule(c,rough,finish,diameter,cfg)
             lines=[p+[p[0]] for _,p,_ in schedule]+[link for _,_,link in schedule if link]
             if level_link:lines.append(level_link)
-            swept=union_all([LineString(p).buffer(cfg["tool_d"]/2,quad_segs=32) for p in lines])
+            swept=union_all([LineString(p).buffer(diameter/2,quad_segs=32) for p in lines])
             for other in contours:
                 if other.operation=="pocket" or not other.closed or other.role!="outer":continue
                 material=Polygon(other.points)
@@ -2699,7 +2733,6 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
 def contour_wear_plan(c:Contour,cfg:dict,stock:float,extra:float,distance_before_m:float
                       )->Tuple[float,Tuple[float,float,float]]:
     """Choose one stable diameter per contour using its estimated distance midpoint."""
-    if c.operation=="pocket":return cfg["tool_d"],contour_cut_metrics(c,cfg,stock,extra,cfg["tool_d"])
     start_d=effective_tool_diameter(cfg,distance_before_m)
     first=contour_cut_metrics(c,cfg,stock,extra,start_d)
     midpoint_d=effective_tool_diameter(cfg,distance_before_m+first[0]/2000.0)
@@ -3104,7 +3137,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(XY_ORIGIN_SOURCE_Y_MM: {fmt(float(origin[1]))})",
         f"(INNER_SIZE_ADJUST_MM: {fmt(float(cfg.get('inner_size_adjust',0)))})",
         f"(OUTER_SIZE_ADJUST_MM: {fmt(float(cfg.get('outer_size_adjust',0)))})",
-        "(SIZE_ADJUST: DIAMETER/WIDTH; POSITIVE ENLARGES; PROFILES ONLY)",
+        "(SIZE_ADJUST: DIAMETER/WIDTH; POSITIVE ENLARGES; POCKET CAVITY=INNER / ISLAND=OUTER)",
         f"(PATH_TOLERANCE_MM: {fmt(path_tolerance(cfg))})",
         f"(POCKET_STAY_DOWN: {nc_yes_no(cfg.get('pocket_stay_down',True))})",
         f"(SAFE_Z_AUTO_STOCK_X2: {nc_yes_no(cfg.get('safe_z_auto',False))})",
@@ -3193,8 +3226,6 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     contours=stage_contours(contours,cfg)
     tolerance=path_tolerance(cfg)
     validate_preflight(cfg)
-    pocket_errors=pocket_job_issues(contours,cfg)
-    if pocket_errors:raise ValueError("\n".join(pocket_errors))
     safe_z, stock, extra = cfg["safe_z"], cfg["stock"], cfg["extra"]
     bottom_zero = cfg.get("z_origin") == "Bottom"
     safe_machine_z = stock + safe_z if bottom_zero else safe_z
@@ -3210,6 +3241,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     ordered=ordered_contours(active,rapid_optimize,(origin_x,origin_y))
     if stage=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
     change_indices,wear_plan,tool_loads=tool_replacement_plan(ordered,cfg,stock,extra)
+    pocket_errors=pocket_job_issues(contours,cfg,{id(c):d for c,(d,_) in zip(ordered,wear_plan)})
+    if pocket_errors:raise ValueError("\n".join(pocket_errors))
     if cfg.get("tool_change_enabled"):cfg["_tool_change_last_load"]=tool_loads[-1] if tool_loads else 0
     macros = {"{RPM}": str(int(cfg["rpm"])), "{SAFE_Z}": fmt(safe_machine_z),
               "{FEED}": fmt(cfg["feed"]), "{PLUNGE}": fmt(cfg["plunge"])}
@@ -3346,6 +3379,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         if c.operation=="pocket":
             rough,finish,residual=pocket_plan(c,effective_d,cfg)
             out.append(f"(ISLAND POCKET {ci}: depth={fmt(target)}, residual_mm2={fmt(residual)})")
+            out.append(f"(POCKET TOOL D: {fmt(effective_d)}, CAVITY SIZE: {fmt(float(cfg.get('inner_size_adjust',0)))}, ISLAND SIZE: {fmt(float(cfg.get('outer_size_adjust',0)))})")
             count=max(1,math.ceil(target/float(cfg.get("pocket_stepdown",.25))))
             schedule,level_link=pocket_link_schedule(c,rough,finish,effective_d,cfg)
             for level in range(1,count+1):
@@ -4350,6 +4384,104 @@ class StepSetupDialog(tk.Toplevel):
 
 
 
+GPU_VIEWER_HTML = r'''<!doctype html>
+<html lang="ko"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1">
+<meta http-equiv="Content-Security-Policy" content="default-src 'none'; script-src 'unsafe-inline'; style-src 'unsafe-inline'; connect-src 'none'">
+<title>CarbonCAM · GPU 공구 경로</title>
+<style>
+*{box-sizing:border-box}body{margin:0;background:#0b1220;color:#dce5ef;font:14px system-ui;display:flex;flex-direction:column;height:100vh}
+header{padding:12px 18px;background:#101d30;display:flex;gap:14px;align-items:center;flex-wrap:wrap}strong{color:#35e2ba}button,select{background:#24374e;color:inherit;border:1px solid #40546c;border-radius:5px;padding:7px 12px;cursor:pointer}button:hover{background:#36516d}label{display:flex;gap:6px;align-items:center}.grow{flex:1}#stage{position:relative;flex:1;min-height:150px}canvas{display:block;width:100%;height:100%;touch-action:none}#error{display:none;position:absolute;inset:25%;padding:24px;background:#3d1722;white-space:pre-wrap}footer{padding:10px 18px;background:#101d30;line-height:1.8}#seek{width:100%;accent-color:#35e2ba}small{color:#a5b5c8}#legend{position:absolute;top:12px;left:16px;pointer-events:none;color:#b8c8d9}.keys{color:#8fa4bc}
+</style>
+<header><strong>CarbonCAM · GPU 뷰어</strong><select id="mode" aria-label="표시 방식"><option value="line">공구경로</option><option value="depth">깊이맵</option></select><label><input id="rapid" type="checkbox" checked>급속 표시</label><button id="play">▶ 재생</button><button id="stop">처음</button><label>속도<select id="speed"><option>1</option><option selected>20</option><option>50</option><option>100</option></select></label><span class="grow"></span><button id="iso">등각</button><button id="top">Top</button><button id="front">Front</button><button id="fit">화면 맞춤</button></header>
+<div id="stage"><canvas id="view" aria-label="3D 공구 경로"></canvas><div id="legend"></div><div id="error" role="alert"></div></div>
+<footer><input id="seek" aria-label="재생 위치" type="range" min="0" step="0.001"><div id="status" role="status">경로 준비 중…</div><small>인터넷 전송 없이 이 파일 안에서 표시합니다. 기계좌표·매크로 내부 이동과 시간은 제외합니다. 깊이맵은 공구 폭을 이용한 근사 표시입니다.</small><div class="keys">왼쪽 드래그: 회전 · 오른쪽/가운데/Shift 드래그: 이동 · 휠: 확대 · Home: 화면 맞춤 · Space: 재생/정지 · ◆ 복귀점</div></footer>
+<script id="data" type="application/json">__DATA__</script><script>
+'use strict';
+const D=JSON.parse(document.getElementById('data').textContent),$=id=>document.getElementById(id),canvas=$('view');
+function fail(message){$('error').style.display='block';$('error').textContent=message+'\nCarbonCAM 설정의 기본 3D 뷰어를 사용할 수 있습니다.';canvas.dataset.ready='error';}
+try {
+const gl=canvas.getContext('webgl',{antialias:true,alpha:false});if(!gl)throw Error('이 브라우저에서 GPU 화면을 열 수 없습니다.');
+const vs=`attribute vec3 a_pos;attribute float a_time;attribute float a_depth;attribute float a_kind;uniform mat4 u_matrix;uniform float u_stock;varying float v_time;varying float v_depth;varying float v_kind;void main(){gl_Position=u_matrix*vec4(a_pos,1.0);if(a_kind==2.0)gl_Position.z=-min(a_depth/u_stock,1.0)*0.8;gl_PointSize=a_kind==4.0?13.0:8.0;v_time=a_time;v_depth=a_depth;v_kind=a_kind;}`;
+const fs=`precision highp float;uniform float u_elapsed;uniform float u_stock;uniform float u_rapid;varying float v_time;varying float v_depth;varying float v_kind;void main(){
+ if(v_kind==1.0 && (u_rapid<0.5 || mod(gl_FragCoord.x+gl_FragCoord.y,10.0)<4.0))discard;
+ vec3 color=vec3(.9,.28,.22);if(v_kind<1.5 && v_time>u_elapsed)color=vec3(.23,.3,.39);else if(v_kind==1.0)color=vec3(.58,.66,.76);
+ if(v_kind==2.0){if(v_time>u_elapsed)discard;float d=min(v_depth/u_stock,1.0);color=mix(vec3(.0,.85,1.),vec3(.92,.24,.7),d);if(d>=.999)color=vec3(.02,.025,.03);}
+ if(v_kind==3.0)color=vec3(.25,.37,.46);
+ if(v_kind==4.0){if(length(gl_PointCoord-vec2(.5))>.5)discard;color=vec3(1.,.88,.15);}
+ if(v_kind==5.0){if(abs(gl_PointCoord.x-.5)+abs(gl_PointCoord.y-.5)>.5)discard;color=vec3(.0,1.,.78);}
+ gl_FragColor=vec4(color,1.);}`;
+function shader(type,source){const s=gl.createShader(type);gl.shaderSource(s,source);gl.compileShader(s);if(!gl.getShaderParameter(s,gl.COMPILE_STATUS))throw Error(gl.getShaderInfoLog(s));return s;}
+const program=gl.createProgram();gl.attachShader(program,shader(gl.VERTEX_SHADER,vs));gl.attachShader(program,shader(gl.FRAGMENT_SHADER,fs));gl.linkProgram(program);if(!gl.getProgramParameter(program,gl.LINK_STATUS))throw Error(gl.getProgramInfoLog(program));gl.useProgram(program);
+const attrs=['a_pos','a_time','a_depth','a_kind'].map(n=>gl.getAttribLocation(program,n));
+const uniforms=Object.fromEntries(['u_matrix','u_elapsed','u_stock','u_rapid'].map(n=>[n,gl.getUniformLocation(program,n)]));
+let uploads=0,drawCalls=0;function buffer(data,dynamic=false){const b=gl.createBuffer();gl.bindBuffer(gl.ARRAY_BUFFER,b);gl.bufferData(gl.ARRAY_BUFFER,data,dynamic?gl.DYNAMIC_DRAW:gl.STATIC_DRAW);uploads++;return {b,n:data.length/6};}
+function render(b,mode){if(!b.n)return;gl.bindBuffer(gl.ARRAY_BUFFER,b.b);for(let i=0;i<4;i++){gl.enableVertexAttribArray(attrs[i]);gl.vertexAttribPointer(attrs[i],i===0?3:1,gl.FLOAT,false,24,i===0?0:(i+2)*4);}gl.drawArrays(mode,0,b.n);drawCalls++;}
+const count=D.moves.length/9,ends=new Float64Array(count),line=new Float32Array(count*12),depth=new Float32Array(count*36),markers=[];
+let total=0,lp=0,dp=0;const lo=[Infinity,Infinity,Infinity],hi=[-Infinity,-Infinity,-Infinity];
+function vertex(array,offset,p,t,d,k){array.set([p[0],p[1],p[2],t,d,k],offset);return offset+6;}
+for(let i=0;i<count;i++){
+ const j=i*9,a=D.moves.slice(j,j+3),b=D.moves.slice(j+3,j+6),t=total;total+=D.moves[j+6];ends[i]=total;const rapid=D.moves[j+7];
+ for(const p of [a,b])for(let k=0;k<3;k++){lo[k]=Math.min(lo[k],p[k]);hi[k]=Math.max(hi[k],p[k]);}
+ lp=vertex(line,lp,a,t,0,rapid);lp=vertex(line,lp,b,total,0,rapid);
+ if(D.moves[j+8])markers.push(...a,t,0,5);
+ const dx=b[0]-a[0],dy=b[1]-a[1],length=Math.hypot(dx,dy),da=Math.max(0,D.top-a[2]),db=Math.max(0,D.top-b[2]);
+ if(!rapid && length>1e-7 && Math.max(da,db)>1e-7){
+  const nx=-dy/length*D.diameter/2,ny=dx/length*D.diameter/2;
+  const p=[a[0]+nx,a[1]+ny,D.top],q=[a[0]-nx,a[1]-ny,D.top],r=[b[0]+nx,b[1]+ny,D.top],s=[b[0]-nx,b[1]-ny,D.top];
+  for(const [v,time,d] of [[p,t,da],[q,t,da],[r,total,db],[r,total,db],[q,t,da],[s,total,db]])dp=vertex(depth,dp,v,time,d,2);
+ }
+}
+const lines=buffer(line),depths=buffer(depth.subarray(0,dp)),restarts=buffer(new Float32Array(markers)),tool=buffer(new Float32Array(6),true);
+const edge=[],corners=[[lo[0],lo[1],D.top],[hi[0],lo[1],D.top],[hi[0],hi[1],D.top],[lo[0],hi[1],D.top]];
+for(let i=0;i<4;i++){const a=corners[i],b=corners[(i+1)%4],c=[...a];c[2]=D.top-D.stock;edge.push(...a,0,0,3,...b,0,0,3,...a,0,0,3,...c,0,0,3);}
+const stock=buffer(new Float32Array(edge)),center=lo.map((v,i)=>(v+hi[i])/2),span=Math.max(1,...hi.map((v,i)=>v-lo[i]));
+let az=-.61,el=.61,zoom=1,pan=[0,0],elapsed=total,playing=false,last=0,frame=0,drag=null;
+$('seek').max=total;$('seek').value=elapsed;canvas.dataset.ready='true';canvas.dataset.moves=count;canvas.dataset.uploads=uploads;canvas.dataset.depthVertices=depths.n;canvas.dataset.bounds=JSON.stringify([...lo,...hi]);
+function matrix(){const ca=Math.cos(az),sa=Math.sin(az),ce=Math.cos(el),se=Math.sin(el),w=canvas.width,h=canvas.height,s=1.6/span*zoom,sx=s*Math.min(w,h)/w,sy=s*Math.min(w,h)/h,sz=1/(span*5),x=center[0],y=center[1],z=center[2];return new Float32Array([ca*sx,sa*ce*sy,sa*se*sz,0,-sa*sx,ca*ce*sy,ca*se*sz,0,0,-se*sy,ce*sz,0,pan[0]-(ca*x-sa*y)*sx,pan[1]-(sa*ce*x+ca*ce*y-se*z)*sy,-(sa*se*x+ca*se*y+ce*z)*sz,1]);}
+function current(){let left=0,right=count-1;while(left<right){const mid=(left+right)>>1;if(ends[mid]<elapsed)left=mid+1;else right=mid;}const j=left*9,t0=left?ends[left-1]:0,f=Math.min(1,Math.max(0,(elapsed-t0)/Math.max(ends[left]-t0,1e-9)));return [0,1,2].map(k=>D.moves[j+k]+(D.moves[j+k+3]-D.moves[j+k])*f);}
+function draw(now){frame=0;if(playing){if(last)elapsed=Math.min(total,elapsed+(now-last)/1000*Number($('speed').value));last=now;if(elapsed>=total){playing=false;$('play').textContent='▶ 재생';}}else last=0;
+ const ratio=Math.min(devicePixelRatio||1,2),w=Math.max(1,Math.round(canvas.clientWidth*ratio)),h=Math.max(1,Math.round(canvas.clientHeight*ratio));if(canvas.width!==w||canvas.height!==h){canvas.width=w;canvas.height=h;}gl.viewport(0,0,w,h);gl.clearColor(.035,.065,.10,1);gl.clear(gl.COLOR_BUFFER_BIT|gl.DEPTH_BUFFER_BIT);gl.useProgram(program);gl.uniformMatrix4fv(uniforms.u_matrix,false,matrix());gl.uniform1f(uniforms.u_elapsed,elapsed);gl.uniform1f(uniforms.u_stock,D.stock);gl.uniform1f(uniforms.u_rapid,$('rapid').checked?1:0);drawCalls=0;
+ gl.disable(gl.DEPTH_TEST);render(stock,gl.LINES);const isDepth=$('mode').value==='depth';if(isDepth){gl.enable(gl.DEPTH_TEST);gl.depthFunc(gl.LEQUAL);render(depths,gl.TRIANGLES);gl.disable(gl.DEPTH_TEST);}else render(lines,gl.LINES);
+ render(restarts,gl.POINTS);const p=current();gl.bindBuffer(gl.ARRAY_BUFFER,tool.b);gl.bufferSubData(gl.ARRAY_BUFFER,0,new Float32Array([...p,elapsed,0,4]));render(tool,gl.POINTS);
+ $('seek').value=elapsed;$('status').textContent=`이동 ${count.toLocaleString()}개 · ${elapsed.toFixed(1)} / ${total.toFixed(1)}초 · X ${p[0].toFixed(3)}  Y ${p[1].toFixed(3)}  Z ${p[2].toFixed(3)}`;
+ $('legend').textContent=isDepth?'청록 → 자주: 깊이 증가 · 검정: 관통 · 밝게 남은 구간: 탭':'빨강: 절삭 · 회색 점선: 급속 · 노랑: 현재 공구';canvas.dataset.drawCalls=drawCalls;canvas.dataset.drawMs=(performance.now()-now).toFixed(2);canvas.dataset.frame=Number(canvas.dataset.frame||0)+1;
+ if(playing)request();}
+function request(){if(!frame)frame=requestAnimationFrame(draw);}
+function fit(){zoom=1;pan=[0,0];request();}
+$('play').onclick=()=>{playing=!playing;if(playing && elapsed>=total)elapsed=0;last=0;$('play').textContent=playing?'⏸ 일시정지':'▶ 재생';request();};
+$('stop').onclick=()=>{playing=false;elapsed=0;$('play').textContent='▶ 재생';request();};
+$('seek').oninput=()=>{playing=false;elapsed=Number($('seek').value);$('play').textContent='▶ 재생';request();};
+$('mode').onchange=()=>{$('rapid').disabled=$('mode').value==='depth';request();};$('rapid').onchange=request;$('fit').onclick=fit;
+$('iso').onclick=()=>{az=-.61;el=.61;fit();};$('top').onclick=()=>{az=0;el=0;fit();};$('front').onclick=()=>{az=0;el=Math.PI/2;fit();};
+canvas.oncontextmenu=e=>e.preventDefault();canvas.onpointerdown=e=>{canvas.setPointerCapture(e.pointerId);drag={x:e.clientX,y:e.clientY,pan:e.button!==0||e.shiftKey};};
+canvas.onpointermove=e=>{if(!drag)return;const dx=e.clientX-drag.x,dy=e.clientY-drag.y;if(drag.pan){pan[0]+=2*dx/canvas.clientWidth;pan[1]-=2*dy/canvas.clientHeight;}else{az+=dx*.008;el=Math.max(-Math.PI/2,Math.min(Math.PI/2,el+dy*.008));}drag.x=e.clientX;drag.y=e.clientY;request();};canvas.onpointerup=canvas.onpointercancel=()=>{drag=null;};
+canvas.addEventListener('wheel',e=>{e.preventDefault();const old=zoom;zoom=Math.max(.05,Math.min(100,zoom*Math.exp(-e.deltaY*.001)));const r=canvas.getBoundingClientRect(),x=2*(e.clientX-r.left)/r.width-1,y=1-2*(e.clientY-r.top)/r.height;pan=[x-(x-pan[0])*zoom/old,y-(y-pan[1])*zoom/old];request();},{passive:false});
+window.onresize=request;window.onkeydown=e=>{if(['INPUT','SELECT','BUTTON'].includes(e.target.tagName))return;if(e.code==='Space'){e.preventDefault();$('play').click();}if(e.code==='Home'){e.preventDefault();fit();}};
+canvas.addEventListener('webglcontextlost',e=>{e.preventDefault();playing=false;fail('GPU 연결이 중단됐습니다. 페이지를 새로고침하세요.');});request();
+}catch(e){fail(String(e.message||e));}
+</script></html>'''
+
+
+def gpu_viewer_html(moves:Sequence[Move3D],cfg:dict)->str:
+    """Self-contained offline viewer; no external scripts, uploads or local server."""
+    if not moves:raise ValueError("표시할 가공 경로가 없습니다.")
+    stock=float(cfg["stock"]);diameter=float(cfg["tool_d"])
+    if not all(math.isfinite(v) and v>0 for v in (stock,diameter)):raise ValueError("Invalid viewer dimensions")
+    packed=[]
+    for m in moves:
+        if not all(math.isfinite(v) for v in (*m.start,*m.end,m.seconds)) or m.seconds<0:raise ValueError("Invalid viewer move")
+        packed.extend((*m.start,*m.end,m.seconds,int(m.rapid),int(bool(m.restart))))
+    payload={"moves":packed,"stock":stock,"diameter":diameter,"top":stock if cfg.get("z_origin")=="Bottom" else 0}
+    return GPU_VIEWER_HTML.replace("__DATA__",json.dumps(payload,separators=(",",":"),allow_nan=False))
+
+
+def open_gpu_viewer(moves:Sequence[Move3D],cfg:dict)->str:
+    folder=Path(tempfile.mkdtemp(prefix="CarbonCAM_viewer_"));path=folder/"toolpath.html"
+    path.write_text(gpu_viewer_html(moves,cfg),encoding="utf-8")
+    if not webbrowser.open(path.as_uri(),new=2):raise OSError("기본 브라우저를 열지 못했습니다.")
+    return str(path)
+
+
 class Toolpath3D(tk.Toplevel):
     # Glasbey-style order: adjacent depths are deliberately far apart in hue.
     # Additional depths reuse these hues with light/dark variants.
@@ -4953,7 +5085,7 @@ class App(tk.Tk):
         self.vars["stock"].trace_add("write",self.refresh_feed_recommendation)
         self.vars["feed"].trace_add("write",self.refresh_feed_recommendation)
         self.refresh_feed_recommendation()
-        ttk.Label(controls,text="치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 제외").grid(row=r,columnspan=2,sticky="w");r+=1
+        ttk.Label(controls,text="치수 보정: + 확대 / − 축소 · 지름/폭 기준 · 포켓 포함").grid(row=r,columnspan=2,sticky="w");r+=1
         self.var("safe_z_auto",True,tk.BooleanVar)
         ttk.Checkbutton(controls,text="안전 Z 자동: 판 두께 × 2",variable=self.vars["safe_z_auto"]).grid(row=r,columnspan=2,sticky="w");r+=1
         self.vars["stock"].trace_add("write",self.sync_safe_z)
@@ -5290,6 +5422,9 @@ class App(tk.Tk):
         ttk.Spinbox(font_box,from_=8,to=20,width=8,textvariable=self.font_size_var).grid(row=0,column=1,padx=8)
         ttk.Button(font_box,text="글자 크기 적용",command=self.apply_font_size).grid(row=1,column=0,columnspan=2,sticky="ew",pady=(8,0))
         ttk.Label(settings_tab,text="버튼, 입력칸, 윤곽 목록, G-code 미리보기에 적용됩니다.",padding=10).pack(anchor="w")
+        viewer_box=ttk.LabelFrame(settings_tab,text="3D 뷰어",padding=10);viewer_box.pack(fill="x",padx=10,pady=(0,10))
+        ttk.Label(viewer_box,text="3D 시뮬레이션은 기본 브라우저에서 GPU 화면으로 엽니다.\n인터넷 전송 없음 · GPU 사용이 어려우면 기본 뷰어를 사용하세요.",wraplength=390).pack(anchor="w")
+        ttk.Button(viewer_box,text="기본 3D 뷰어 열기",command=lambda:self.open_3d(use_gpu=False)).pack(fill="x",pady=(6,0))
         update_box=ttk.LabelFrame(settings_tab,text="프로그램 업데이트",padding=12);update_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Label(update_box,text=f"현재 버전: V{APP_VERSION}\n새 버전은 다운로드 검증 후 기존 EXE를 자동 교체합니다.",justify="left").pack(anchor="w")
         ttk.Button(update_box,text="지금 업데이트 확인",command=lambda:self.start_update_check(manual=True)).pack(fill="x",pady=(8,0))
@@ -7726,7 +7861,7 @@ class App(tk.Tk):
                 self.status.set(f"저장 완료: {fn}")
                 messagebox.showinfo("저장 완료",ui_text("G코드 저장이 완료되었습니다.")+f"\n\n{fn}",parent=self)
 
-    def open_3d(self):
+    def open_3d(self,use_gpu=True):
         try:cfg=self.config();current_signature=self.job_signature(cfg)
         except Exception as exc:messagebox.showerror("설정 오류",str(exc));return
         if not self.gcode or self.gcode_signature!=current_signature:
@@ -7738,6 +7873,9 @@ class App(tk.Tk):
         cfg["_preview_omitted"]=omitted
         if not moves:
             messagebox.showerror("3D 시뮬레이션","표시할 G0/G1 이동을 찾지 못했습니다.");return
+        if use_gpu:
+            try:open_gpu_viewer(moves,cfg);self.status.set("GPU 뷰어를 기본 브라우저에서 열었습니다. 인터넷 전송 없이 표시합니다.");return
+            except (OSError,ValueError) as exc:self.status.set(f"GPU 뷰어 열기 실패 · 기본 뷰어 사용: {exc}")
         Toolpath3D(self,moves,cfg)
 
 
