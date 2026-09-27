@@ -99,6 +99,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_gpu_viewer.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
+          python verification/gui_smoke_native_gpu.py
+          if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_shortcuts.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_outer_order.py
@@ -167,7 +169,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "포켓·카운터보어 치수 및 마모 보정을 추가했습니다. 경로를 재사용하는 오프라인 GPU 뷰어를 제공하며 설정에서 기존 3D 뷰어도 열 수 있습니다."
+            message = "3D 시뮬레이션을 프로그램 내부 GPU 창으로 변경했습니다. 외부 브라우저를 열지 않으며 GPU 사용이 어려우면 기존 내부 뷰어로 전환합니다. 포켓 치수·마모 보정도 유지합니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
