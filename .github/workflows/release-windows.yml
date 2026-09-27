@@ -93,6 +93,10 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_job_file.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
+          python verification/gui_smoke_tool_replacement.py
+          if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
+          python verification/gui_smoke_preview_coordinates.py
+          if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_shortcuts.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_outer_order.py
@@ -161,7 +165,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "작업 저장/열기(Ctrl+S/O), 외곽 순서 드래그 삽입선과 한 칸 이동을 추가했습니다. 10m 초과 작업도 경고 확인 후 생성할 수 있습니다."
+            message = "G53/공구교체 미리보기와 날짜 작업 파일명을 개선했습니다. 다중 선택 가공 적용/미적용 및 설정 탭의 균등 거리 중간 공구 교체를 추가했습니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
