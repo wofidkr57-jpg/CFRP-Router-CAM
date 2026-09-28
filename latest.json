@@ -1,6 +1,6 @@
 {
-  "version": "1.33",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.33/CFRP_Router_CAM.exe",
-  "sha256": "ed641193974ef6695148675c1a063a350749ea5611f13abd7005f5f074255b6b",
-  "message": "3D 시뮬레이션을 프로그램 내부 GPU 창으로 변경했습니다. 외부 브라우저를 열지 않으며 GPU 사용이 어려우면 기존 내부 뷰어로 전환합니다. 포켓 치수·마모 보정도 유지합니다."
+  "version": "1.34",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.34/CFRP_Router_CAM.exe",
+  "sha256": "8e017c523de00c0d7ce579be3c6944308c80d8aec7b157970193dc2d8499f865",
+  "message": "어니언스킨을 사용하지 않을 때 저장된 잔여량 때문에 가공이 막히던 오류를 수정했습니다. 사용할 때만 판 두께 제한을 검사하며 황삭·정삭 분리는 잔여율을 기준으로 검사합니다."
 }
