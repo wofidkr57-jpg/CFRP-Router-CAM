@@ -77,5 +77,28 @@ class OnionSplitTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             cam.machining_jobs([cam.Contour([(0,0),(1,0)],closed=False)],self.cfg())
 
+    def test_unused_remaining_thickness_does_not_change_cutting(self):
+        cfg=self.cfg(stock=2,onion_split=False,onion_skin_enabled=False)
+        expected=cam.parse_gcode_moves(cam.generate_gcode([outer()],cfg))
+        for value in (-1,2,6):
+            with self.subTest(value=value):
+                job=dict(cfg,onion_skin=value)
+                self.assertEqual(cam.resolved_z_config(job)['onion_skin'],value)
+                self.assertEqual(cam.parse_gcode_moves(cam.generate_gcode([outer()],job)),expected)
+
+    def test_enabled_remaining_bounds_stay_enforced(self):
+        for value in (-1,2,6,math.nan,math.inf):
+            with self.subTest(value=value),self.assertRaisesRegex(ValueError,'판 두께 미만'):
+                cam.generate_gcode([outer()],self.cfg(stock=2,onion_split=False,onion_skin_enabled=True,onion_skin=value))
+        for value in (0,.2,1.999):
+            self.assertEqual(cam.resolved_z_config(self.cfg(stock=2,onion_split=False,onion_skin_enabled=True,onion_skin=value))['onion_skin'],value)
+
+    def test_split_uses_percentage_before_remaining_validation(self):
+        cfg=self.cfg(stock=2,onion_skin=6,onion_skin_enabled=False)
+        jobs=cam.machining_jobs([outer()],cfg)
+        for _,job in jobs:
+            self.assertTrue(job['onion_skin_enabled']);self.assertAlmostEqual(job['onion_skin'],.2)
+            self.assertTrue(cam.generate_gcode([outer()],job))
+
 
 if __name__=='__main__':unittest.main()

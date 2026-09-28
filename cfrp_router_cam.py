@@ -56,7 +56,7 @@ STEP_FACE_NORMAL_DOT = 0.999
 TOOL_WEAR_DEFAULT_LOSS_PER_10M = 0.079
 TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
-APP_VERSION = "1.33"
+APP_VERSION = "1.34"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -180,6 +180,8 @@ _UI_EN_EXACT = {
     "외곽만": "Outer only",
     "내부홀만": "Inner only",
     "어니언스킨 잔여 (mm)": "Onion Skin Remaining (mm)",
+    "어니언스킨 잔여량은 0 이상, 판 두께 미만이어야 합니다.": "Onion-skin remaining thickness must be nonnegative and less than stock thickness.",
+    "황삭 측면 여유는 0 이상이어야 합니다.": "Roughing side allowance must be nonnegative.",
     "황삭 측면 여유 (mm)": "Rough Wall Allowance (mm)",
     "정삭 Feed (%)": "Finish Feed (%)",
     "탭 형상": "Tab Shape",
@@ -2636,6 +2638,10 @@ def resolved_z_config(cfg:dict) -> dict:
             raise ValueError("분리 가공 바닥 잔여율은 0 초과 100% 미만이어야 합니다.")
         result.update(onion_skin_enabled=True,wall_finish=True,finish_scope="전체",
                       onion_skin=float(result["stock"])*percent/100.0,tab_count=0)
+    if result.get("onion_skin_enabled"):
+        remaining=float(result.get("onion_skin",0.0));stock=float(result["stock"])
+        if not math.isfinite(remaining) or not 0<=remaining<stock:
+            raise ValueError("어니언스킨 잔여량은 0 이상, 판 두께 미만이어야 합니다.")
     if result.get("safe_z_auto",False):
         result["safe_z"]=float(result["stock"])*2.0
     return result
@@ -5766,8 +5772,8 @@ class App(tk.Tk):
             raise ValueError("Lead, 탭 개수, 탭 길이와 ramp는 음수가 될 수 없습니다.")
         if cfg["extra"] < 0 or cfg["tab_remain"] < 0 or cfg["tab_remain"] >= cfg["stock"]:
             raise ValueError("관통 여유와 탭 잔여두께 값을 확인하세요.")
-        if cfg["onion_skin"]<0 or cfg["onion_skin"]>=cfg["stock"] or cfg["finish_allowance"]<0:
-            raise ValueError("어니언스킨 잔여량과 황삭 측면 여유 값을 확인하세요.")
+        if cfg["finish_allowance"]<0:
+            raise ValueError("황삭 측면 여유는 0 이상이어야 합니다.")
         if cfg["finish_feed_pct"]<=0 or cfg["finish_feed_pct"]>100:
             raise ValueError("정삭 Feed는 0 초과 100% 이하로 설정하세요.")
         if cfg["tool_wear_loss_per_10m"]<0 or cfg["tool_wear_min_d"]<=0:

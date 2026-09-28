@@ -13,6 +13,23 @@ with tempfile.TemporaryDirectory() as tmp:
     cam.App.appdata_settings_path=lambda self:str(Path(tmp)/'fallback.json')
     app=cam.App()
     try:
+        # A disabled feature may retain values from a thicker previous job.
+        app.vars['stock'].set(2);app.vars['onion_skin'].set(6)
+        app.vars['onion_skin_enabled'].set(False);app.vars['onion_split'].set(False)
+        assert app.config()['onion_skin']==6
+        app.contours=[cam.Contour([(0,0),(40,0),(40,30),(0,30)],closed=True,role='outer')]
+        with mock.patch.object(cam.messagebox,'showerror') as errors:
+            app.make_gcode();assert not errors.called,errors.call_args_list
+        assert app.gcode and '(ONION_SKIN: NO)' in app.gcode
+        app.vars['onion_skin_enabled'].set(True)
+        try:app.config()
+        except ValueError as exc:assert '판 두께 미만' in str(exc)
+        else:raise AssertionError('Enabled onion skin must reject remaining >= stock')
+        app.vars['onion_skin_enabled'].set(False);app.vars['finish_allowance'].set(-.1)
+        try:app.config()
+        except ValueError as exc:assert '황삭 측면 여유' in str(exc) and '어니언스킨' not in str(exc)
+        else:raise AssertionError('Roughing allowance validation must remain independent')
+        app.vars['finish_allowance'].set(.12);app.vars['onion_skin'].set(.2)
         assert str(app.onion_start_text.cget('state'))=='disabled'
         app.vars['onion_split'].set(True);app.sync_onion_split()
         assert str(app.onion_start_text.cget('state'))=='normal'
