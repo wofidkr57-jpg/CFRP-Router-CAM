@@ -1,3 +1,7 @@
+## V1.34: 사용하지 않는 어니언스킨 잔여량 검사 수정
+
+어니언스킨과 황삭/정삭 분리를 모두 끈 경우 저장된 잔여량이 판 두께 이상이어도 코드 생성/시뮬레이션을 막지 않습니다. 어니언스킨을 사용할 때는 잔여량이 0 이상, 판 두께 미만이어야 합니다. 황삭/정삭 분리에서는 잔여율로 계산한 두께를 검사하며, 미사용 잔여량 입력값은 그대로 보존합니다. 황삭 측면 여유 검사는 별도 오류로 유지합니다.
+
 ## V1.33: 프로그램 내부 GPU 뷰어·포켓 보정
 
 V1.33은 3D 시뮬레이션을 프로그램 내부 창에서 엽니다. V1.32의 포켓 치수·마모 보정도 유지합니다.
@@ -182,7 +186,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.33**입니다.
+현재 최신 버전은 **V1.34**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -204,7 +208,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.33 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.33/CFRP_Router_CAM_V1.33_source.zip)
+- [V1.34 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.34/CFRP_Router_CAM_V1.34_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
