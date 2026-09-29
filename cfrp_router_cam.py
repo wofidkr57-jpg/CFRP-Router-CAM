@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.35"
+APP_VERSION = "1.36"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -2317,19 +2317,21 @@ def _contour_nearest_point(c:Contour,current:Point)->Tuple[float,Point]:
     return distance,point_at(c.points,s,c.closed)[0]
 
 
-def _same_inner_feature(a:Contour,b:Contour)->bool:
+def _same_inner_feature(a:Contour,b:Contour,features=None)->bool:
     """Keep concentric through-hole/counterbore profiles together."""
     if not (a.closed and b.closed and a.role=="inner" and b.role=="inner"):return False
     if a.object_id and b.object_id and (a.object_id!=b.object_id or a.instance_id!=b.instance_id):return False
-    ca,cb=_contour_center(a),_contour_center(b)
-    span=max(math.sqrt(max(abs(a.area),abs(b.area),EPS)),1.0)
+    ca,aa=features[id(a)] if features is not None else (_contour_center(a),abs(a.area))
+    cb,ab=features[id(b)] if features is not None else (_contour_center(b),abs(b.area))
+    span=max(math.sqrt(max(aa,ab,EPS)),1.0)
     return dist(ca,cb)<=max(.08,span*.015)
 
 
 def _inner_feature_bundles(contours:Sequence[Contour])->List[List[Contour]]:
     groups:List[List[Contour]]=[]
+    features={id(c):(_contour_center(c),abs(c.area)) for c in contours}
     for contour in contours:
-        hits=[i for i,group in enumerate(groups) if any(_same_inner_feature(contour,x) for x in group)]
+        hits=[i for i,group in enumerate(groups) if any(_same_inner_feature(contour,x,features) for x in group)]
         if not hits:groups.append([contour]);continue
         target=groups[hits[0]];target.append(contour)
         for index in reversed(hits[1:]):target.extend(groups.pop(index))
@@ -2337,11 +2339,32 @@ def _inner_feature_bundles(contours:Sequence[Contour])->List[List[Contour]]:
     return groups
 
 
-def _nearest_contour_sequence(contours:Sequence[Contour],current:Point)->Tuple[List[Contour],Point]:
+def _ordering_bounds(contours:Sequence[Contour]):
+    return {id(c):(min(p[0] for p in c.points),min(p[1] for p in c.points),
+                   max(p[0] for p in c.points),max(p[1] for p in c.points))
+            for c in contours if c.points}
+
+
+def _ordering_distance(c:Contour,current:Point,bounds,best:float)->float:
+    if not c.points:return float("inf")
+    b=bounds[id(c)]
+    lower=math.hypot(max(b[0]-current[0],0,current[0]-b[2]),
+                     max(b[1]-current[1],0,current[1]-b[3]))
+    # Bounding boxes only reject candidates guaranteed farther than the winner.
+    # Exact segment distance and original tie order still decide every survivor.
+    if lower>best+EPS:return float("inf")
+    return nearest_path_distance(c.points,current,c.closed)[0]
+
+
+def _nearest_contour_sequence(contours:Sequence[Contour],current:Point,bounds=None)->Tuple[List[Contour],Point]:
     remaining=list(contours);result=[]
+    if bounds is None:bounds=_ordering_bounds(remaining)
+    areas={id(c):abs(c.area) for c in remaining}
     while remaining:
-        index=min(range(len(remaining)),key=lambda i:(_contour_nearest_point(remaining[i],current)[0],
-                                                        abs(remaining[i].area),i))
+        best=(float("inf"),float("inf"),0);index=0
+        for i,c in enumerate(remaining):
+            candidate=(_ordering_distance(c,current,bounds,best[0]),areas[id(c)],i)
+            if candidate<best:best=candidate;index=i
         contour=remaining.pop(index);result.append(contour)
         if contour.closed:current=_contour_nearest_point(contour,current)[1]
         elif contour.points:
@@ -2376,16 +2399,20 @@ def ordered_contours(contours: Sequence[Contour],rapid_optimize:bool=True,
         if c.closed:current=_contour_nearest_point(c,current)[1]
         elif c.points:current=c.points[-1]
     inner=[c for c in automatic if c.closed and c.role=="inner"]
+    bounds=_ordering_bounds(automatic)
     bundles=_inner_feature_bundles(inner)
     while bundles:
-        index=min(range(len(bundles)),key=lambda i:min(_contour_nearest_point(c,current)[0] for c in bundles[i]))
+        best=float("inf");index=0
+        for i,bundle in enumerate(bundles):
+            distance=min(_ordering_distance(c,current,bounds,best) for c in bundle)
+            if distance<best:best=distance;index=i
         bundle=bundles.pop(index)
         for c in bundle:
             result.append(c);current=_contour_nearest_point(c,current)[1]
     opened=[c for c in automatic if not c.closed]
-    seq,current=_nearest_contour_sequence(opened,current);result.extend(seq)
+    seq,current=_nearest_contour_sequence(opened,current,bounds);result.extend(seq)
     outer=[c for c in automatic if c.closed and c.role!="inner"]
-    seq,current=_nearest_contour_sequence(outer,current);result.extend(seq)
+    seq,current=_nearest_contour_sequence(outer,current,bounds);result.extend(seq)
     return result
 
 
@@ -5250,6 +5277,8 @@ class App(tk.Tk):
         self.manual_array_mode = False
         self.manual_array_selected:Optional[Tuple[int,int]] = None
         self.manual_array_drag = None
+        self.manual_pick_bounds = None
+        self.manual_selection_items = []
         self.canvas_selection_drag = None
         self.sheet_size:Optional[Tuple[float,float]] = None
         self.view_only: Optional[List[Contour]] = None
@@ -6454,7 +6483,7 @@ class App(tk.Tk):
         keys={contour_group_key(c) for c in self.selected_contours if c.object_id}
         if self.manual_array_mode and self.manual_array_selected is not None and self.manual_array_selected not in keys:
             keys={self.manual_array_selected}
-        return keys & set(contour_group_bounds_map(self.contours))
+        return keys & {contour_group_key(c) for c in self.contours if c.object_id and c.points}
 
     def nudge_selected_instances(self,event):
         if event.widget is not self.canvas:return
@@ -6863,6 +6892,22 @@ class App(tk.Tk):
     def manual_group_tag(self,key:Tuple[int,int])->str:
         return f"manual_group_{key[0]}_{key[1]}"
 
+    def update_manual_selection_display(self):
+        """Restyle the existing scene; selecting must not rebuild dense paths."""
+        keys=self.selected_instance_keys();ids={id(c) for c in self.selected_contours}
+        for record in self.manual_selection_items:
+            item,key,contour,normal,current=record
+            if contour is not None:
+                chosen=id(contour) in ids
+                style={"fill":"#42e695" if chosen or key in keys else normal["fill"],
+                       "width":3 if chosen else 2}
+            elif "outline" in normal:
+                style={"outline":"#42e695" if key in keys else normal["outline"],
+                       "width":3 if key in keys else 1,"dash":() if key in keys else (3,4)}
+            else:style={"fill":"#42e695" if key in keys else normal["fill"]}
+            if style!=current:
+                self.canvas.itemconfigure(item,**style);record[4]=style
+
     def draw_manual_offsets(self,visible):
         try:
             diameter=float(self.vars["tool_d"].get())
@@ -6891,15 +6936,20 @@ class App(tk.Tk):
                  "Tool-center reference: excludes leads, wear, pockets and collision checks")
 
     def manual_group_at(self,p:Point)->Optional[Tuple[int,int]]:
-        visible=self.visible_contours();bounds_by_key=contour_group_bounds_map(visible)
+        visible=self.visible_contours();bounds_by_key=self.manual_pick_bounds
+        if bounds_by_key is None:bounds_by_key=contour_group_bounds_map(visible)
         inside=[]
         for key,b in bounds_by_key.items():
             if b[0]-EPS<=p[0]<=b[2]+EPS and b[1]-EPS<=p[1]<=b[3]+EPS:
                 inside.append(((b[2]-b[0])*(b[3]-b[1]),key))
         if inside:return min(inside,key=lambda item:item[0])[1]
+        # A distant part cannot be within the existing 15-pixel edge pick radius.
+        radius=15/max(self.view[0],EPS)
+        nearby={key for key,b in bounds_by_key.items()
+                if b[0]-radius-EPS<=p[0]<=b[2]+radius+EPS and b[1]-radius-EPS<=p[1]<=b[3]+radius+EPS}
         best=None
         for c in visible:
-            if not c.object_id:continue
+            if not c.object_id or contour_group_key(c) not in nearby:continue
             d,_=nearest_path_distance(c.points,p,c.closed)
             if best is None or d<best[0]:best=(d,contour_group_key(c))
         return best[1] if best and best[0]*self.view[0]<=15 else None
@@ -7288,8 +7338,12 @@ class App(tk.Tk):
         focus=self.order_tree.focus();primary=None
         if focus in items:
             idx=int(focus[1:]);primary=self.contours[idx] if 0<=idx<len(self.contours) else None
+        # Tk queues selection notifications made by our canvas->tree sync.
+        # Ignore that echo after the synchronous guard has already been reset.
+        if {id(c) for c in targets}=={id(c) for c in self.selected_contours} and primary is self.selected:return
         self.set_contour_selection(targets,primary,sync_tree=False)
-        self.redraw(refresh_tree=False)
+        if self.manual_array_mode:self.update_manual_selection_display()
+        else:self.redraw(refresh_tree=False)
 
     def tree_cell_click(self,event):
         self.clear_order_drop()
@@ -7622,7 +7676,10 @@ class App(tk.Tk):
         self.schedule_view_redraw()
 
     def finish_view_redraw(self):
-        self.view_redraw_job=None;self.redraw(refresh_tree=False)
+        self.view_redraw_job=None
+        if self.manual_array_drag is not None:
+            self.schedule_view_redraw();return
+        self.redraw(refresh_tree=False)
 
     def pan_start(self, event):
         if self.view_redraw_job is not None:
@@ -7703,6 +7760,7 @@ class App(tk.Tk):
         self.pending_view_scale=1.0;self.pending_view_tx=self.pending_view_ty=0.0
         self.view_interacting=False
         self.canvas.delete("all")
+        self.manual_pick_bounds=None;self.manual_selection_items=[]
         if refresh_tree:self.refresh_order_tree();self.refresh_object_tree()
         if not self.contours: return
         x0,y0,x1,y1 = self.bounds(); w=max(self.canvas.winfo_width(),100); h=max(self.canvas.winfo_height(),100)
@@ -7716,6 +7774,7 @@ class App(tk.Tk):
             self.canvas.create_rectangle(x0s,y1s,x1s,y0s,outline="#9aa8b5",width=3,dash=(8,5))
             self.canvas.create_text(x0s+8,y1s+8,text=f"판재 {sw:g} × {sh:g} mm",fill="#b7c4cf",anchor="nw",font=("Arial",self.ui_font_size,"bold"))
         all_visible=self.visible_contours()
+        if self.manual_array_mode:self.manual_pick_bounds=contour_group_bounds_map(all_visible)
         selected_ids={id(c) for c in self.selected_contours}
         # Do not create thousands of off-screen Canvas objects after zooming
         # into one part of a large array.  A small margin prevents geometry
@@ -7741,17 +7800,25 @@ class App(tk.Tk):
                     gx0=min(p[0] for p in pts);gy0=min(p[1] for p in pts);gx1=max(p[0] for p in pts);gy1=max(p[1] for p in pts)
                     sx0,sy0=self.transform((gx0,gy0));sx1,sy1=self.transform((gx1,gy1));color=OBJECT_COLORS[(object_id-1)%len(OBJECT_COLORS)]
                     key=(object_id,instance_id);tag=self.manual_group_tag(key);chosen=key in manual_keys
-                    self.canvas.create_rectangle(sx0,sy1,sx1,sy0,outline="#42e695" if chosen else color,
-                                                 width=3 if chosen else 1,dash=() if chosen else (3,4),tags=(tag,))
-                    self.canvas.create_text(sx0+4,sy1+4,text=f"{name} #{instance_id}",fill="#42e695" if chosen else color,
+                    style={"outline":"#42e695" if chosen else color,"width":3 if chosen else 1,
+                           "dash":() if chosen else (3,4)}
+                    item=self.canvas.create_rectangle(sx0,sy1,sx1,sy0,**style,tags=(tag,))
+                    if self.manual_array_mode:self.manual_selection_items.append([item,key,None,{"outline":color},style])
+                    style={"fill":"#42e695" if chosen else color}
+                    item=self.canvas.create_text(sx0+4,sy1+4,text=f"{name} #{instance_id}",**style,
                                             anchor="nw",font=("Arial",max(8,self.ui_font_size-1),"bold"),tags=(tag,))
+                    if self.manual_array_mode:self.manual_selection_items.append([item,key,None,{"fill":color},style])
         for c in visible:
             group_tag=self.manual_group_tag(contour_group_key(c)) if c.object_id else ""
             xy=[]
             for p in c.points + ([c.points[0]] if c.closed else []): xy.extend(self.transform(p))
             group_chosen=c.object_id and contour_group_key(c) in manual_keys
             color = "#42e695" if id(c) in selected_ids or group_chosen else ("#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d"))
-            self.canvas.create_line(*xy, fill=color, width=3 if id(c) in selected_ids else 2,tags=(group_tag,) if group_tag else ())
+            style={"fill":color,"width":3 if id(c) in selected_ids else 2}
+            item=self.canvas.create_line(*xy,**style,tags=(group_tag,) if group_tag else ())
+            if self.manual_array_mode:
+                normal={"fill":"#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d")}
+                self.manual_selection_items.append([item,contour_group_key(c),c,normal,style])
             for a,b in c.bridges:
                 ax,ay=self.transform(a); bx,by=self.transform(b)
                 self.canvas.create_line(ax,ay,bx,by,fill="#d66bff",width=4,tags=(group_tag,) if group_tag else ())
@@ -7897,6 +7964,7 @@ class App(tk.Tk):
     def canvas_press(self,event):
         self.canvas.focus_set()
         if self.manual_array_mode:
+            self.apply_view_transform()
             key=self.manual_group_at(self.inv_transform((event.x,event.y)))
             keys=self.selected_instance_keys();additive=bool(event.state & 0x0004)
             if additive:
@@ -7911,7 +7979,7 @@ class App(tk.Tk):
                 self.manual_array_drag=(frozenset(keys),event.x,event.y,event.x,event.y)
                 self.status.set(f"개체 {len(keys)}개 선택 | Ctrl+클릭: 추가/해제 · 방향키 1mm / Shift 0.1mm · R/F: 회전/반전")
             else:self.status.set("배치할 객체의 경계 안을 클릭하세요.")
-            self.redraw(refresh_tree=False);return
+            self.update_manual_selection_display();return
         if self.measure_mode or self.origin_mode or self.start_mode or self.join_mode or self.manual_mode:
             self.canvas_click(event);return
         self.canvas_selection_drag=(event.x,event.y,event.x,event.y)
@@ -7941,7 +8009,10 @@ class App(tk.Tk):
                 for item in key:move_contour_group(self.contours,item,dx,dy)
                 self.preview_cache.clear();self.collision_cache_key=None
                 self.status.set(f"개체 {len(key)}개 이동 | ΔX {dx:.3f} ΔY {dy:.3f} mm")
-            self.redraw(refresh_tree=False);return
+            # A click with no displacement only changes the selection styles.
+            # Redraw if a drag returned to its start, to undo its last pixel move.
+            if abs(dx)>EPS or abs(dy)>EPS or lx!=sx or ly!=sy:self.redraw(refresh_tree=False)
+            return
         if self.canvas_selection_drag is None:return
         sx,sy,_,_=self.canvas_selection_drag;self.canvas_selection_drag=None;self.canvas.delete("selection_box")
         if abs(event.x-sx)<4 and abs(event.y-sy)<4:
