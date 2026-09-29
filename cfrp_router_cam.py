@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.36"
+APP_VERSION = "1.37"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -73,6 +73,7 @@ DEFAULT_START_CODE = "%\nO0001\nG21\nG90\nG17\nG94\nG54\nG0 Z{SAFE_Z}\nS{RPM} M3
 DEFAULT_END_CODE = "G0 Z{SAFE_Z}\nM5\nM30\n%"
 OBJECT_COLORS = ("#ffd84d", "#67d9ff", "#ff8fb8", "#9ee56f", "#c9a0ff", "#ffad5c", "#72e0c1", "#f4ef7a")
 OBJECT_TREE_COLORS = OBJECT_COLORS
+OUTER_ORDER_CHOICES = ("가까운 순서", "중앙 → 바깥 (시계)", "중앙 → 바깥 (반시계)")
 
 
 # UI language is deliberately separate from CAM values and NC output.  Existing
@@ -82,6 +83,12 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "외곽 자동 가공 순서": "Automatic outer cutting order",
+    "외곽 자동 가공 순서를 확인하세요.": "Check the automatic outer cutting order.",
+    "가까운 순서": "Nearest first",
+    "중앙 → 바깥 (시계)": "Center outward (CW)",
+    "중앙 → 바깥 (반시계)": "Center outward (CCW)",
+    "객체 방문 순서 · 절삭 방향 유지\n수동 순번 해제: 외곽 순서 자동": "Instance visit order; cutting direction retained\nClear manual ranks: Auto outer order",
     "예상 가공시간": "Estimated Machining Time",
     "급속 XYZ 3,000mm/min + 이동 시간 10% 여유\n고정 대기 포함 · 교체/프로빙·기계이동 별도\n화면·파일명은 분 단위 올림 · 실제 완료시간 보장은 아님": "XYZ rapid: 3,000mm/min + 10% motion-time margin\nFixed dwell included; tool change/probing/machine travel extra\nDisplay/filenames round up to minutes; completion time is not guaranteed",
     "중간 공구 교체": "Mid-job tool replacement",
@@ -389,6 +396,8 @@ def ui_text(value):
 
 
 _ENUM_KO = {
+    "Nearest first":"가까운 순서", "Center outward (CW)":"중앙 → 바깥 (시계)",
+    "Center outward (CCW)":"중앙 → 바깥 (반시계)",
     "Lower-left":"좌하단", "Upper-left":"좌상단", "Upper-right":"우상단", "Lower-right":"우하단",
     "Center":"중앙", "DXF origin":"DXF 원점", "Selected point":"선택점",
     "All":"전체", "Outer only":"외곽만", "Inner only":"내부홀만",
@@ -2372,23 +2381,73 @@ def _nearest_contour_sequence(contours:Sequence[Contour],current:Point,bounds=No
     return result,current
 
 
+def outer_order_mode(value="nearest")->str:
+    aliases={"nearest":"nearest","가까운 순서":"nearest","Nearest first":"nearest",
+             "center_cw":"center_cw","중앙 → 바깥 (시계)":"center_cw","Center outward (CW)":"center_cw",
+             "center_ccw":"center_ccw","중앙 → 바깥 (반시계)":"center_ccw","Center outward (CCW)":"center_ccw"}
+    if not isinstance(value,str) or value not in aliases:raise ValueError("외곽 자동 가공 순서를 확인하세요.")
+    return aliases[value]
+
+
+def center_out_outer_sequence(contours:Sequence[Contour],clockwise:bool=True,layout=None)->List[Contour]:
+    """Visit radial bands around the layout center, starting each band at +Y.
+
+    Median nearest-center spacing sets the automatic band width. No route,
+    tab, start point or milling direction is modified by this visit order.
+    """
+    if len(contours)<2:return list(contours)
+    layout=list(layout) if layout is not None else list(contours)
+    bounds=_ordering_bounds(layout)
+    centers=[((bounds[id(c)][0]+bounds[id(c)][2])/2,(bounds[id(c)][1]+bounds[id(c)][3])/2)
+             for c in contours]
+    cx=(min(bounds[id(c)][0] for c in layout)+max(bounds[id(c)][2] for c in layout))/2
+    cy=(min(bounds[id(c)][1] for c in layout)+max(bounds[id(c)][3] for c in layout))/2
+    # Coincident component centers do not collapse the automatic band width.
+    spacing=[]
+    layout_centers=[((bounds[id(c)][0]+bounds[id(c)][2])/2,(bounds[id(c)][1]+bounds[id(c)][3])/2) for c in layout]
+    for i,p in enumerate(layout_centers):
+        distances=(dist(p,q) for j,q in enumerate(layout_centers) if j!=i)
+        nearest=min((d for d in distances if d>EPS),default=0)
+        if nearest>EPS:spacing.append(nearest)
+    spacing.sort();middle=len(spacing)//2
+    width=(spacing[middle] if len(spacing)%2 else (spacing[middle-1]+spacing[middle])/2) if spacing else 1.0
+    def key(i):
+        dx,dy=centers[i][0]-cx,centers[i][1]-cy;radius=math.hypot(dx,dy)
+        band=math.floor(radius/width+EPS)
+        angle=math.atan2(dx if clockwise else -dx,dy)%(2*math.pi)
+        return (band,-1.0 if radius<=EPS else angle,radius,i)
+    return [contours[i] for i in sorted(range(len(contours)),key=key)]
+
+
 def ordered_contours(contours: Sequence[Contour],rapid_optimize:bool=True,
-                     start_point:Point=(0.0,0.0)) -> List[Contour]:
+                     start_point:Point=(0.0,0.0),outer_order="nearest") -> List[Contour]:
     """Preserve manual/safe ordering, then minimize XY jumps inside each safe group."""
+    mode=outer_order_mode(outer_order)
     pockets=sorted((c for c in contours if c.enabled and c.operation=="pocket"),key=lambda c:c.target_depth or 0)
     if pockets:
-        return pockets+ordered_contours([c for c in contours if c.operation!="pocket"],rapid_optimize,start_point)
+        return pockets+ordered_contours([c for c in contours if c.operation!="pocket"],rapid_optimize,start_point,mode)
     active=[c for c in contours if c.enabled]
     fixed=[c for c in active if c.closed and c.role=="outer" and c.outer_cut_order is not None]
     if fixed:
         # Explicit outer order is a separate final phase: never release parts
         # ahead of their inner features, and never optimize across fixed ranks.
         other=[c for c in active if not (c.closed and c.role=="outer")]
-        prefix=ordered_contours(other,rapid_optimize,start_point)
+        prefix=ordered_contours(other,rapid_optimize,start_point,mode)
         fixed.sort(key=lambda c:(c.outer_cut_order,)+contour_auto_key(c))
         remaining=[c for c in active if c.closed and c.role=="outer" and c.outer_cut_order is None]
         anchor=fixed[-1].points[0] if fixed[-1].points else start_point
-        return prefix+fixed+ordered_contours(remaining,rapid_optimize,anchor)
+        if mode!="nearest":
+            manual=sorted((c for c in remaining if c.cut_order is not None),key=lambda c:(c.cut_order,)+contour_auto_key(c))
+            automatic=[c for c in remaining if c.cut_order is None]
+            return prefix+fixed+manual+center_out_outer_sequence(automatic,mode=="center_cw",fixed+remaining)
+        return prefix+fixed+ordered_contours(remaining,rapid_optimize,anchor,mode)
+    if mode!="nearest":
+        outer=[c for c in active if c.closed and c.role=="outer"]
+        if outer:
+            prefix=ordered_contours([c for c in active if not (c.closed and c.role=="outer")],rapid_optimize,start_point,mode)
+            manual=sorted((c for c in outer if c.cut_order is not None),key=lambda c:(c.cut_order,)+contour_auto_key(c))
+            automatic=[c for c in outer if c.cut_order is None]
+            return prefix+manual+center_out_outer_sequence(automatic,mode=="center_cw",outer)
     manual=sorted((c for c in active if c.cut_order is not None),
                   key=lambda c:(c.cut_order,)+contour_auto_key(c))
     automatic=[c for c in active if c.cut_order is None]
@@ -3188,6 +3247,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(PROGRAMMED_PASS_COUNT: {int(actual_passes)})",
         f"(CUT_DIRECTION: {'CLIMB' if cfg.get('climb') else 'CONVENTIONAL'})",
         f"(RAPID_OPTIMIZE: {nc_yes_no(cfg.get('rapid_optimize',True))})",
+        f"(OUTER_ORDER_MODE: {outer_order_mode(cfg.get('outer_order_mode','nearest')).upper()})",
         f"(COOLANT_AIR_M8: {nc_yes_no(cfg.get('m8_enabled'))})",
         f"(TAB_COUNT_PER_OUTER: {int(cfg.get('tab_count',0))})",
         f"(TAB_LENGTH_MM: {fmt(float(cfg.get('tab_flat',0.0)))})",
@@ -3274,7 +3334,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     override=cfg.get("_xy_origin_override")
     origin_x,origin_y=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
     rapid_optimize=bool(cfg.get("rapid_optimize",True))
-    ordered=ordered_contours(active,rapid_optimize,(origin_x,origin_y))
+    ordered=ordered_contours(active,rapid_optimize,(origin_x,origin_y),cfg.get("outer_order_mode","nearest"))
     if stage=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
     change_indices,wear_plan,tool_loads=tool_replacement_plan(ordered,cfg,stock,extra)
     pocket_errors=pocket_job_issues(contours,cfg,{id(c):d for c,(d,_) in zip(ordered,wear_plan)})
@@ -3501,7 +3561,7 @@ def machining_report(contours: List[Contour], cfg: dict,
     active=[x for x in contours if x.enabled]
     override=cfg.get("_xy_origin_override")
     origin=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
-    ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin)
+    ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin,cfg.get("outer_order_mode","nearest"))
     if cfg.get("_machining_stage")=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
     _,plan,_=tool_replacement_plan(ordered,cfg,stock,cfg["extra"])
     for report_index,(_,metrics) in enumerate(plan,1):
@@ -5494,6 +5554,12 @@ class App(tk.Tk):
         self.var("rapid_optimize",True,tk.BooleanVar)
         ttk.Checkbutton(controls,text="급속이송 최소화 (홀 묶음)",variable=self.vars["rapid_optimize"],
                         command=self.redraw).grid(row=r,columnspan=2,sticky="w");r+=1
+        ttk.Label(controls,text="외곽 자동 가공 순서").grid(row=r,columnspan=2,sticky="w",pady=(4,0));r+=1
+        self.var("outer_order_mode",OUTER_ORDER_CHOICES[0],tk.StringVar)
+        self.outer_order_combo=ttk.Combobox(controls,width=24,state="readonly",textvariable=self.vars["outer_order_mode"],values=OUTER_ORDER_CHOICES)
+        self.outer_order_combo.grid(row=r,columnspan=2,sticky="ew");r+=1
+        self.outer_order_combo.bind("<<ComboboxSelected>>",lambda event:self.redraw())
+        ttk.Label(controls,text="객체 방문 순서 · 절삭 방향 유지\n수동 순번 해제: 외곽 순서 자동",foreground="#91a0b8",wraplength=240).grid(row=r,columnspan=2,sticky="w",pady=(1,3));r+=1
         ttk.Checkbutton(controls, text="Full-depth 1 pass", variable=self.vars["full_depth"]).grid(row=r, columnspan=2, sticky="w"); r += 1
         self.var("m8_enabled",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="절삭유/에어 사용 (M8 ON → M9 OFF)",variable=self.vars["m8_enabled"]).grid(row=r,columnspan=2,sticky="w",pady=(2,1));r+=1
@@ -5917,6 +5983,7 @@ class App(tk.Tk):
                 cfg["plunge"] <= 0 or cfg["rpm"] <= 0 or cfg["safe_z"] <= 0):
             raise ValueError("공구, 판 두께, RPM, Feed, Plunge, 안전 Z는 0보다 커야 합니다.")
         validate_preflight(cfg)
+        outer_order_mode(cfg.get("outer_order_mode","nearest"))
         rapid_approach_clearance(cfg)
         path_tolerance(cfg)
         for key in ("inner_size_adjust","outer_size_adjust"):
@@ -5953,7 +6020,7 @@ class App(tk.Tk):
                         "rpm","feed","plunge","stock","extra","safe_z","safe_z_auto","approach_z","lead","passes",
                         "path_tolerance","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
-                        "full_depth","rapid_optimize","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
+                        "full_depth","rapid_optimize","outer_order_mode","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim",
                         "machine_home_enabled","machine_park_x","machine_park_y","machine_park_z",
                         "start_code","end_code","onion_split","onion_split_percent","onion_start_code","onion_end_code",
@@ -5992,7 +6059,7 @@ class App(tk.Tk):
             saved_vars=data.get("vars",{})
             for key,value in saved_vars.items():
                 if key in self.vars:
-                    self.vars[key].set(localized_enum_value(value) if key in ("xy_origin","finish_scope") else value)
+                    self.vars[key].set(localized_enum_value(value) if key in ("xy_origin","finish_scope","outer_order_mode") else value)
             # V1.20 originally stored loss per 100 m.  Preserve custom values
             # by converting the unit; retain the new measured default when the
             # old value was missing or left at its former zero default.
@@ -6144,6 +6211,8 @@ class App(tk.Tk):
         # V1.30 projects predate replacement controls; never enable motion on migration.
         for k,v in {"tool_change_enabled":False,"tool_change_limit_m":6.5,"tool_change_macro":"M881",
                     "tool_change_return_z":-70.0,"tool_change_dwell":3.0}.items():data["vars"].setdefault(k,v)
+        data["vars"].setdefault("outer_order_mode",OUTER_ORDER_CHOICES[0])
+        outer_order_mode(data["vars"]["outer_order_mode"])
         if set(data["vars"])!=set(self.vars):raise ValueError("작업 설정 항목이 현재 버전과 맞지 않습니다.")
         for k,v in data["vars"].items():
             var=self.vars[k]
@@ -6154,7 +6223,7 @@ class App(tk.Tk):
         return result
 
     def apply_job_values(self,data):
-        for k,v in data["vars"].items():self.vars[k].set(localized_enum_value(v) if k in ("xy_origin","finish_scope") else v)
+        for k,v in data["vars"].items():self.vars[k].set(localized_enum_value(v) if k in ("xy_origin","finish_scope","outer_order_mode") else v)
         for attr,text in data["codes"].items():
             widget=getattr(self,attr);widget.configure(state="normal");widget.delete("1.0","end");widget.insert("1.0",text)
         self.sync_onion_split()
@@ -7283,7 +7352,7 @@ class App(tk.Tk):
             self.selected=self.selected_contours[0] if self.selected_contours else None
         selected_ids={id(c) for c in self.selected_contours}
         self.order_tree.delete(*self.order_tree.get_children())
-        active_order=ordered_contours(self.contours,bool(self.vars["rapid_optimize"].get()));actual={id(c):i for i,c in enumerate(active_order,1)}
+        active_order=ordered_contours(self.contours,bool(self.vars["rapid_optimize"].get()),outer_order=self.vars["outer_order_mode"].get());actual={id(c):i for i,c in enumerate(active_order,1)}
         display=active_order+[c for c in self.contours if not c.enabled]
         if self.tree_sort_col:
             def sort_key(c):
@@ -7862,9 +7931,10 @@ class App(tk.Tk):
             rapid_order=bool(self.vars["rapid_optimize"].get())
             order_signature=hash(tuple((id(c),c.cut_order,c.outer_cut_order,round(c.start_s,6),c.enabled)
                                        for c in self.contours))
-            order_key=(geometry_signature,order_signature,rapid_order)
+            outer_mode=self.vars["outer_order_mode"].get()
+            order_key=(geometry_signature,order_signature,rapid_order,outer_mode)
             if order_key!=self.preview_order_cache_key:
-                self.preview_order_cache=ordered_contours(self.contours,rapid_order)
+                self.preview_order_cache=ordered_contours(self.contours,rapid_order,outer_order=outer_mode)
                 self.preview_order_cache_key=order_key
             preview_order=self.preview_order_cache
             show_order_numbers=len(preview_order)<=60
@@ -8094,7 +8164,7 @@ class App(tk.Tk):
                 edge_issues,spacing_issues=self.manual_array_layout_issues()
                 if edge_issues or spacing_issues:
                     warnings.append(f"배치 여유 위반: 가장자리 {edge_issues}개, 간격/겹침 {spacing_issues}쌍")
-            sequence=ordered_contours(active,cfg.get("rapid_optimize",True))
+            sequence=ordered_contours(active,cfg.get("rapid_optimize",True),outer_order=cfg.get("outer_order_mode","nearest"))
             first_outer=next((i for i,c in enumerate(sequence) if c.closed and c.role=="outer"),None)
             if first_outer is not None and any(c.role=="inner" for c in sequence[first_outer+1:]):
                 warnings.append("수동 순번 때문에 외곽이 일부 내부 형상보다 먼저 가공됩니다. 부품 고정을 확인하세요.")
@@ -8141,7 +8211,7 @@ class App(tk.Tk):
                 if job_cfg.get("tool_change_enabled"):
                     staged=stage_contours(active,job_cfg)
                     origin=job_cfg.get("_xy_origin_override") or work_origin_for_contours(staged,job_cfg)
-                    ordered=ordered_contours(staged,job_cfg.get("rapid_optimize",True),origin)
+                    ordered=ordered_contours(staged,job_cfg.get("rapid_optimize",True),origin,job_cfg.get("outer_order_mode","nearest"))
                     if job_cfg.get("_machining_stage")=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
                     cuts,_,loads=tool_replacement_plan(ordered,job_cfg,job_cfg["stock"],job_cfg["extra"])
                     distance_jobs.extend((f"{label} TOOL {i}",load) for i,load in enumerate(loads,1))
