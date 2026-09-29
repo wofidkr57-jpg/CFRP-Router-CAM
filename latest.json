@@ -2,5 +2,5 @@
   "version": "1.36",
   "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.36/CFRP_Router_CAM.exe",
   "sha256": "5b2ef1cc690bdab820ff364534643271b398c7ff75df31317ce30fb4552a2113",
-  "message": "예상 시간에 급속 XYZ 이동(3000mm/min), 10% 여유와 고정 대기를 포함했습니다. 화면과 파일명은 분 단위로 올림하며 교체·프로빙·알 수 없는 기계 이동 시간은 별도입니다."
+  "message": "수동 배치의 드래그 시작과 복사·붙여넣기 반응을 개선했습니다. 클릭 시 형상과 공구 경로를 다시 만들지 않고 선택 표시만 갱신하며, 기존 가공 순서와 출력 경로는 유지합니다."
 }
