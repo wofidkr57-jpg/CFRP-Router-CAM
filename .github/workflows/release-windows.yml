@@ -173,7 +173,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "예상 시간에 급속 XYZ 이동(3000mm/min), 10% 여유와 고정 대기를 포함했습니다. 화면과 파일명은 분 단위로 올림하며 교체·프로빙·알 수 없는 기계 이동 시간은 별도입니다."
+            message = "중앙→바깥 외곽 순서를 전체 판재 중심(X÷2,Y÷2) 기준으로 수정했습니다. 판재 X/Y를 확인한 뒤 가공코드를 다시 생성하세요. 내부 홀·포켓과 수동 지정 순번은 우선합니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
