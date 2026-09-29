@@ -1,6 +1,6 @@
 {
-  "version": "1.37",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.37/CFRP_Router_CAM.exe",
-  "sha256": "e7a11d1ac42120638b85bd3bb4ae986e0e8133a5aaa467dc3e233039ada7fc88",
-  "message": "외곽 자동 가공 순서에 중앙→바깥 시계/반시계 선택을 추가했습니다. 내부 홀·포켓과 수동 외곽 순번을 우선하며, 목록과 실제 가공 코드에 같은 순서를 적용합니다. 기존 작업은 가까운 순서를 유지합니다."
+  "version": "1.38",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.38/CFRP_Router_CAM.exe",
+  "sha256": "b21df130b9c0872ee26bcc7311932b8acc3d7c73be59deaadc800f0f4aa50783",
+  "message": "중앙→바깥 외곽 순서를 전체 판재 중심(X÷2,Y÷2) 기준으로 수정했습니다. 판재 X/Y를 확인한 뒤 가공코드를 다시 생성하세요. 내부 홀·포켓과 수동 지정 순번은 우선합니다."
 }
