@@ -33,7 +33,7 @@ class ThicknessFilenameTests(unittest.TestCase):
             "260831_2.0endmill_T3.0_panel_1_35min_FINISH.nc",
         ))
         self.assertEqual(cam.split_gcode_paths(name, (12.4, 22.6)), (
-            "260831_2.0endmill_T3.0_panel_1_12min_ROUGH.nc",
+            "260831_2.0endmill_T3.0_panel_1_13min_ROUGH.nc",
             "260831_2.0endmill_T3.0_panel_1_23min_FINISH.nc",
         ))
 
@@ -44,7 +44,7 @@ class ThicknessFilenameTests(unittest.TestCase):
         contours[-1].enabled = False
         name = cam.default_gcode_filename([], "panel.step", contours, 2, 2.5, 9.4,
                                          datetime(2026, 8, 31))
-        self.assertEqual(name, "260831_2.0endmill_T2.5_panel_2_9min.nc")
+        self.assertEqual(name, "260831_2.0endmill_T2.5_panel_2_10min.nc")
 
     def test_save_dialog_and_both_saved_parts_use_stock_thickness(self):
         for split in (False, True):
@@ -74,7 +74,7 @@ class ThicknessFilenameTests(unittest.TestCase):
                     self.assertIn("_T4.5_", path.name)
                     self.assertEqual(path.read_text(encoding="ascii"), "G21\nM30\n")
                 if split:
-                    self.assertTrue(paths[0].name.endswith("_12min_ROUGH.nc"))
+                    self.assertTrue(paths[0].name.endswith("_13min_ROUGH.nc"))
                     self.assertTrue(paths[1].name.endswith("_23min_FINISH.nc"))
 
 
