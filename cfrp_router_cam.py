@@ -56,7 +56,9 @@ STEP_FACE_NORMAL_DOT = 0.999
 TOOL_WEAR_DEFAULT_LOSS_PER_10M = 0.079
 TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
-APP_VERSION = "1.34"
+TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
+TIME_ESTIMATE_MARGIN = 0.10
+APP_VERSION = "1.35"
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -80,6 +82,8 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "예상 가공시간": "Estimated Machining Time",
+    "급속 XYZ 3,000mm/min + 이동 시간 10% 여유\n고정 대기 포함 · 교체/프로빙·기계이동 별도\n화면·파일명은 분 단위 올림 · 실제 완료시간 보장은 아님": "XYZ rapid: 3,000mm/min + 10% motion-time margin\nFixed dwell included; tool change/probing/machine travel extra\nDisplay/filenames round up to minutes; completion time is not guaranteed",
     "중간 공구 교체": "Mid-job tool replacement",
     "가공거리 균등 분할 교체 사용": "Balance cutting distance between tools",
     "공구당 최대 가공거리 (m)": "Maximum cutting distance per tool (m)",
@@ -343,6 +347,8 @@ _UI_EN_PHRASES = {
 }
 
 _UI_EN_WORDS = {
+    "교체·프로빙/기계이동 별도": "tool change/probing/machine travel extra",
+    "고정 대기": "fixed dwell", "예상": "estimated", "이번": "job", "급속": "rapid",
     "업데이트": "update", "가공": "machining", "공구": "tool", "보정경로": "compensated path",
     "경로": "path", "안전검사": "safety check", "검사": "check", "윤곽": "contour",
     "선택": "selected", "설정": "settings", "오류": "error", "완료": "complete",
@@ -2874,7 +2880,7 @@ def split_outer_inner_conflicts(part1:Sequence[Contour],part2:Sequence[Contour])
 
 
 def filename_minutes(minutes:float)->int:
-    return max(1,int(math.floor(max(0.0,float(minutes))+.5)))
+    return max(1,int(math.ceil(max(0.0,float(minutes))-EPS)))
 
 
 def split_gcode_paths(filename:str,minutes:Optional[Sequence[float]]=None)->Tuple[str,str]:
@@ -3286,8 +3292,9 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     job_header=([f"(Job part: {job_label})"] if job_label else [])+([f"({job_note})"] if job_note else [])
     settings_header=gcode_settings_header(cfg,active,(origin_x,origin_y),safe_machine_z,passes,metres)
     out = program_header+[f"(CFRP Router CAM V{APP_VERSION} - Mach3 post)", f"(XY origin mode: {nc_ascii_text(origin_mode)})"]+job_header+settings_header+[
-           f"(This job cutting distance: {fmt(metres)} m)",
-           f"(This job estimated cutting time: {fmt(minutes)} min)"]+start_lines
+           f"(This job cutting distance: {fmt(metres)} m)"]
+    time_header_index=len(out)
+    out.append("(TIME ESTIMATE)");out.extend(start_lines)
 
     out.extend(preflight_gcode(active,cfg,(origin_x,origin_y)))
     current_xy:Point=(origin_x,origin_y)
@@ -3450,14 +3457,17 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             emit_finish_task(task,82+15*finish_index/max(len(finish_tasks),1),
                              f"외곽 정삭 생성 {finish_index}/{len(finish_tasks)}")
     out += end_lines+[""]
+    estimate=job_time_estimate("\n".join(out),minutes)
+    out[time_header_index:time_header_index+1]=time_estimate_header(estimate)
     report(100,"G-code 생성 완료")
     return "\n".join(nc_ascii_line(line) for line in out)
 
 
 def machining_report(contours: List[Contour], cfg: dict,
-                     progress:Optional[Callable[[float,str],None]]=None
+                     progress:Optional[Callable[[float,str],None]]=None,
+                     include_rapid:bool=True
                      ) -> Tuple[float, float]:
-    """Return the current job's cutting distance and estimated cutting time."""
+    """Cutting distance stays wear-only; time includes rapid travel and 10% margin."""
     cfg=resolved_z_config(cfg)
     contours=stage_contours(contours,cfg)
     cut_mm=0.0;cut_min=0.0;plunge_min=0.0;stock=cfg["stock"]
@@ -3471,7 +3481,124 @@ def machining_report(contours: List[Contour], cfg: dict,
         if progress:progress(report_index/max(len(active),1)*100.0,f"가공 거리 계산 {report_index}/{len(active)}")
         cut_mm+=metrics[0];cut_min+=metrics[1];plunge_min+=metrics[2]
     cut_min+=plunge_min;job_m=cut_mm/1000.0
+    if include_rapid:
+        code=generate_gcode(contours,cfg,progress)
+        cut_min=job_time_estimate(code,cut_min).total_minutes
     return job_m,cut_min
+
+
+@dataclass
+class JobTimeEstimate:
+    cutting_minutes:float
+    rapid_mm:float=0.0
+    dwell_seconds:float=0.0
+    unestimated_moves:int=0
+    external_wait:bool=False
+
+    @property
+    def rapid_minutes(self)->float:return self.rapid_mm/TIME_ESTIMATE_RAPID_MM_MIN
+
+    @property
+    def margin_minutes(self)->float:
+        return (self.cutting_minutes+self.rapid_minutes)*TIME_ESTIMATE_MARGIN
+
+    @property
+    def total_minutes(self)->float:
+        return self.cutting_minutes+self.rapid_minutes+self.margin_minutes+self.dwell_seconds/60.0
+
+
+def job_time_estimate(code:str,cutting_minutes:float)->JobTimeEstimate:
+    """Sum known XYZ G0 travel, keeping machine/macro positions separate.
+
+    As in route ordering, the initial work position is assumed to be XYZ zero.
+    G53, probing, macros and work-offset changes cannot establish a transform;
+    missing starts remain explicitly unestimated rather than inventing a move.
+    G4 P is conservatively interpreted as seconds (Mach3 may use milliseconds).
+    """
+    result=JobTimeEstimate(cutting_minutes)
+    pos=[0.0]*3;known=[True]*3;absolute=True;unit=1.0;motion=0;work_system=54.0
+    feed=800.0;feed_minutes=0.0;arc_absolute=False
+    for raw in code.splitlines():
+        line=re.sub(r"\([^)]*\)","",raw).split(";",1)[0].upper()
+        words=re.findall(r"([A-Z])\s*(-?(?:\d+(?:\.\d*)?|\.\d+))",line)
+        values={k:float(v) for k,v in words}
+        gcodes=[float(v) for k,v in words if k=="G"]
+        mcodes=[float(v) for k,v in words if k=="M"]
+        for g in gcodes:
+            if g in (0,1,2,3):motion=int(g)
+            elif g==80:motion=None
+            elif g==90:absolute=True
+            elif g==91:absolute=False
+            elif g==90.1:arc_absolute=True
+            elif g==91.1:arc_absolute=False
+            elif g==20:unit=25.4
+            elif g==21:unit=1.0
+            elif g in (54,55,56,57,58,59,59.1,59.2,59.3) and g!=work_system:
+                work_system=g;known=[False]*3
+        if "F" in values:feed=max(values["F"]*unit,EPS)
+        if 4 in gcodes:
+            result.dwell_seconds+=max(0.0,values.get("P",values.get("X",0.0)))
+            continue
+        macro=any(m==6 or m>=100 for m in mcodes)
+        reset=any(g in (10,28,28.1,30,30.1,52,92,92.1,92.2,92.3) or 38<=g<39 for g in gcodes)
+        if macro or reset or 53 in gcodes:
+            if macro or reset:known=[False]*3
+            else:
+                for i,axis in enumerate("XYZ"):
+                    if axis in values:known[i]=False
+            result.unestimated_moves+=1
+            result.external_wait|=macro
+            continue
+        result.external_wait|=any(m in (0,1) for m in mcodes)
+        if motion is None:continue
+        previous=list(pos);was_known=all(known);delta=[];missing=False
+        for i,axis in enumerate("XYZ"):
+            if axis not in values:continue
+            if absolute:
+                new=values[axis]*unit
+                if known[i]:delta.append(new-pos[i])
+                else:missing=True
+                pos[i]=new;known[i]=True
+            elif known[i]:
+                delta.append(values[axis]*unit);pos[i]+=delta[-1]
+            else:missing=True
+        if motion==0:
+            result.rapid_mm+=math.sqrt(sum(d*d for d in delta))
+            if missing:result.unestimated_moves+=1
+        elif delta and motion in (1,2,3):
+            length=math.sqrt(sum(d*d for d in delta))
+            if motion in (2,3) and was_known and ("I" in values or "J" in values):
+                cx=values.get("I",previous[0]/unit)*unit if arc_absolute else previous[0]+values.get("I",0.0)*unit
+                cy=values.get("J",previous[1]/unit)*unit if arc_absolute else previous[1]+values.get("J",0.0)*unit
+                radius=math.hypot(previous[0]-cx,previous[1]-cy)
+                sweep=math.atan2(pos[1]-cy,pos[0]-cx)-math.atan2(previous[1]-cy,previous[0]-cx)
+                if motion==2:
+                    while sweep>=0:sweep-=2*math.pi
+                else:
+                    while sweep<=0:sweep+=2*math.pi
+                length=math.hypot(radius*abs(sweep),pos[2]-previous[2])
+            feed_minutes+=length/feed
+    # Retain the analytical cutting/plunge estimate when a custom start leaves
+    # a feed move unknown; never reduce it because an omitted move was unpriced.
+    # The NC measure also includes preflight/feed moves in custom START/END.
+    result.cutting_minutes=max(result.cutting_minutes,feed_minutes)
+    return result
+
+
+def time_estimate_header(estimate:JobTimeEstimate)->List[str]:
+    lines=[f"(This job estimated machining time: {filename_minutes(estimate.total_minutes)} min - rounded up)",
+           f"(CUTTING_AND_PLUNGE_MIN: {fmt(estimate.cutting_minutes)})",
+           f"(RAPID_XYZ_DISTANCE_M: {fmt(estimate.rapid_mm/1000.0)})",
+           f"(RAPID_ESTIMATE_MM_MIN: {fmt(TIME_ESTIMATE_RAPID_MM_MIN)})",
+           f"(RAPID_ESTIMATE_MIN: {fmt(estimate.rapid_minutes)})",
+           f"(TIME_MARGIN_PERCENT: {fmt(TIME_ESTIMATE_MARGIN*100)})",
+           f"(TIME_MARGIN_MIN: {fmt(estimate.margin_minutes)})",
+           f"(FIXED_DWELL_SECONDS: {fmt(estimate.dwell_seconds)} - G4 P assumed seconds)",
+           "(TIME ESTIMATE EXCLUDES MANUAL TOOL CHANGE / PROBING / UNKNOWN MACHINE TRAVEL)",
+           "(10 PERCENT MARGIN IS AN ESTIMATE, NOT A MAXIMUM CYCLE TIME)"]
+    if estimate.unestimated_moves or estimate.external_wait:
+        lines.append(f"(UNESTIMATED_MACHINE_OR_RETURN_BLOCKS: {estimate.unestimated_moves}, ADD EXTERNAL WAIT/TRAVEL)")
+    return lines
 
 
 def machining_distance_guard(jobs:Sequence[Tuple[str,float]]) -> Tuple[List[str],List[str]]:
@@ -5618,6 +5745,8 @@ class App(tk.Tk):
         viewer_box=ttk.LabelFrame(settings_tab,text="3D 뷰어",padding=10);viewer_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Label(viewer_box,text="3D 시뮬레이션은 프로그램 내부 GPU 창에서 엽니다.\nGPU 사용이 어려우면 기본 3D 뷰어를 사용하세요.",wraplength=390).pack(anchor="w")
         ttk.Button(viewer_box,text="기본 3D 뷰어 열기",command=lambda:self.open_3d(use_gpu=False)).pack(fill="x",pady=(6,0))
+        time_box=ttk.LabelFrame(settings_tab,text="예상 가공시간",padding=10);time_box.pack(fill="x",padx=10,pady=(0,10))
+        ttk.Label(time_box,text="급속 XYZ 3,000mm/min + 이동 시간 10% 여유\n고정 대기 포함 · 교체/프로빙·기계이동 별도\n화면·파일명은 분 단위 올림 · 실제 완료시간 보장은 아님",wraplength=390).pack(anchor="w")
         update_box=ttk.LabelFrame(settings_tab,text="프로그램 업데이트",padding=12);update_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Label(update_box,text=f"현재 버전: V{APP_VERSION}\n새 버전은 다운로드 검증 후 기존 EXE를 자동 교체합니다.",justify="left").pack(anchor="w")
         ttk.Button(update_box,text="지금 업데이트 확인",command=lambda:self.start_update_check(manual=True)).pack(fill="x",pady=(8,0))
@@ -7935,7 +8064,7 @@ class App(tk.Tk):
                                      ("\n..." if len(fatal)>12 else "")+"\n\n공구 지름, 내부/외부 판정 또는 형상을 수정하세요.")
                 return
             progress.set_progress(46,"예상 절삭거리 확인 중")
-            reports=[machining_report(active,job_cfg) for _,job_cfg in jobs]
+            reports=[machining_report(active,job_cfg,include_rapid=False) for _,job_cfg in jobs]
             distance_jobs=[]
             for (label,job_cfg),report in zip(jobs,reports):
                 if job_cfg.get("tool_change_enabled"):
@@ -7974,19 +8103,19 @@ class App(tk.Tk):
                     code=code.replace("\n","\n(WARNING: TOOL DISTANCE LIMIT OVERRIDE CONFIRMED - CHECK TOOL CONDITION)\n",1)
                 generated.append((label,code))
             self.gcode_parts=generated
-            self.gcode_part_minutes=[report[1] for report in reports] if len(jobs)==2 else []
+            estimates=[job_time_estimate(code,report[1]) for (_,code),report in zip(generated,reports)]
+            self.gcode_part_minutes=[estimate.total_minutes for estimate in estimates] if len(jobs)==2 else []
             self.gcode="\n\n".join(code for _,code in generated)
             self.gcode_signature=requested_signature
             self.text.delete("1.0","end"); self.text.insert("1.0",self.gcode)
-            metres,minutes=sum(x[0] for x in reports),sum(x[1] for x in reports)
+            metres,minutes=sum(x[0] for x in reports),sum(x.total_minutes for x in estimates)
             self.gcode_job_minutes=minutes
-            simulation_moves=[]
-            for _,code in self.gcode_parts:simulation_moves.extend(parse_gcode_moves(code))
-            rapid_mm=sum(math.hypot(m.end[0]-m.start[0],m.end[1]-m.start[1]) for m in simulation_moves if m.rapid)
-            rapid_seconds=sum(m.seconds for m in simulation_moves if m.rapid)
+            rapid_mm=sum(x.rapid_mm for x in estimates)
+            rapid_seconds=sum(x.rapid_minutes for x in estimates)*60
+            dwell_seconds=sum(x.dwell_seconds for x in estimates)
             lead_note=f" | 리드인 중심 자동 {center_leads}개" if center_leads else ""
             split_note=" | ROUGH / FINISH" if len(jobs)==2 else ""
-            self.status.set(f"이번 {metres:.3f}m / {minutes:.1f}분{split_note} | 급속 XY {rapid_mm/1000:.3f}m / {rapid_seconds:.1f}초{lead_note}")
+            self.status.set(f"이번 {metres:.3f}m / 예상 {filename_minutes(minutes)}분 (+10%){split_note} | 급속 XYZ {rapid_mm/1000:.3f}m / {rapid_seconds:.1f}초 | 고정 대기 {dwell_seconds:.1f}초 | 교체·프로빙/기계이동 별도{lead_note}")
             progress.set_progress(100,"G-code 생성 완료")
         except Exception as exc:
             if progress:progress.close();progress=None

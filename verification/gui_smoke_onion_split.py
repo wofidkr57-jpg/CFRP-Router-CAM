@@ -44,6 +44,11 @@ with tempfile.TemporaryDirectory() as tmp:
             app.make_gcode()
             assert not errors.called,errors.call_args_list
         assert [label for label,_ in app.gcode_parts]==['ROUGH','FINISH']
+        assert abs(app.gcode_job_minutes-sum(app.gcode_part_minutes))<1e-9
+        assert 'rapid XYZ' in app.status.get() and '(+10%)' in app.status.get(),app.status.get()
+        assert not any('가'<=ch<='힣' for ch in app.status.get()),app.status.get()
+        for (_,code),minutes in zip(app.gcode_parts,app.gcode_part_minutes):
+            assert f'estimated machining time: {cam.filename_minutes(minutes)} min' in code
         rough,finish=[code for _,code in app.gcode_parts]
         assert 'COMMON START' in rough and 'FINISH START' not in rough
         assert 'FINISH START' in finish and 'COMMON START' not in finish
@@ -56,6 +61,8 @@ with tempfile.TemporaryDirectory() as tmp:
             assert not errors.called,errors.call_args_list
         files=list(Path(tmp).glob('*.nc'))
         assert len(files)==2 and any(p.stem.endswith('_ROUGH') for p in files) and any(p.stem.endswith('_FINISH') for p in files)
+        for label,minutes in zip(('ROUGH','FINISH'),app.gcode_part_minutes):
+            assert any(p.stem.endswith(f'_{cam.filename_minutes(minutes)}min_{label}') for p in files)
         app.vars['onion_split'].set(False);app.sync_onion_split();app.save_settings()
     finally:app.destroy()
     app=cam.App()
