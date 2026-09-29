@@ -1,6 +1,6 @@
 {
-  "version": "1.35",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.35/CFRP_Router_CAM.exe",
-  "sha256": "6bfe32093365688cb8d6afbb8fac4e732103cc32bb1971537f1520de5da1cbe0",
+  "version": "1.36",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.36/CFRP_Router_CAM.exe",
+  "sha256": "5b2ef1cc690bdab820ff364534643271b398c7ff75df31317ce30fb4552a2113",
   "message": "예상 시간에 급속 XYZ 이동(3000mm/min), 10% 여유와 고정 대기를 포함했습니다. 화면과 파일명은 분 단위로 올림하며 교체·프로빙·알 수 없는 기계 이동 시간은 별도입니다."
 }
