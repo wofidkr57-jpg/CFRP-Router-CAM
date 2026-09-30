@@ -1174,6 +1174,22 @@ def rotate_closed_path(pts: Sequence[Point], s: float) -> List[Point]:
     return [p] + list(pts[seg + 1:]) + list(pts[:seg + 1])
 
 
+def start_cut_direction(contour: Contour, climb: bool) -> Optional[Point]:
+    """Unit tangent leaving a selected profile start, in the NC cut direction."""
+    if not contour.closed or contour.operation == "pocket" or contour.start_s <= EPS:
+        return None
+    start = point_at(contour.points, contour.start_s, True)[0]
+    want_ccw = (contour.role == "inner") if climb else (contour.role != "inner")
+    route = reverse_if_needed(list(contour.points), want_ccw)
+    route = rotate_closed_path(route, nearest_path_distance(route, start, True)[1])
+    for next_point in route[1:]:
+        length = dist(route[0], next_point)
+        if length > EPS:
+            return ((next_point[0] - route[0][0]) / length,
+                    (next_point[1] - route[0][1]) / length)
+    return None
+
+
 def polygon_centroid(pts: Sequence[Point]) -> Point:
     a = signed_area(pts)
     if abs(a) < EPS:
@@ -5571,7 +5587,7 @@ class App(tk.Tk):
         self.origin_btn = ttk.Button(controls, text="DXF XY 원점 선택: OFF", command=self.toggle_origin)
         self.origin_btn.grid(row=r, columnspan=2, sticky="ew", pady=2); r += 1
         self.var("climb", True, tk.BooleanVar); self.var("full_depth", True, tk.BooleanVar)
-        ttk.Checkbutton(controls, text="Climb milling", variable=self.vars["climb"]).grid(row=r, columnspan=2, sticky="w", pady=4); r += 1
+        ttk.Checkbutton(controls, text="Climb milling", variable=self.vars["climb"], command=self.redraw).grid(row=r, columnspan=2, sticky="w", pady=4); r += 1
         self.var("rapid_optimize",True,tk.BooleanVar)
         ttk.Checkbutton(controls,text="급속이송 최소화 (홀 묶음)",variable=self.vars["rapid_optimize"],
                         command=self.redraw).grid(row=r,columnspan=2,sticky="w");r+=1
@@ -7936,7 +7952,16 @@ class App(tk.Tk):
                 self.canvas.create_oval(x-5,y-5,x+5,y+5,fill="#ff9f1c",outline="",tags=(group_tag,) if group_tag else ())
             if c.closed and c.start_s > EPS:
                 p,_,_=point_at(c.points,c.start_s,True); x,y=self.transform(p)
-                self.canvas.create_polygon(x,y-7,x-6,y+5,x+6,y+5,fill="#ff4fd8",outline="white",tags=(group_tag,) if group_tag else ())
+                direction=start_cut_direction(c,self.vars["climb"].get())
+                if direction is None:
+                    self.canvas.create_oval(x-5,y-5,x+5,y+5,fill="#ff4fd8",outline="white",tags=(group_tag,) if group_tag else ())
+                else:
+                    ux,uy=direction[0],-direction[1]  # Canvas Y points down.
+                    px,py=-uy,ux
+                    self.canvas.create_polygon(x+9*ux,y+9*uy,
+                                               x-5*ux+6*px,y-5*uy+6*py,
+                                               x-5*ux-6*px,y-5*uy-6*py,
+                                               fill="#ff4fd8",outline="white",tags=(group_tag,) if group_tag else ())
         self.canvas.addtag_all("view_live")
         detail_marker=self.canvas_item_marker()
         if self.manual_array_mode and self.vars["show_toolpath"].get():self.draw_manual_offsets(visible)
@@ -7956,6 +7981,7 @@ class App(tk.Tk):
                         preview_cfg[key]=0.0
             except (tk.TclError, ValueError): preview_radius = 1.0;preview_cfg={}
             auto_trim_value=bool(self.vars.get("auto_trim") and self.vars["auto_trim"].get())
+            climb_value=bool(self.vars["climb"].get())
             geometry_signature=hash(tuple((id(c),c.enabled,c.safety_excluded,c.closed,c.role,c.target_depth,
                 tuple((round(x,5),round(y,5)) for x,y in c.points)) for c in self.contours))
             dimension_key=(preview_cfg.get("inner_size_adjust",0),preview_cfg.get("outer_size_adjust",0))
@@ -8002,10 +8028,13 @@ class App(tk.Tk):
                 anchor=c.points[0]
                 relative_points=tuple((round(x-anchor[0],7),round(y-anchor[1],7)) for x,y in c.points)
                 cache_key=(relative_points,c.closed,c.role,c.forced_role,c.depth,c.enabled,
-                           round(c.start_s,8),round(preview_radius,8),auto_trim,dimension_key)
+                           round(c.start_s,8),round(preview_radius,8),auto_trim,dimension_key,climb_value)
                 cached=self.preview_cache.get(cache_key)
                 if cached is None:
-                    route,removed_loops,cut_points=compensated_route(c,preview_radius*2,auto_trim,cfg=preview_cfg)
+                    want_ccw=(c.role=="inner") if climb_value else (c.role!="inner")
+                    source_points=reverse_if_needed(list(c.points),want_ccw)
+                    route,removed_loops,cut_points=compensated_route(
+                        c,preview_radius*2,auto_trim,source_points,cfg=preview_cfg)
                     if c.start_s > EPS:
                         start_point=point_at(c.points,c.start_s,True)[0]
                         route=rotate_closed_path(route,nearest_path_distance(route,start_point,True)[1])
