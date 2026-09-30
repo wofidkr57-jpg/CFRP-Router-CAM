@@ -1,3 +1,9 @@
+## V1.39: 시작점 방향 표시와 5분 작업 임시 저장
+
+지정 시작점의 자주색 화살표와 2D 공구 경로가 실제 외곽/내곽 절삭 진행 방향을 표시합니다. Climb milling 설정을 바꾸면 즉시 갱신됩니다. 생성 NC의 절삭 경로는 바뀌지 않습니다.
+
+작업 중 5분마다 변경된 상태를 `%APPDATA%\CFRP_Router_CAM\autosave`에 별도 파일로 저장합니다. 비정상 종료 뒤 다시 실행하면 최신 임시 작업의 복구 여부를 묻습니다. 정상적으로 작업을 저장하거나 종료하면 해당 임시 파일을 정리합니다. 원래 `.cfrpcam` 파일은 자동 저장으로 덮어쓰지 않습니다. 종료 시 변경된 작업이 있으면 저장 여부를 묻고, 아직 작업파일이 없다면 날짜 이름의 저장 창을 엽니다.
+
 ## V1.38: 전체 판재 중앙 기준으로 외곽 순서 수정
 
 `중앙 → 바깥 (시계/반시계)`는 왼쪽 어레이 설정의 **판재 X÷2, 판재 Y÷2**를 기준으로 가까운 거리층부터 외곽을 가공합니다. 판재 좌하단은 배치 좌표 (0,0)이며 G54/선택 원점과 별개입니다. 한쪽에만 파츠를 배치해도 파츠 범위로 중심을 다시 잡지 않습니다. 판재 크기를 수정한 뒤 Enter 또는 다른 항목으로 이동하면 목록·미리보기 순서를 갱신하고, 다음 NC 생성/저장에 새 기준을 반영합니다. 내부 홀/포켓 및 수동 지정 순번은 우선하며 각 윤곽의 절삭 방향은 유지합니다.
@@ -210,7 +216,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.38**입니다.
+현재 최신 버전은 **V1.39**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -232,7 +238,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.38 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.38/CFRP_Router_CAM_V1.38_source.zip)
+- [V1.39 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.39/CFRP_Router_CAM_V1.39_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
