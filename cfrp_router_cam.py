@@ -33,12 +33,15 @@ import queue
 import re
 import copy
 import ctypes
+import contextlib
+import functools
 import json
 import shutil
 import subprocess
 import sys
 import threading
 import time
+import traceback
 import urllib.request
 import multiprocessing as mp
 import tkinter as tk
@@ -75,6 +78,135 @@ DEFAULT_END_CODE = "G0 Z{SAFE_Z}\nM5\nM30\n%"
 OBJECT_COLORS = ("#ffd84d", "#67d9ff", "#ff8fb8", "#9ee56f", "#c9a0ff", "#ffad5c", "#72e0c1", "#f4ef7a")
 OBJECT_TREE_COLORS = OBJECT_COLORS
 OUTER_ORDER_CHOICES = ("가까운 순서", "중앙 → 바깥 (시계)", "중앙 → 바깥 (반시계)")
+
+
+class UiDiagnostics:
+    """Bounded, local-only diagnostics for a blocked Tk event loop."""
+
+    def __init__(self, directory=None, stall_seconds=10.0, poll_seconds=1.0):
+        base = os.environ.get("LOCALAPPDATA") or os.environ.get("APPDATA") or os.path.expanduser("~")
+        self.directory = directory or os.path.join(base, SETTINGS_APPDATA_DIR, "diagnostics")
+        self.path = os.path.join(self.directory, "carboncam.log")
+        self.stall_seconds = stall_seconds
+        self.poll_seconds = poll_seconds
+        self._lock = threading.RLock()
+        self._stop = threading.Event()
+        self._heartbeat = time.monotonic()
+        self._activity = []
+        self._reported = False
+        self._last_report = 0.0
+        self._main_thread = threading.get_ident()
+        try:
+            os.makedirs(self.directory, exist_ok=True)
+            self.write("session_start", version=APP_VERSION)
+        except OSError:
+            self.path = None
+        self._watcher = threading.Thread(target=self._watch, name="CarbonCAM-UI-watchdog", daemon=True)
+        self._closed = False
+        self._watcher.start()
+
+    def write(self, event, **fields):
+        if not self.path:
+            return
+        line = " | ".join([datetime.now().astimezone().isoformat(timespec="seconds"), event] +
+                          [f"{key}={value}" for key, value in fields.items()]) + "\n"
+        with self._lock:
+            try:
+                if os.path.exists(self.path) and os.path.getsize(self.path) > 2_000_000:
+                    old = self.path + ".1"
+                    if os.path.exists(old):
+                        os.remove(old)
+                    os.replace(self.path, old)
+                with open(self.path, "a", encoding="utf-8") as stream:
+                    stream.write(line)
+            except OSError:
+                pass  # Diagnostics must never prevent a job from opening or saving.
+
+    def heartbeat(self):
+        now = time.monotonic()
+        with self._lock:
+            elapsed = now - self._heartbeat
+            recovered = self._reported
+            self._heartbeat = now
+            self._reported = False
+        if recovered:
+            self.write("ui_recovered", elapsed_s=f"{elapsed:.1f}")
+
+    @contextlib.contextmanager
+    def activity(self, name, contours=0, objects=0):
+        entry = (name, time.monotonic(), contours, objects)
+        with self._lock:
+            self._activity.append(entry)
+        try:
+            yield
+        except Exception as exc:
+            self.error(name, exc)
+            raise
+        finally:
+            elapsed = time.monotonic() - entry[1]
+            with self._lock:
+                self._activity.remove(entry)
+            if elapsed >= 2.0:
+                self.write("slow_action", action=name, elapsed_s=f"{elapsed:.1f}",
+                           contours=contours, objects=objects)
+
+    @staticmethod
+    def _stack_for_traceback(tb):
+        frames = traceback.extract_tb(tb)[-16:]
+        return ">".join(f"{os.path.basename(frame.filename)}:{frame.lineno}:{frame.name}" for frame in frames)
+
+    def error(self, action, exc):
+        self.write("action_error", action=action, error=type(exc).__name__,
+                   stack=self._stack_for_traceback(exc.__traceback__))
+
+    def _watch(self):
+        while not self._stop.wait(self.poll_seconds):
+            now = time.monotonic()
+            with self._lock:
+                elapsed = now - self._heartbeat
+                if elapsed < self.stall_seconds or (self._reported and now - self._last_report < 30):
+                    continue
+                activity = self._activity[-1] if self._activity else None
+            frame = sys._current_frames().get(self._main_thread)
+            stack = traceback.extract_stack(frame)[-20:] if frame is not None else []
+            if any(os.path.basename(item.filename) in
+                   ("filedialog.py", "messagebox.py", "simpledialog.py", "commondialog.py") for item in stack):
+                # A native file/message dialog waits for the operator by design.
+                with self._lock:
+                    self._heartbeat = now
+                continue
+            with self._lock:
+                if now - self._heartbeat < self.stall_seconds:
+                    continue
+                self._reported = True
+                self._last_report = now
+            # Only source basenames, line numbers and function names: never CAD or job paths.
+            location = ">".join(f"{os.path.basename(item.filename)}:{item.lineno}:{item.name}" for item in stack)
+            self.write("ui_unresponsive", elapsed_s=f"{elapsed:.1f}",
+                       action=activity[0] if activity else "event_loop",
+                       contours=activity[2] if activity else "-",
+                       objects=activity[3] if activity else "-", stack=location)
+
+    def close(self):
+        if self._closed:
+            return
+        self._closed = True
+        self._stop.set()
+        self.write("session_end")
+
+
+def diagnose_ui_action(name):
+    def decorate(method):
+        @functools.wraps(method)
+        def wrapper(self, *args, **kwargs):
+            diagnostics = getattr(self, "diagnostics", None)
+            if diagnostics is None:
+                return method(self, *args, **kwargs)
+            with diagnostics.activity(name, len(getattr(self, "contours", ())),
+                                      len(getattr(self, "part_objects", ()))):
+                return method(self, *args, **kwargs)
+        return wrapper
+    return decorate
 
 
 # UI language is deliberately separate from CAM values and NC output.  Existing
@@ -5350,6 +5482,8 @@ class NativeToolpath3D(Toolpath3D):
 class App(tk.Tk):
     def __init__(self):
         super().__init__()
+        self.diagnostics = UiDiagnostics()
+        self._diagnostic_job = self.after(1000, self._diagnostic_heartbeat)
         self._configure_theme()
         language = saved_interface_language()
         self._language_was_prompted = language is None
@@ -5437,6 +5571,24 @@ class App(tk.Tk):
         self.after(JOB_AUTOSAVE_INTERVAL_MS,self.autosave_tick)
         self.after_idle(self.offer_autosave_recovery)
         if getattr(sys,"frozen",False):self.after(1800,self.start_update_check)
+
+    def _diagnostic_heartbeat(self):
+        self.diagnostics.heartbeat()
+        self._diagnostic_job = self.after(1000, self._diagnostic_heartbeat)
+
+    def destroy(self):
+        if getattr(self,"_diagnostic_job",None) is not None:
+            try:self.after_cancel(self._diagnostic_job)
+            except tk.TclError:pass
+            self._diagnostic_job = None
+        self.diagnostics.close()
+        super().destroy()
+
+    def open_diagnostics_folder(self):
+        if self.diagnostics.path:
+            os.startfile(self.diagnostics.directory)
+        else:
+            messagebox.showinfo("진단 로그", "진단 로그 폴더를 만들 수 없습니다.")
 
     def var(self, key, value, cls=tk.DoubleVar):
         self.vars[key] = cls(value=value)
@@ -5921,6 +6073,9 @@ class App(tk.Tk):
         update_box=ttk.LabelFrame(settings_tab,text="프로그램 업데이트",padding=12);update_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Label(update_box,text=f"현재 버전: V{APP_VERSION}\n새 버전은 다운로드 검증 후 기존 EXE를 자동 교체합니다.",justify="left").pack(anchor="w")
         ttk.Button(update_box,text="지금 업데이트 확인",command=lambda:self.start_update_check(manual=True)).pack(fill="x",pady=(8,0))
+        diagnostic_box=ttk.LabelFrame(settings_tab,text="응답 없음 진단",padding=10);diagnostic_box.pack(fill="x",padx=10,pady=(0,10))
+        ttk.Label(diagnostic_box,text="10초 이상 화면이 멈추면 작업 단계와 코드 위치를 로컬 로그에 기록합니다.\n도면 내용과 파일명은 기록하지 않습니다.",wraplength=390).pack(anchor="w")
+        ttk.Button(diagnostic_box,text="진단 로그 폴더 열기",command=self.open_diagnostics_folder).pack(fill="x",pady=(6,0))
         change_box=ttk.LabelFrame(settings_tab,text="중간 공구 교체",padding=10);change_box.pack(fill="x",padx=10,pady=(0,10))
         ttk.Checkbutton(change_box,text="가공거리 균등 분할 교체 사용",variable=self.var("tool_change_enabled",False,tk.BooleanVar)).grid(row=0,columnspan=2,sticky="w")
         for row,(key,label,value,cls) in enumerate((
@@ -6382,6 +6537,7 @@ class App(tk.Tk):
             widget=getattr(self,attr);widget.configure(state="normal");widget.delete("1.0","end");widget.insert("1.0",text)
         self.sync_onion_split()
 
+    @diagnose_ui_action("load_job")
     def load_job_file(self,path:str,recovered:bool=False):
         try:
             with open(path,encoding="utf-8") as f:data=json.load(f)
@@ -6575,6 +6731,7 @@ class App(tk.Tk):
         self.measure_start=None;self.measurement=None;self.undo_stack.clear();self.redo_stack.clear();self.view_only=None
         self.selected=None;self.selected_contours=[];self.view_initialized=False
 
+    @diagnose_ui_action("rebuild_object_preview")
     def rebuild_object_preview(self):
         nested=[]
         try:gap=max(10.0,float(self.vars["array_gap"].get()))
@@ -6599,6 +6756,7 @@ class App(tk.Tk):
         # cleared tabs.  Only fill tabs that have never been decided.
         self.apply_auto_tabs(record=False,preserve_existing=True)
 
+    @diagnose_ui_action("set_single_part")
     def set_single_part(self,contours:Sequence[Contour],filename:str,stock:Optional[float]=None,
                         display_name:Optional[str]=None,layout_group:str=""):
         self.part_objects=[];self.next_object_id=1;self.instance_clipboard=[]
@@ -6606,6 +6764,7 @@ class App(tk.Tk):
         if stock is not None:self.vars["stock"].set(round(stock,4))
         self.reset_job_view();self.rebuild_object_preview();self.refresh_object_tree()
 
+    @diagnose_ui_action("add_part_object")
     def add_part_object(self,contours:Sequence[Contour],filename:str,stock:Optional[float]=None,
                         display_name:Optional[str]=None,layout_group:str=""):
         if self.nest_active:self.rebuild_object_preview()
@@ -6756,6 +6915,7 @@ class App(tk.Tk):
                             f"개체 {len(keys)}개 복사 | Ctrl+V로 붙여넣기")
         return "break"
 
+    @diagnose_ui_action("paste_instances")
     def paste_selected_instances(self,event=None):
         if event is not None and event.widget is not self.canvas:return
         copied=getattr(self,"instance_clipboard",[])
@@ -6837,13 +6997,17 @@ class App(tk.Tk):
         files=filedialog.askopenfilenames(title="DXF / STEP 여러 파일 추가",
             filetypes=[("CAD 파일","*.dxf *.step *.stp"),("DXF","*.dxf"),("STEP","*.step *.stp"),("All","*.*")])
         if not files:return
+        if getattr(self,"diagnostics",None):self.diagnostics.write("import_batch", files=len(files))
         self.pending_imports.extend(files);self.process_next_import()
 
+    @diagnose_ui_action("import_next_file")
     def process_next_import(self):
         if not self.pending_imports:
             self.status.set(f"여러 파일 가져오기 완료 | 객체 {len(self.part_objects)}개")
             return
         fn=self.pending_imports.pop(0);ext=os.path.splitext(fn)[1].lower()
+        if getattr(self,"diagnostics",None):
+            self.diagnostics.write("import_file_start", kind=ext.lstrip("."), remaining=len(self.pending_imports))
         try:
             if ext==".dxf":
                 cfg=self.config();contours=dxf_to_contours(fn,gap_tol=0.0)
@@ -6870,6 +7034,7 @@ class App(tk.Tk):
                 return
             raise ValueError("DXF 또는 STEP 파일만 추가할 수 있습니다.")
         except Exception as exc:
+            if getattr(self,"diagnostics",None):self.diagnostics.error("import_next_file",exc)
             messagebox.showerror("여러 파일 가져오기",f"{os.path.basename(fn)}\n{exc}")
             self.after(10,self.process_next_import)
 
@@ -6878,12 +7043,16 @@ class App(tk.Tk):
         if not fn: return
         try:
             cfg = self.config()
-            contours = dxf_to_contours(fn, gap_tol=0.0)
+            diagnostics=getattr(self,"diagnostics",None)
+            with (diagnostics.activity("parse_dxf",len(self.contours),len(self.part_objects))
+                  if diagnostics else contextlib.nullcontext()):
+                contours = dxf_to_contours(fn, gap_tol=0.0)
             if not contours: raise ValueError("지원되는 2D 형상을 찾지 못했습니다.")
             repaired = heal_open_contours(contours, cfg["gap_tol"]);self.set_single_part(contours,fn)
             layered = sum(c.target_depth is not None for c in contours)
             self.status.set(f"{os.path.basename(fn)} | 윤곽 {len(self.contours)}개 | 자동복구 {repaired}곳 | 레이어 깊이 {layered}개")
         except Exception as exc:
+            if getattr(self,"diagnostics",None):self.diagnostics.error("open_dxf",exc)
             messagebox.showerror("DXF 오류", str(exc))
 
     def open_step(self):
@@ -6892,14 +7061,20 @@ class App(tk.Tk):
         try:
             self.status.set("STEP 형상 읽는 중...");self.update_idletasks()
             progress=ProgressDialog(self,"STEP 불러오기")
-            try:model=load_step_model(fn,progress=progress.set_progress)
+            try:
+                diagnostics=getattr(self,"diagnostics",None)
+                with (diagnostics.activity("parse_step",len(self.contours),len(self.part_objects))
+                      if diagnostics else contextlib.nullcontext()):
+                    model=load_step_model(fn,progress=progress.set_progress)
             finally:progress.close()
             StepSetupDialog(self,model,self.accept_step_contours)
             self.status.set(f"{os.path.basename(fn)} | STEP 면 {len(model.faces)}개 | 작업좌표계를 설정하세요")
         except Exception as exc:
+            if getattr(self,"diagnostics",None):self.diagnostics.error("open_step",exc)
             self.status.set("STEP 불러오기 실패")
             messagebox.showerror("STEP 오류",str(exc))
 
+    @diagnose_ui_action("accept_step_contours")
     def accept_step_contours(self,contours:List[Contour],filename:str,face_number:int,matrix:List[List[float]],
                              stock:float,depth_count:int,added_count:int):
         parts=split_step_contour_parts(contours)
@@ -6922,6 +7097,7 @@ class App(tk.Tk):
         self.set_single_part([outer,hole,Contour(circle,True,"example circle")],"example")
         self.status.set("예제: 80 × 25 mm, 내부 형상 2개")
 
+    @diagnose_ui_action("auto_nest")
     def auto_nest(self):
         if not self.contours:
             messagebox.showinfo("자동 어레이","먼저 DXF 또는 STEP 형상을 가져오세요.");return
@@ -7005,6 +7181,7 @@ class App(tk.Tk):
             templates={(oid,angle):oriented_contour_group(part_by_id[oid].contours,angle)[0]
                        for oid,angle in dict.fromkeys((p.object_id,p.angle) for p in placements)}
         except Exception as exc:
+            if getattr(self,"diagnostics",None):self.diagnostics.error("auto_nest",exc)
             progress.close();messagebox.showerror("자동 어레이",str(exc));return
         self.push_undo("자동 어레이")
         if not self.nest_active:self.nest_source=copy.deepcopy(self.contours)
@@ -7040,6 +7217,7 @@ class App(tk.Tk):
         missing=[f"{part_by_id[oid].name}: {placed_counts.get(oid,0)}/{qty}개" for oid,qty in requested.items() if placed_counts.get(oid,0)<qty]
         if missing:messagebox.showwarning("판재 공간 부족","다음 객체는 요청 수량을 모두 배치하지 못했습니다.\n\n"+"\n".join(missing))
 
+    @diagnose_ui_action("create_manual_array")
     def create_manual_array(self,cfg:dict)->int:
         if not self.part_objects:
             legacy=copy.deepcopy(self.contours);self.part_objects=[self.make_part_object(legacy,self.filename or "객체 1")]
@@ -7100,6 +7278,7 @@ class App(tk.Tk):
                         a[1]<b[3]+gap-EPS and b[1]<a[3]+gap-EPS):overlap+=1
         return outside,overlap
 
+    @diagnose_ui_action("toggle_manual_array")
     def toggle_manual_array(self):
         if self.manual_array_mode:
             self.manual_array_mode=False;self.manual_array_drag=None;self.manual_array_selected=None
@@ -7508,6 +7687,7 @@ class App(tk.Tk):
         self.update_selection_fields()
         if sync_tree:self.sync_order_tree_selection()
 
+    @diagnose_ui_action("refresh_order_tree")
     def refresh_order_tree(self):
         if not hasattr(self,"order_tree"): return
         old_children=self.order_tree.get_children();old_top=self.order_tree.yview()[0] if old_children else 0.0
@@ -8011,6 +8191,7 @@ class App(tk.Tk):
         for item in self.canvas.find_all():
             if int(item)>marker:self.canvas.addtag_withtag(tag,item)
 
+    @diagnose_ui_action("redraw")
     def redraw(self,refresh_tree=True):
         if self.view_redraw_job is not None:
             try:self.after_cancel(self.view_redraw_job)
@@ -8241,6 +8422,7 @@ class App(tk.Tk):
             self.canvas.create_text(ox+10,oy+12,text="Z0",fill="#72a7ff",anchor="nw",font=("Arial",self.ui_font_size,"bold"))
         self.tag_canvas_items_after(overlay_marker,"view_live")
 
+    @diagnose_ui_action("canvas_press")
     def canvas_press(self,event):
         self.canvas.focus_set()
         if self.manual_array_mode:
@@ -8265,6 +8447,7 @@ class App(tk.Tk):
         self.canvas_selection_drag=(event.x,event.y,event.x,event.y)
         self.canvas.delete("selection_box")
 
+    @diagnose_ui_action("canvas_drag")
     def canvas_left_drag(self,event):
         if self.manual_array_mode:
             if self.manual_array_drag is None:return
@@ -8353,6 +8536,7 @@ class App(tk.Tk):
         elif not (self.start_mode or self.join_mode or self.manual_mode):
             self.set_contour_selection([]);self.redraw(refresh_tree=False)
 
+    @diagnose_ui_action("make_gcode")
     def make_gcode(self):
         if not self.contours: messagebox.showinfo("안내", "먼저 DXF를 열어 주세요."); return
         progress:Optional[ProgressDialog]=None
@@ -8472,6 +8656,7 @@ class App(tk.Tk):
             progress.set_progress(100,"G-code 생성 완료")
         except Exception as exc:
             if progress:progress.close();progress=None
+            if getattr(self,"diagnostics",None):self.diagnostics.error("make_gcode",exc)
             messagebox.showerror("생성 오류",str(exc))
         finally:
             if progress:progress.close()
