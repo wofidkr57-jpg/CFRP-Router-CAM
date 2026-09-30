@@ -107,7 +107,11 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_outer_order.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
+          python verification/gui_smoke_multi_outer_drag.py
+          if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_center_out_order.py
+          if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
+          python verification/gui_smoke_depth_first_order.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_start_arrow.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }

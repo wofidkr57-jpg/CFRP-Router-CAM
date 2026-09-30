@@ -7582,7 +7582,17 @@ class App(tk.Tk):
         if {id(c) for c in targets}=={id(c) for c in self.selected_contours} and primary is self.selected:return
         self.set_contour_selection(targets,primary,sync_tree=False)
         if self.manual_array_mode:self.update_manual_selection_display()
-        else:self.redraw(refresh_tree=False)
+        else:self.update_contour_selection_display()
+
+    def update_contour_selection_display(self):
+        """A list click changes only contour line styles, not the whole scene."""
+        selected_ids={id(c) for c in self.selected_contours}
+        for record in getattr(self,"contour_selection_items",()):
+            item,contour,normal,current=record
+            style={"fill":"#42e695" if id(contour) in selected_ids else normal,
+                   "width":3 if id(contour) in selected_ids else 2}
+            if style!=current:
+                self.canvas.itemconfigure(item,**style);record[3]=style
 
     def tree_cell_click(self,event):
         self.clear_order_drop()
@@ -7594,7 +7604,16 @@ class App(tk.Tk):
         if not event.state & 0x0005 and column not in ("#2","#3","#4"):
             c=self.contours[int(item[1:])]
             if c.enabled and c.closed and c.role=="outer" and c.operation!="pocket":
-                self.order_drag=(c,event.y,None)
+                selected=set(self.order_tree.selection())
+                source_ids=selected if item in selected else {item}
+                sources=tuple(self.contours[int(i[1:])] for i in self.order_tree.get_children()
+                              if i in source_ids and self.contours[int(i[1:])].enabled
+                              and self.contours[int(i[1:])].closed and self.contours[int(i[1:])].role=="outer"
+                              and self.contours[int(i[1:])].operation!="pocket")
+                self.order_drag=(sources,event.y,None)
+                if item in selected and len(selected)>1:
+                    self.order_tree.focus(item);self.tree_select()
+                    return "break"
         if column=="#2" and not event.state & 0x0005:
             c=self.contours[int(item[1:])]
             if c.closed and c.role=="outer" and c.operation!="pocket":
@@ -7618,7 +7637,7 @@ class App(tk.Tk):
 
     def drag_outer_order(self,event):
         if self.order_drag is None:return
-        source,start_y,target=self.order_drag
+        sources,start_y,target=self.order_drag
         if abs(event.y-start_y)<5 and target is None:return
         self.clear_order_drop()
         target=None
@@ -7626,7 +7645,8 @@ class App(tk.Tk):
             iid=self.order_tree.identify_row(event.y)
             if iid:
                 candidate=self.contours[int(iid[1:])];box=self.order_tree.bbox(iid)
-                if box and candidate.enabled and candidate.closed and candidate.role=="outer" and candidate.operation!="pocket":
+                if (box and candidate.enabled and candidate.closed and candidate.role=="outer"
+                        and candidate.operation!="pocket" and all(candidate is not c for c in sources)):
                     after=event.y>=box[1]+box[3]/2
                     target=(candidate,after)
                     self.order_insert_line.place(x=0,y=box[1]+(box[3] if after else 0)-1,
@@ -7640,31 +7660,35 @@ class App(tk.Tk):
                     self.order_tree.yview_scroll(direction,"units")
                     self.drag_outer_order(event)
                 self.order_scroll_after=self.after(120,scroll)
-        self.order_drag=(source,start_y,target)
+        self.order_drag=(sources,start_y,target)
         return "break"
 
     def apply_outer_sequence(self,outer,source):
         self.push_undo("외곽 순서 변경")
         for rank,c in enumerate(outer,1):c.outer_cut_order=rank
         self.tree_sort_col=None;self.tree_sort_reverse=False;self.preview_order_cache_key=None
-        self.set_contour_selection([source],source);self.redraw()
+        selection=list(source) if isinstance(source,tuple) else [source]
+        self.set_contour_selection(selection,selection[0]);self.redraw()
         self.status.set("외곽 순서 변경 완료 · 내부 먼저 / 지정 외곽 순서 고정 · Ctrl+Z 되돌리기")
 
     def drop_outer_order(self,event):
         drag=self.order_drag;self.order_drag=None;self.clear_order_drop()
         if drag is None:return
-        source,start_y,target=drag
+        sources,start_y,target=drag
         if target is None or not (0<=event.x<self.order_tree.winfo_width() and 20<=event.y<self.order_tree.winfo_height()):return
         candidate,after=target
-        if source is candidate:return "break"
+        if any(candidate is c for c in sources):return "break"
         # Match the visible insertion line even if the user sorted a column.
         outer=[self.contours[int(i[1:])] for i in self.order_tree.get_children()]
         outer=[c for c in outer if c.enabled and c.closed and c.role=="outer" and c.operation!="pocket"]
-        if not any(c is source for c in outer) or not any(c is candidate for c in outer):return
-        outer=[c for c in outer if c is not source]
+        if not all(any(c is moving for c in outer) for moving in sources) or not any(c is candidate for c in outer):return
+        before=tuple(outer)
+        moving_ids={id(c) for c in sources}
+        outer=[c for c in outer if id(c) not in moving_ids]
         target_index=next(i for i,c in enumerate(outer) if c is candidate)
-        outer.insert(target_index+int(after),source)
-        self.apply_outer_sequence(outer,source)
+        outer[target_index+int(after):target_index+int(after)]=sources
+        if all(a is b for a,b in zip(outer,before)):return "break"
+        self.apply_outer_sequence(outer,sources)
         return "break"
 
     def move_outer_step(self,direction):
@@ -7999,7 +8023,7 @@ class App(tk.Tk):
         self.pending_view_scale=1.0;self.pending_view_tx=self.pending_view_ty=0.0
         self.view_interacting=False
         self.canvas.delete("all")
-        self.manual_pick_bounds=None;self.manual_selection_items=[]
+        self.manual_pick_bounds=None;self.manual_selection_items=[];self.contour_selection_items=[]
         if refresh_tree:self.refresh_order_tree();self.refresh_object_tree()
         if not self.contours: return
         x0,y0,x1,y1 = self.bounds(); w=max(self.canvas.winfo_width(),100); h=max(self.canvas.winfo_height(),100)
@@ -8055,9 +8079,10 @@ class App(tk.Tk):
             color = "#42e695" if id(c) in selected_ids or group_chosen else ("#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d"))
             style={"fill":color,"width":3 if id(c) in selected_ids else 2}
             item=self.canvas.create_line(*xy,**style,tags=(group_tag,) if group_tag else ())
+            normal="#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d")
+            self.contour_selection_items.append([item,c,normal,style])
             if self.manual_array_mode:
-                normal={"fill":"#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d")}
-                self.manual_selection_items.append([item,contour_group_key(c),c,normal,style])
+                self.manual_selection_items.append([item,contour_group_key(c),c,{"fill":normal},style])
             for a,b in c.bridges:
                 ax,ay=self.transform(a); bx,by=self.transform(b)
                 self.canvas.create_line(ax,ay,bx,by,fill="#d66bff",width=4,tags=(group_tag,) if group_tag else ())
