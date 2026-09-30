@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.40"
+APP_VERSION = "1.41"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
@@ -133,6 +133,7 @@ _UI_EN_EXACT = {
     "G-code 생성": "Generate G-code",
     "G-code 저장": "Save G-code",
     "경로 허용오차 (mm)": "Path tolerance (mm)",
+    "윤곽 원호 G2/G3 사용": "Use G2/G3 arcs on profiles",
     "포켓 연속 가공": "Stay down within pocket",
     "안전 Z 자동: 판 두께 × 2": "Auto Safe Z: stock thickness x 2",
     "급속 접근 여유 (mm)": "Rapid approach clearance (mm)",
@@ -1724,15 +1725,76 @@ def simplify_cut_path(points:Sequence[Point],tolerance:float) -> List[Point]:
     return out if len(out)<len(pts) else pts
 
 
-def cut_xyz_lines(points:Sequence[Point3],feed:float,tolerance:float) -> List[str]:
+def fitted_arc(points:Sequence[Point],tolerance:float):
+    """Return a Mach3 incremental-IJ arc only when the emitted arc tracks the chords."""
+    if tolerance<=0 or len(points)<4:return None
+    start,middle,end=points[0],points[len(points)//2],points[-1]
+    ax,ay=middle[0]-start[0],middle[1]-start[1]
+    bx,by=end[0]-start[0],end[1]-start[1]
+    determinant=2*(ax*by-ay*bx)
+    if abs(determinant)<1e-9:return None
+    a2=ax*ax+ay*ay;b2=bx*bx+by*by
+    cx=start[0]+(a2*by-b2*ay)/determinant
+    cy=start[1]+(b2*ax-a2*bx)/determinant
+    # Validate the rounded words actually sent to Mach3, not only the fit.
+    sx,sy=(float(fmt(v)) for v in start)
+    ex,ey=(float(fmt(v)) for v in end)
+    ix=float(fmt(cx-start[0]));jy=float(fmt(cy-start[1]))
+    cx,cy=sx+ix,sy+jy
+    radius=math.hypot(sx-cx,sy-cy)
+    if not math.isfinite(radius) or radius<.1 or abs(math.hypot(ex-cx,ey-cy)-radius)>.001:
+        return None
+    angle=0.;direction=0;chord_length=0.
+    for p,q in zip(points,points[1:]):
+        ux,uy=p[0]-cx,p[1]-cy;vx,vy=q[0]-cx,q[1]-cy
+        turn=math.atan2(ux*vy-uy*vx,ux*vx+uy*vy)
+        if abs(turn)<1e-7 or abs(turn)>math.pi/2:return None
+        sign=1 if turn>0 else -1
+        if direction and sign!=direction:return None
+        direction=sign;angle+=turn
+        segment=math.dist(p,q)
+        if segment<=EPS:return None
+        chord_length+=segment
+        dx,dy=q[0]-p[0],q[1]-p[1]
+        nearest=max(0.,min(1.,((cx-p[0])*dx+(cy-p[1])*dy)/(segment*segment)))
+        foot=(p[0]+nearest*dx,p[1]+nearest*dy)
+        for point in (p,foot,q):
+            if abs(math.hypot(point[0]-cx,point[1]-cy)-radius)>tolerance+1e-7:
+                return None
+    if not math.radians(15)<=abs(angle)<=math.radians(150):return None
+    if abs(radius*angle)-chord_length>.005:return None
+    return ("G3" if direction>0 else "G2",ex,ey,ix,jy)
+
+
+def cut_xyz_lines(points:Sequence[Point3],feed:float,tolerance:float,
+                  arc_fit:bool=False) -> List[str]:
     """Simplify only constant-Z runs; retain every tab/ramp transition."""
     pts=list(points);out=[];i=0
     while i<len(pts)-1:
         j=i+1
         if abs(pts[j][2]-pts[i][2])<EPS:
             while j+1<len(pts) and abs(pts[j+1][2]-pts[i][2])<EPS:j+=1
-            xy=simplify_cut_path([(p[0],p[1]) for p in pts[i:j+1]],tolerance)
-            out.extend(f"G1 X{fmt(x)} Y{fmt(y)} Z{fmt(pts[i][2])} F{fmt(feed)}" for x,y in xy[1:])
+            xy=simplify_cut_path([(p[0],p[1]) for p in pts[i:j+1]],tolerance/2 if arc_fit else tolerance)
+            if arc_fit:
+                k=0
+                while k<len(xy)-1:
+                    arc=None;last=k+1
+                    for end in range(k+3,min(k+96,len(xy)-1)+1):
+                        candidate=fitted_arc(xy[k:end+1],tolerance/2)
+                        if candidate is None:
+                            if arc is not None:break
+                            continue
+                        arc=candidate;last=end
+                    if arc:
+                        code,x,y,di,dj=arc
+                        out.append(f"{code} X{fmt(x)} Y{fmt(y)} I{fmt(di)} J{fmt(dj)} F{fmt(feed)}")
+                        k=last
+                    else:
+                        x,y=xy[k+1]
+                        out.append(f"G1 X{fmt(x)} Y{fmt(y)} Z{fmt(pts[i][2])} F{fmt(feed)}")
+                        k+=1
+            else:
+                out.extend(f"G1 X{fmt(x)} Y{fmt(y)} Z{fmt(pts[i][2])} F{fmt(feed)}" for x,y in xy[1:])
         else:
             p=pts[j];out.append(f"G1 X{fmt(p[0])} Y{fmt(p[1])} Z{fmt(p[2])} F{fmt(feed)}")
         i=j
@@ -3291,6 +3353,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(OUTER_SIZE_ADJUST_MM: {fmt(float(cfg.get('outer_size_adjust',0)))})",
         "(SIZE_ADJUST: DIAMETER/WIDTH; POSITIVE ENLARGES; POCKET CAVITY=INNER / ISLAND=OUTER)",
         f"(PATH_TOLERANCE_MM: {fmt(path_tolerance(cfg))})",
+        f"(PROFILE_G2_G3: {nc_yes_no(cfg.get('arc_fit_enabled',False))})",
         f"(POCKET_STAY_DOWN: {nc_yes_no(cfg.get('pocket_stay_down',True))})",
         f"(SAFE_Z_AUTO_STOCK_X2: {nc_yes_no(cfg.get('safe_z_auto',False))})",
         f"(RAPID_APPROACH_CLEARANCE_MM: {fmt(rapid_approach_clearance(cfg))})",
@@ -3382,6 +3445,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     stage=cfg.get("_machining_stage")
     contours=stage_contours(contours,cfg)
     tolerance=path_tolerance(cfg)
+    arc_fit=bool(cfg.get("arc_fit_enabled",False)) and tolerance>0
     validate_preflight(cfg)
     safe_z, stock, extra = cfg["safe_z"], cfg["stock"], cfg["extra"]
     bottom_zero = cfg.get("z_origin") == "Bottom"
@@ -3456,6 +3520,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         lead=(plan.entry[0]-origin_x,plan.entry[1]-origin_y)
         center=None if plan.center is None else (plan.center[0]-origin_x,plan.center[1]-origin_y)
         p0=shifted[0];dst.append(f"(Phase: {label}, feed={fmt(feed)})")
+        if arc_fit:dst.append("G90 G17 G91.1")
         if plan.mode=="center-fallback":dst.append("(Lead-in auto: insufficient space -> safe interior center)")
         if not returning_from_change:dst.append(f"G0 Z{fmt(safe_machine_z)}")
         dst.append(f"G0 X{fmt(lead[0])} Y{fmt(lead[1])}")
@@ -3483,8 +3548,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
                     z=z_for_distance(s%total if total else 0,total,active_tabs,depth,
                                      machine_z(stock-cfg["tab_remain"]),tab_flat,cfg["tab_ramp"])
                     xyz.append((p[0],p[1],z))
-                dst.extend(cut_xyz_lines(xyz,feed,tolerance))
-            else:dst.extend(cut_xyz_lines([(x,y,start_z) for x,y in shifted],feed,tolerance))
+                dst.extend(cut_xyz_lines(xyz,feed,tolerance,arc_fit))
+            else:dst.extend(cut_xyz_lines([(x,y,start_z) for x,y in shifted],feed,tolerance,arc_fit))
             if pi!=len(depths):dst.extend((f"G0 Z{fmt(safe_machine_z)}",f"G0 X{fmt(lead[0])} Y{fmt(lead[1])}"))
         if c.closed and cfg["lead"]>0:
             if center is not None:
@@ -5553,6 +5618,8 @@ class App(tk.Tk):
             entry.grid(row=r, column=1, padx=5)
             if key=="safe_z":self.safe_z_entry=entry
         r = len(rows)
+        self.var("arc_fit_enabled",False,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="윤곽 원호 G2/G3 사용",variable=self.vars["arc_fit_enabled"]).grid(row=r,columnspan=2,sticky="w");r+=1
         self.feed_hint=DisplayStringVar(value="")
         ttk.Label(controls,textvariable=self.feed_hint).grid(row=r,columnspan=2,sticky="w");r+=1
         self.feed_recommend_btn=ttk.Button(controls,text="추천 피드 적용",command=self.apply_recommended_feed)
@@ -6106,7 +6173,7 @@ class App(tk.Tk):
     def job_signature(self,cfg:dict):
         machining_keys=("inner_size_adjust","outer_size_adjust","tool_d","tool_wear_enabled","tool_wear_loss_per_10m","tool_wear_min_d",
                         "rpm","feed","plunge","stock","extra","safe_z","safe_z_auto","approach_z","lead","passes",
-                        "path_tolerance","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
+                        "path_tolerance","arc_fit_enabled","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
                         "full_depth","rapid_optimize","outer_order_mode","depth_first_order","sheet_w","sheet_h","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim",
@@ -6366,6 +6433,7 @@ class App(tk.Tk):
                     "tool_change_return_z":-70.0,"tool_change_dwell":3.0}.items():data["vars"].setdefault(k,v)
         data["vars"].setdefault("outer_order_mode",OUTER_ORDER_CHOICES[0])
         data["vars"].setdefault("depth_first_order",False)
+        data["vars"].setdefault("arc_fit_enabled",False)
         outer_order_mode(data["vars"]["outer_order_mode"])
         if set(data["vars"])!=set(self.vars):raise ValueError("작업 설정 항목이 현재 버전과 맞지 않습니다.")
         for k,v in data["vars"].items():
