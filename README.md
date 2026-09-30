@@ -1,3 +1,9 @@
+## V1.42: 빠른 작업 불러오기·공구 중심선 참고·배치 간격 정리
+
+큰 작업 파일을 열 때 중복 화면 갱신을 제거했습니다. 기본 화면은 공구 지름과 내·외경 보정을 반영한 중심선 참고선만 표시하고, 상세 경로 생성과 충돌 검사는 `G-code 생성`에서 수행합니다. `현재 배치 외곽 박스 간격 정리`는 이미 배치한 파츠의 사각 외곽을 기준으로 간격을 맞추며, 파츠별 외곽 여유·판재 경계를 검사하고 Ctrl+Z로 복원할 수 있습니다.
+
+이 버전은 G-code 생성 및 선택형 G2/G3 출력 방식을 바꾸지 않습니다. Mach3에서 원호 경로 표시가 느리면 `윤곽 원호 G2/G3 사용`을 끈 파일과 불러오기 시간을 비교하세요.
+
 ## V1.41: 선택형 윤곽 원호 G2/G3
 
 왼쪽 `윤곽 원호 G2/G3 사용`을 켜면 일정 깊이의 윤곽에서 원호로 확인된 구간을 Mach3의 증분 I/J 원호로 출력합니다. 경로 허용오차와 출력 좌표의 반지름을 확인한 구간만 변환하며, 탭 경사·깊이 변경·포켓 경로는 기존 G1을 유지합니다. 기본값은 꺼짐이고 구버전 작업도 꺼진 상태로 열립니다. 실제 절삭 전 생성 NC의 원호와 이동을 확인하고 공중 드라이런을 하세요.
@@ -228,7 +234,7 @@ Mach3용 CFRP 2D/2.5D CAM 프로그램의 공식 배포 및 업데이트 저장�
 
 [CFRP_Router_CAM.exe](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/latest/download/CFRP_Router_CAM.exe)
 
-현재 최신 버전은 **V1.41**입니다.
+현재 최신 버전은 **V1.42**입니다.
 
 - 어레이 전에 지정한 윤곽 가공 순서를 모든 복사본에 유지
 - 거리 기반 공구 마모 보정: 현재 작업의 절삭거리를 기준으로 윤곽마다 가정 공구 지름을 단계적으로 감소. `10m당 지름 감소량` 기본값은 실측치 기반 `0.079mm/10m`
@@ -250,7 +256,7 @@ V1.07부터 프로그램을 시작할 때 새 버전을 확인합니다. 사용�
 ## 소스 코드
 
 - [소스 코드](cfrp_router_cam.py)
-- [V1.41 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.41/CFRP_Router_CAM_V1.41_source.zip)
+- [V1.42 소스 패키지](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.42/CFRP_Router_CAM_V1.42_source.zip)
 - GitHub의 **Code → Download ZIP** 또는 릴리스의 **Source code**에도 실제 소스가 포함됩니다.
 
 Windows Python 3.12 (Tkinter 포함)에서 실행합니다.
