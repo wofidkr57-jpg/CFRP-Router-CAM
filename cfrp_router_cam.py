@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.39"
+APP_VERSION = "1.40"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
@@ -84,6 +84,7 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "깊이 가공 우선 (보어 → 내경 → 외경)": "Depth first (bore → inner → outer)",
     "외곽 자동 가공 순서": "Automatic outer cutting order",
     "외곽 자동 가공 순서를 확인하세요.": "Check the automatic outer cutting order.",
     "가까운 순서": "Nearest first",
@@ -2454,9 +2455,30 @@ def center_out_outer_sequence(contours:Sequence[Contour],clockwise:bool=True,lay
 
 def ordered_contours(contours: Sequence[Contour],rapid_optimize:bool=True,
                      start_point:Point=(0.0,0.0),outer_order="nearest",
-                     sheet_center:Optional[Point]=None) -> List[Contour]:
+                     sheet_center:Optional[Point]=None,depth_first:bool=False) -> List[Contour]:
     """Preserve manual/safe ordering, then minimize XY jumps inside each safe group."""
     mode=outer_order_mode(outer_order)
+    if depth_first and any(c.enabled and (c.operation=="pocket" or
+                           (c.closed and c.role=="inner" and c.target_depth is not None)) for c in contours):
+        active=[c for c in contours if c.enabled]
+        pockets=[c for c in active if c.operation=="pocket"]
+        depth_inner=[c for c in active if c.operation!="pocket" and c.closed and c.role=="inner" and c.target_depth is not None]
+        through_inner=[c for c in active if c.operation!="pocket" and c.closed and c.role=="inner" and c.target_depth is None]
+        opened=[c for c in active if c.operation!="pocket" and not c.closed]
+        outer=[c for c in active if c.operation!="pocket" and c.closed and c.role!="inner"]
+        result=[];current=start_point
+        phases=[pockets]
+        phases.extend([c for c in depth_inner if c.target_depth==depth]
+                      for depth in sorted({c.target_depth for c in depth_inner}))
+        phases.extend((through_inner,opened,outer))
+        for phase in phases:
+            if not phase:continue
+            sequence=ordered_contours(phase,rapid_optimize,current,mode,sheet_center)
+            result.extend(sequence)
+            last=sequence[-1]
+            if last.closed:current=_contour_nearest_point(last,current)[1]
+            elif last.points:current=last.points[-1]
+        return result
     pockets=sorted((c for c in contours if c.enabled and c.operation=="pocket"),key=lambda c:c.target_depth or 0)
     if pockets:
         return pockets+ordered_contours([c for c in contours if c.operation!="pocket"],rapid_optimize,start_point,mode,sheet_center)
@@ -3283,6 +3305,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
         f"(CUT_DIRECTION: {'CLIMB' if cfg.get('climb') else 'CONVENTIONAL'})",
         f"(RAPID_OPTIMIZE: {nc_yes_no(cfg.get('rapid_optimize',True))})",
         f"(OUTER_ORDER_MODE: {outer_order_mode(cfg.get('outer_order_mode','nearest')).upper()})",
+        f"(DEPTH_FIRST_ORDER: {nc_yes_no(cfg.get('depth_first_order',False))})",
         *(["(OUTER_ORDER_REFERENCE: SHEET_CENTER)",
            f"(OUTER_ORDER_CENTER_SOURCE_X_MM: {fmt(center[0])})",
            f"(OUTER_ORDER_CENTER_SOURCE_Y_MM: {fmt(center[1])})"] if center is not None else []),
@@ -3372,7 +3395,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     override=cfg.get("_xy_origin_override")
     origin_x,origin_y=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
     rapid_optimize=bool(cfg.get("rapid_optimize",True))
-    ordered=ordered_contours(active,rapid_optimize,(origin_x,origin_y),cfg.get("outer_order_mode","nearest"),sheet_center=ordering_sheet_center(cfg))
+    ordered=ordered_contours(active,rapid_optimize,(origin_x,origin_y),cfg.get("outer_order_mode","nearest"),
+                             sheet_center=ordering_sheet_center(cfg),depth_first=bool(cfg.get("depth_first_order",False)))
     if stage=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
     change_indices,wear_plan,tool_loads=tool_replacement_plan(ordered,cfg,stock,extra)
     pocket_errors=pocket_job_issues(contours,cfg,{id(c):d for c,(d,_) in zip(ordered,wear_plan)})
@@ -3599,7 +3623,8 @@ def machining_report(contours: List[Contour], cfg: dict,
     active=[x for x in contours if x.enabled]
     override=cfg.get("_xy_origin_override")
     origin=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
-    ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin,cfg.get("outer_order_mode","nearest"),sheet_center=ordering_sheet_center(cfg))
+    ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin,cfg.get("outer_order_mode","nearest"),
+                             sheet_center=ordering_sheet_center(cfg),depth_first=bool(cfg.get("depth_first_order",False)))
     if cfg.get("_machining_stage")=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
     _,plan,_=tool_replacement_plan(ordered,cfg,stock,cfg["extra"])
     for report_index,(_,metrics) in enumerate(plan,1):
@@ -5596,6 +5621,9 @@ class App(tk.Tk):
         self.var("rapid_optimize",True,tk.BooleanVar)
         ttk.Checkbutton(controls,text="급속이송 최소화 (홀 묶음)",variable=self.vars["rapid_optimize"],
                         command=self.redraw).grid(row=r,columnspan=2,sticky="w");r+=1
+        self.var("depth_first_order",False,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="깊이 가공 우선 (보어 → 내경 → 외경)",
+                        variable=self.vars["depth_first_order"],command=self.redraw).grid(row=r,columnspan=2,sticky="w");r+=1
         ttk.Label(controls,text="외곽 자동 가공 순서").grid(row=r,columnspan=2,sticky="w",pady=(4,0));r+=1
         self.var("outer_order_mode",OUTER_ORDER_CHOICES[0],tk.StringVar)
         self.outer_order_combo=ttk.Combobox(controls,width=24,state="readonly",textvariable=self.vars["outer_order_mode"],values=OUTER_ORDER_CHOICES)
@@ -6080,7 +6108,7 @@ class App(tk.Tk):
                         "rpm","feed","plunge","stock","extra","safe_z","safe_z_auto","approach_z","lead","passes",
                         "path_tolerance","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
-                        "full_depth","rapid_optimize","outer_order_mode","sheet_w","sheet_h","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
+                        "full_depth","rapid_optimize","outer_order_mode","depth_first_order","sheet_w","sheet_h","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim",
                         "machine_home_enabled","machine_park_x","machine_park_y","machine_park_z",
                         "start_code","end_code","onion_split","onion_split_percent","onion_start_code","onion_end_code",
@@ -6337,6 +6365,7 @@ class App(tk.Tk):
         for k,v in {"tool_change_enabled":False,"tool_change_limit_m":6.5,"tool_change_macro":"M881",
                     "tool_change_return_z":-70.0,"tool_change_dwell":3.0}.items():data["vars"].setdefault(k,v)
         data["vars"].setdefault("outer_order_mode",OUTER_ORDER_CHOICES[0])
+        data["vars"].setdefault("depth_first_order",False)
         outer_order_mode(data["vars"]["outer_order_mode"])
         if set(data["vars"])!=set(self.vars):raise ValueError("작업 설정 항목이 현재 버전과 맞지 않습니다.")
         for k,v in data["vars"].items():
@@ -7492,7 +7521,8 @@ class App(tk.Tk):
         selected_ids={id(c) for c in self.selected_contours}
         self.order_tree.delete(*self.order_tree.get_children())
         outer_mode,center=self.preview_outer_order_settings()
-        active_order=ordered_contours(self.contours,bool(self.vars["rapid_optimize"].get()),outer_order=outer_mode,sheet_center=center);actual={id(c):i for i,c in enumerate(active_order,1)}
+        active_order=ordered_contours(self.contours,bool(self.vars["rapid_optimize"].get()),outer_order=outer_mode,
+                                      sheet_center=center,depth_first=self.vars["depth_first_order"].get());actual={id(c):i for i,c in enumerate(active_order,1)}
         display=active_order+[c for c in self.contours if not c.enabled]
         if self.tree_sort_col:
             def sort_key(c):
@@ -7552,7 +7582,17 @@ class App(tk.Tk):
         if {id(c) for c in targets}=={id(c) for c in self.selected_contours} and primary is self.selected:return
         self.set_contour_selection(targets,primary,sync_tree=False)
         if self.manual_array_mode:self.update_manual_selection_display()
-        else:self.redraw(refresh_tree=False)
+        else:self.update_contour_selection_display()
+
+    def update_contour_selection_display(self):
+        """A list click changes only contour line styles, not the whole scene."""
+        selected_ids={id(c) for c in self.selected_contours}
+        for record in getattr(self,"contour_selection_items",()):
+            item,contour,normal,current=record
+            style={"fill":"#42e695" if id(contour) in selected_ids else normal,
+                   "width":3 if id(contour) in selected_ids else 2}
+            if style!=current:
+                self.canvas.itemconfigure(item,**style);record[3]=style
 
     def tree_cell_click(self,event):
         self.clear_order_drop()
@@ -7564,7 +7604,16 @@ class App(tk.Tk):
         if not event.state & 0x0005 and column not in ("#2","#3","#4"):
             c=self.contours[int(item[1:])]
             if c.enabled and c.closed and c.role=="outer" and c.operation!="pocket":
-                self.order_drag=(c,event.y,None)
+                selected=set(self.order_tree.selection())
+                source_ids=selected if item in selected else {item}
+                sources=tuple(self.contours[int(i[1:])] for i in self.order_tree.get_children()
+                              if i in source_ids and self.contours[int(i[1:])].enabled
+                              and self.contours[int(i[1:])].closed and self.contours[int(i[1:])].role=="outer"
+                              and self.contours[int(i[1:])].operation!="pocket")
+                self.order_drag=(sources,event.y,None)
+                if item in selected and len(selected)>1:
+                    self.order_tree.focus(item);self.tree_select()
+                    return "break"
         if column=="#2" and not event.state & 0x0005:
             c=self.contours[int(item[1:])]
             if c.closed and c.role=="outer" and c.operation!="pocket":
@@ -7588,7 +7637,7 @@ class App(tk.Tk):
 
     def drag_outer_order(self,event):
         if self.order_drag is None:return
-        source,start_y,target=self.order_drag
+        sources,start_y,target=self.order_drag
         if abs(event.y-start_y)<5 and target is None:return
         self.clear_order_drop()
         target=None
@@ -7596,7 +7645,8 @@ class App(tk.Tk):
             iid=self.order_tree.identify_row(event.y)
             if iid:
                 candidate=self.contours[int(iid[1:])];box=self.order_tree.bbox(iid)
-                if box and candidate.enabled and candidate.closed and candidate.role=="outer" and candidate.operation!="pocket":
+                if (box and candidate.enabled and candidate.closed and candidate.role=="outer"
+                        and candidate.operation!="pocket" and all(candidate is not c for c in sources)):
                     after=event.y>=box[1]+box[3]/2
                     target=(candidate,after)
                     self.order_insert_line.place(x=0,y=box[1]+(box[3] if after else 0)-1,
@@ -7610,31 +7660,35 @@ class App(tk.Tk):
                     self.order_tree.yview_scroll(direction,"units")
                     self.drag_outer_order(event)
                 self.order_scroll_after=self.after(120,scroll)
-        self.order_drag=(source,start_y,target)
+        self.order_drag=(sources,start_y,target)
         return "break"
 
     def apply_outer_sequence(self,outer,source):
         self.push_undo("외곽 순서 변경")
         for rank,c in enumerate(outer,1):c.outer_cut_order=rank
         self.tree_sort_col=None;self.tree_sort_reverse=False;self.preview_order_cache_key=None
-        self.set_contour_selection([source],source);self.redraw()
+        selection=list(source) if isinstance(source,tuple) else [source]
+        self.set_contour_selection(selection,selection[0]);self.redraw()
         self.status.set("외곽 순서 변경 완료 · 내부 먼저 / 지정 외곽 순서 고정 · Ctrl+Z 되돌리기")
 
     def drop_outer_order(self,event):
         drag=self.order_drag;self.order_drag=None;self.clear_order_drop()
         if drag is None:return
-        source,start_y,target=drag
+        sources,start_y,target=drag
         if target is None or not (0<=event.x<self.order_tree.winfo_width() and 20<=event.y<self.order_tree.winfo_height()):return
         candidate,after=target
-        if source is candidate:return "break"
+        if any(candidate is c for c in sources):return "break"
         # Match the visible insertion line even if the user sorted a column.
         outer=[self.contours[int(i[1:])] for i in self.order_tree.get_children()]
         outer=[c for c in outer if c.enabled and c.closed and c.role=="outer" and c.operation!="pocket"]
-        if not any(c is source for c in outer) or not any(c is candidate for c in outer):return
-        outer=[c for c in outer if c is not source]
+        if not all(any(c is moving for c in outer) for moving in sources) or not any(c is candidate for c in outer):return
+        before=tuple(outer)
+        moving_ids={id(c) for c in sources}
+        outer=[c for c in outer if id(c) not in moving_ids]
         target_index=next(i for i,c in enumerate(outer) if c is candidate)
-        outer.insert(target_index+int(after),source)
-        self.apply_outer_sequence(outer,source)
+        outer[target_index+int(after):target_index+int(after)]=sources
+        if all(a is b for a,b in zip(outer,before)):return "break"
+        self.apply_outer_sequence(outer,sources)
         return "break"
 
     def move_outer_step(self,direction):
@@ -7969,7 +8023,7 @@ class App(tk.Tk):
         self.pending_view_scale=1.0;self.pending_view_tx=self.pending_view_ty=0.0
         self.view_interacting=False
         self.canvas.delete("all")
-        self.manual_pick_bounds=None;self.manual_selection_items=[]
+        self.manual_pick_bounds=None;self.manual_selection_items=[];self.contour_selection_items=[]
         if refresh_tree:self.refresh_order_tree();self.refresh_object_tree()
         if not self.contours: return
         x0,y0,x1,y1 = self.bounds(); w=max(self.canvas.winfo_width(),100); h=max(self.canvas.winfo_height(),100)
@@ -8025,9 +8079,10 @@ class App(tk.Tk):
             color = "#42e695" if id(c) in selected_ids or group_chosen else ("#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d"))
             style={"fill":color,"width":3 if id(c) in selected_ids else 2}
             item=self.canvas.create_line(*xy,**style,tags=(group_tag,) if group_tag else ())
+            normal="#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d")
+            self.contour_selection_items.append([item,c,normal,style])
             if self.manual_array_mode:
-                normal={"fill":"#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d")}
-                self.manual_selection_items.append([item,contour_group_key(c),c,normal,style])
+                self.manual_selection_items.append([item,contour_group_key(c),c,{"fill":normal},style])
             for a,b in c.bridges:
                 ax,ay=self.transform(a); bx,by=self.transform(b)
                 self.canvas.create_line(ax,ay,bx,by,fill="#d66bff",width=4,tags=(group_tag,) if group_tag else ())
@@ -8082,9 +8137,11 @@ class App(tk.Tk):
             order_signature=hash(tuple((id(c),c.cut_order,c.outer_cut_order,round(c.start_s,6),c.enabled)
                                        for c in self.contours))
             outer_mode,center=self.preview_outer_order_settings()
-            order_key=(geometry_signature,order_signature,rapid_order,outer_mode,center)
+            depth_first=self.vars["depth_first_order"].get()
+            order_key=(geometry_signature,order_signature,rapid_order,outer_mode,center,depth_first)
             if order_key!=self.preview_order_cache_key:
-                self.preview_order_cache=ordered_contours(self.contours,rapid_order,outer_order=outer_mode,sheet_center=center)
+                self.preview_order_cache=ordered_contours(self.contours,rapid_order,outer_order=outer_mode,
+                                                          sheet_center=center,depth_first=depth_first)
                 self.preview_order_cache_key=order_key
             preview_order=self.preview_order_cache
             show_order_numbers=len(preview_order)<=60
@@ -8317,7 +8374,8 @@ class App(tk.Tk):
                 edge_issues,spacing_issues=self.manual_array_layout_issues()
                 if edge_issues or spacing_issues:
                     warnings.append(f"배치 여유 위반: 가장자리 {edge_issues}개, 간격/겹침 {spacing_issues}쌍")
-            sequence=ordered_contours(active,cfg.get("rapid_optimize",True),outer_order=cfg.get("outer_order_mode","nearest"),sheet_center=ordering_sheet_center(cfg))
+            sequence=ordered_contours(active,cfg.get("rapid_optimize",True),outer_order=cfg.get("outer_order_mode","nearest"),
+                                      sheet_center=ordering_sheet_center(cfg),depth_first=bool(cfg.get("depth_first_order",False)))
             first_outer=next((i for i,c in enumerate(sequence) if c.closed and c.role=="outer"),None)
             if first_outer is not None and any(c.role=="inner" for c in sequence[first_outer+1:]):
                 warnings.append("수동 순번 때문에 외곽이 일부 내부 형상보다 먼저 가공됩니다. 부품 고정을 확인하세요.")
@@ -8364,7 +8422,8 @@ class App(tk.Tk):
                 if job_cfg.get("tool_change_enabled"):
                     staged=stage_contours(active,job_cfg)
                     origin=job_cfg.get("_xy_origin_override") or work_origin_for_contours(staged,job_cfg)
-                    ordered=ordered_contours(staged,job_cfg.get("rapid_optimize",True),origin,job_cfg.get("outer_order_mode","nearest"),sheet_center=ordering_sheet_center(job_cfg))
+                    ordered=ordered_contours(staged,job_cfg.get("rapid_optimize",True),origin,job_cfg.get("outer_order_mode","nearest"),
+                                              sheet_center=ordering_sheet_center(job_cfg),depth_first=bool(job_cfg.get("depth_first_order",False)))
                     if job_cfg.get("_machining_stage")=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
                     cuts,_,loads=tool_replacement_plan(ordered,job_cfg,job_cfg["stock"],job_cfg["extra"])
                     distance_jobs.extend((f"{label} TOOL {i}",load) for i,load in enumerate(loads,1))

@@ -60,7 +60,7 @@ with tempfile.TemporaryDirectory() as tmp:
         app.move_outer_step(1);assert [c for c in cam.ordered_contours(app.contours) if c.role=='outer']==outers
         app.move_outer_step(1);assert [c for c in cam.ordered_contours(app.contours) if c.role=='outer']==outers
         # Dropping outside the list must not apply a stale insertion target.
-        app.order_drag=(outers[0],0,(outers[1],True))
+        app.order_drag=((outers[0],),0,(outers[1],True))
         ranks=[c.outer_cut_order for c in outers]
         app.drop_outer_order(SimpleNamespace(x=-20,y=60));assert [c.outer_cut_order for c in outers]==ranks
         assert app.order_scroll_after is None
