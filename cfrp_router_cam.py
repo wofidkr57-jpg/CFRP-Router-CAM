@@ -58,7 +58,8 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.38"
+APP_VERSION = "1.39"
+JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
@@ -1172,6 +1173,22 @@ def rotate_closed_path(pts: Sequence[Point], s: float) -> List[Point]:
         start = (seg + 1) % len(pts)
         return list(pts[start:]) + list(pts[:start])
     return [p] + list(pts[seg + 1:]) + list(pts[:seg + 1])
+
+
+def start_cut_direction(contour: Contour, climb: bool) -> Optional[Point]:
+    """Unit tangent leaving a selected profile start, in the NC cut direction."""
+    if not contour.closed or contour.operation == "pocket" or contour.start_s <= EPS:
+        return None
+    start = point_at(contour.points, contour.start_s, True)[0]
+    want_ccw = (contour.role == "inner") if climb else (contour.role != "inner")
+    route = reverse_if_needed(list(contour.points), want_ccw)
+    route = rotate_closed_path(route, nearest_path_distance(route, start, True)[1])
+    for next_point in route[1:]:
+        length = dist(route[0], next_point)
+        if length > EPS:
+            return ((next_point[0] - route[0][0]) / length,
+                    (next_point[1] - route[0][1]) / length)
+    return None
 
 
 def polygon_centroid(pts: Sequence[Point]) -> Point:
@@ -5327,6 +5344,8 @@ class App(tk.Tk):
         self.pending_imports: List[str] = []
         self.filename = ""
         self.job_path="";self.saved_job_snapshot=None
+        self.autosave_path="";self.recovered_autosave_path=""
+        self._autosave_recovery_offered=False
         self.gcode = ""
         self.gcode_parts:List[Tuple[str,str]] = [];self.gcode_part_minutes:List[float]=[]
         self.gcode_job_minutes = 0.0
@@ -5390,6 +5409,8 @@ class App(tk.Tk):
             self.bind_all(f"<KeyPress-{key}>",self.pick_shortcut)
         self.bind_all("<KeyPress-r>",self.rotate_manual_array_selected)
         self.bind_all("<KeyPress-R>",self.rotate_manual_array_selected)
+        self.after(JOB_AUTOSAVE_INTERVAL_MS,self.autosave_tick)
+        self.after_idle(self.offer_autosave_recovery)
         if getattr(sys,"frozen",False):self.after(1800,self.start_update_check)
 
     def var(self, key, value, cls=tk.DoubleVar):
@@ -5571,7 +5592,7 @@ class App(tk.Tk):
         self.origin_btn = ttk.Button(controls, text="DXF XY 원점 선택: OFF", command=self.toggle_origin)
         self.origin_btn.grid(row=r, columnspan=2, sticky="ew", pady=2); r += 1
         self.var("climb", True, tk.BooleanVar); self.var("full_depth", True, tk.BooleanVar)
-        ttk.Checkbutton(controls, text="Climb milling", variable=self.vars["climb"]).grid(row=r, columnspan=2, sticky="w", pady=4); r += 1
+        ttk.Checkbutton(controls, text="Climb milling", variable=self.vars["climb"], command=self.redraw).grid(row=r, columnspan=2, sticky="w", pady=4); r += 1
         self.var("rapid_optimize",True,tk.BooleanVar)
         ttk.Checkbutton(controls,text="급속이송 최소화 (홀 묶음)",variable=self.vars["rapid_optimize"],
                         command=self.redraw).grid(row=r,columnspan=2,sticky="w");r+=1
@@ -6203,6 +6224,70 @@ class App(tk.Tk):
     def job_snapshot(self):
         return json.dumps(self.job_document(),ensure_ascii=False,sort_keys=True,allow_nan=False)
 
+    def autosave_dir(self)->str:
+        return os.path.join(os.path.dirname(self.appdata_settings_path()),"autosave")
+
+    def clear_autosave(self):
+        for path in (self.autosave_path,self.recovered_autosave_path):
+            if path:
+                try:os.remove(path)
+                except FileNotFoundError:pass
+                except OSError:pass
+        self.recovered_autosave_path=""
+
+    def autosave_job(self):
+        if not self.contours:return False
+        try:
+            document=self.job_document()
+            snapshot=json.dumps(document,ensure_ascii=False,sort_keys=True,allow_nan=False)
+            if snapshot==self.saved_job_snapshot:
+                self.clear_autosave()
+                return False
+            if not self.autosave_path:
+                self.autosave_path=os.path.join(self.autosave_dir(),
+                    f"session-{os.getpid()}-{time.time_ns()}.cfrpcam")
+            document["autosave"]={"source_path":self.job_path,"saved_at":datetime.now().isoformat(),
+                                  "session_pid":os.getpid()}
+            self.write_settings_file(self.autosave_path,document)
+            if self.recovered_autosave_path:
+                old=self.recovered_autosave_path;self.recovered_autosave_path=""
+                try:os.remove(old)
+                except OSError:pass
+            return True
+        except (OSError,ValueError,TypeError,tk.TclError) as exc:
+            self.status.set(f"작업 임시 저장 실패: {exc}")
+            return False
+
+    def autosave_tick(self):
+        try:self.autosave_job()
+        finally:
+            try:
+                if self.winfo_exists():self.after(JOB_AUTOSAVE_INTERVAL_MS,self.autosave_tick)
+            except tk.TclError:pass
+
+    def offer_autosave_recovery(self):
+        if self._autosave_recovery_offered or self.contours:return
+        self._autosave_recovery_offered=True
+        try:
+            files=sorted((p for p in os.scandir(self.autosave_dir())
+                          if p.is_file() and p.name.endswith(".cfrpcam")),
+                         key=lambda p:p.stat().st_mtime,reverse=True)
+        except OSError:return
+        for entry in files:
+            if entry.path==self.autosave_path:continue
+            try:
+                with open(entry.path,encoding="utf-8") as f:data=json.load(f)
+                self.decode_job(data)
+            except (OSError,ValueError,TypeError,KeyError):continue
+            metadata=data.get("autosave")
+            metadata=metadata if isinstance(metadata,dict) else {}
+            source=metadata.get("source_path","")
+            name=os.path.basename(source) if source else "저장하지 않은 작업"
+            if messagebox.askyesno("임시 작업 복구",f"5분 자동 저장 파일이 있습니다.\n{name}\n\n이 작업을 복구하시겠습니까?"):
+                if self.load_job_file(entry.path,recovered=True):
+                    self.recovered_autosave_path=entry.path
+            return
+
     def save_job(self,event=None,save_as=False):
         path=getattr(self,"job_path","")
         if save_as or not path:
@@ -6216,6 +6301,7 @@ class App(tk.Tk):
         except (OSError,ValueError,TypeError,tk.TclError) as exc:
             messagebox.showerror("작업 저장 실패",str(exc));return False
         self.job_path=os.path.abspath(path);self.saved_job_snapshot=self.job_snapshot()
+        self.clear_autosave()
         self.job_label.configure(text=f"작업 파일: {os.path.basename(path)}")
         self.status.set("작업 저장 완료 · 형상/배치/탭/시작점/가공 설정 포함")
         return True
@@ -6267,9 +6353,7 @@ class App(tk.Tk):
             widget=getattr(self,attr);widget.configure(state="normal");widget.delete("1.0","end");widget.insert("1.0",text)
         self.sync_onion_split()
 
-    def open_job(self,event=None):
-        path=filedialog.askopenfilename(title="작업 열기",filetypes=[("CarbonCAM 작업","*.cfrpcam")])
-        if not path:return False
+    def load_job_file(self,path:str,recovered:bool=False):
         try:
             with open(path,encoding="utf-8") as f:data=json.load(f)
             state=self.decode_job(data)
@@ -6292,15 +6376,29 @@ class App(tk.Tk):
         self.clear_order_drop()
         self.text.delete("1.0","end");self.selection_label.set("선택 없음")
         self.view_initialized=False;self.refresh_object_tree();self.redraw()
-        self.job_path=os.path.abspath(path);self.saved_job_snapshot=self.job_snapshot()
-        self.job_label.configure(text=f"작업 파일: {os.path.basename(path)}")
-        self.status.set("작업 불러오기 완료 · G-code는 현재 설정으로 다시 생성하세요.")
+        if recovered:
+            metadata=data.get("autosave")
+            source=metadata.get("source_path","") if isinstance(metadata,dict) else ""
+            self.job_path=os.path.abspath(source) if source and os.path.isfile(source) else ""
+            self.saved_job_snapshot=None
+            self.job_label.configure(text=f"복구된 작업: {os.path.basename(source) if source else '저장 안 됨'}")
+            self.status.set("임시 작업 복구 완료 · 작업을 저장하세요. G-code는 다시 생성해야 합니다.")
+        else:
+            self.clear_autosave()
+            self.job_path=os.path.abspath(path);self.saved_job_snapshot=self.job_snapshot()
+            self.job_label.configure(text=f"작업 파일: {os.path.basename(path)}")
+            self.status.set("작업 불러오기 완료 · G-code는 현재 설정으로 다시 생성하세요.")
         return True
+
+    def open_job(self,event=None):
+        path=filedialog.askopenfilename(title="작업 열기",filetypes=[("CarbonCAM 작업","*.cfrpcam")])
+        return self.load_job_file(path) if path else False
 
     def on_close(self):
         if not self.confirm_job_replace():return
         try:self.save_settings()
         except (OSError,ValueError,TypeError,tk.TclError):pass
+        self.clear_autosave()
         self.destroy()
 
     def start_update_check(self,manual=False):
@@ -6362,6 +6460,7 @@ class App(tk.Tk):
 
     def _launch_update_replacement(self,payload):
         source,info=payload;target=os.path.abspath(sys.executable)
+        if not self.confirm_job_replace():return
         try:
             self.save_settings()
             subprocess.Popen([source,"--apply-update",target,str(os.getpid()),info["sha256"]],
@@ -6369,6 +6468,7 @@ class App(tk.Tk):
         except Exception as exc:
             messagebox.showerror("업데이트 실행 실패",f"기존 프로그램은 변경되지 않았습니다.\n\n{exc}")
             return
+        self.clear_autosave()
         self.destroy()
 
     def _history_state(self)->dict:
@@ -7936,7 +8036,16 @@ class App(tk.Tk):
                 self.canvas.create_oval(x-5,y-5,x+5,y+5,fill="#ff9f1c",outline="",tags=(group_tag,) if group_tag else ())
             if c.closed and c.start_s > EPS:
                 p,_,_=point_at(c.points,c.start_s,True); x,y=self.transform(p)
-                self.canvas.create_polygon(x,y-7,x-6,y+5,x+6,y+5,fill="#ff4fd8",outline="white",tags=(group_tag,) if group_tag else ())
+                direction=start_cut_direction(c,self.vars["climb"].get())
+                if direction is None:
+                    self.canvas.create_oval(x-5,y-5,x+5,y+5,fill="#ff4fd8",outline="white",tags=(group_tag,) if group_tag else ())
+                else:
+                    ux,uy=direction[0],-direction[1]  # Canvas Y points down.
+                    px,py=-uy,ux
+                    self.canvas.create_polygon(x+9*ux,y+9*uy,
+                                               x-5*ux+6*px,y-5*uy+6*py,
+                                               x-5*ux-6*px,y-5*uy-6*py,
+                                               fill="#ff4fd8",outline="white",tags=(group_tag,) if group_tag else ())
         self.canvas.addtag_all("view_live")
         detail_marker=self.canvas_item_marker()
         if self.manual_array_mode and self.vars["show_toolpath"].get():self.draw_manual_offsets(visible)
@@ -7956,6 +8065,7 @@ class App(tk.Tk):
                         preview_cfg[key]=0.0
             except (tk.TclError, ValueError): preview_radius = 1.0;preview_cfg={}
             auto_trim_value=bool(self.vars.get("auto_trim") and self.vars["auto_trim"].get())
+            climb_value=bool(self.vars["climb"].get())
             geometry_signature=hash(tuple((id(c),c.enabled,c.safety_excluded,c.closed,c.role,c.target_depth,
                 tuple((round(x,5),round(y,5)) for x,y in c.points)) for c in self.contours))
             dimension_key=(preview_cfg.get("inner_size_adjust",0),preview_cfg.get("outer_size_adjust",0))
@@ -8002,10 +8112,13 @@ class App(tk.Tk):
                 anchor=c.points[0]
                 relative_points=tuple((round(x-anchor[0],7),round(y-anchor[1],7)) for x,y in c.points)
                 cache_key=(relative_points,c.closed,c.role,c.forced_role,c.depth,c.enabled,
-                           round(c.start_s,8),round(preview_radius,8),auto_trim,dimension_key)
+                           round(c.start_s,8),round(preview_radius,8),auto_trim,dimension_key,climb_value)
                 cached=self.preview_cache.get(cache_key)
                 if cached is None:
-                    route,removed_loops,cut_points=compensated_route(c,preview_radius*2,auto_trim,cfg=preview_cfg)
+                    want_ccw=(c.role=="inner") if climb_value else (c.role!="inner")
+                    source_points=reverse_if_needed(list(c.points),want_ccw)
+                    route,removed_loops,cut_points=compensated_route(
+                        c,preview_radius*2,auto_trim,source_points,cfg=preview_cfg)
                     if c.start_s > EPS:
                         start_point=point_at(c.points,c.start_s,True)[0]
                         route=rotate_closed_path(route,nearest_path_distance(route,start_point,True)[1])
