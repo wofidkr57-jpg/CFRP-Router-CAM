@@ -42,8 +42,9 @@ with tempfile.TemporaryDirectory() as tmp:
         before = cam.contour_group_bounds_map(app.contours)
         app.even_manual_spacing()
         after = cam.contour_group_bounds_map(app.contours)
-        assert after[(1, 1)] == before[(1, 1)]
-        assert after[(2, 1)][0] == 12.0, after
+        assert abs(after[(1, 1)][0] - 1.0) < 1e-5, after
+        assert abs(after[(2, 1)][0] - 19.0) < 1e-5, after
+        assert abs(after[(2, 1)][2] - 29.0) < 1e-5, after
         assert app.manual_array_layout_issues() == (0, 0)
         app.undo()
         assert cam.contour_group_bounds_map(app.contours) == before

@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.42"
+APP_VERSION = "1.43"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
@@ -113,8 +113,8 @@ _UI_EN_EXACT = {
     "3D 시뮬레이션은 프로그램 내부 GPU 창에서 엽니다.\nGPU 사용이 어려우면 기본 3D 뷰어를 사용하세요.": "3D simulation opens an internal GPU window.\nUse the classic 3D viewer if GPU is unavailable.",
     "촘촘한 배열 (실제 윤곽 / 180° 엇갈림)": "Contour nesting (180 degree interlocking)",
     "촘촘한 모드: 파츠별 외곽 여유 합산 · 빈칸은 공통 간격의 절반": "Contour mode: add part offsets; blank = half the common gap",
-    "현재 배치 외곽 박스 간격 정리": "Even spacing of placed part boxes",
-    "가공물 간격 + 파츠별 외곽 여유 기준 · Ctrl+Z 복원": "Uses common gap and per-part offsets; Ctrl+Z to undo",
+    "판재 전체에 외곽 박스 등간격 배치": "Spread placed part boxes across sheet",
+    "가공물 간격은 최소값 · 파츠별 외곽 여유 적용 · Ctrl+Z 복원": "Common gap is a minimum; applies part offsets; Ctrl+Z to undo",
     "외곽 여유 mm": "Offset mm",
     "선택 파츠 외곽 여유 (mm)": "Selected part offset (mm)",
     "여유 적용": "Apply offset",
@@ -1257,7 +1257,7 @@ def contour_group_bounds_map(contours:Sequence[Contour])->Dict[Tuple[int,int],Tu
 def even_box_spacing(bounds:Dict[Tuple[int,int],Tuple[float,float,float,float]],gap:float,
                      sheet:Tuple[float,float],edge:float=0.0,
                      clearances:Optional[Dict[Tuple[int,int],float]]=None)->Dict[Tuple[int,int],Tuple[float,float]]:
-    """Tighten existing left/right and below/above neighbours by their AABBs."""
+    """Spread the existing box order across the sheet with the largest even gaps."""
     if not all(math.isfinite(v) for v in (gap,edge,*sheet)) or gap<0 or edge<0 or min(sheet)<=0:
         raise ValueError("판재 크기와 간격은 유한한 양수, 여유는 0 이상이어야 합니다.")
     if not bounds:return {}
@@ -1268,37 +1268,63 @@ def even_box_spacing(bounds:Dict[Tuple[int,int],Tuple[float,float,float,float]],
     clearance={key:float((clearances or {}).get(key,gap/2)) for key in keys}
     if any(not math.isfinite(value) or value<0 for value in clearance.values()):
         raise ValueError("파츠별 외곽 여유는 0 이상의 유한한 값이어야 합니다.")
-    def pair_gap(a,b):return clearance[a]+clearance[b]
-    left={};bottom={}
-    x_order=sorted(keys,key=lambda key:(bounds[key][0],bounds[key][1],key))
-    for index,key in enumerate(x_order):
-        box=bounds[key]
-        previous=[other for other in x_order[:index]
-                  if min(box[3],bounds[other][3])+pair_gap(key,other)-max(box[1],bounds[other][1])>EPS]
-        left[key]=(max(left[other]+bounds[other][2]-bounds[other][0]+pair_gap(key,other) for other in previous)
-                   if previous else box[0])
-    y_order=sorted(keys,key=lambda key:(bounds[key][1],bounds[key][0],key))
-    for index,key in enumerate(y_order):
-        box=bounds[key]
-        previous=[other for other in y_order[:index]
-                  if min(left[key]+box[2]-box[0],left[other]+bounds[other][2]-bounds[other][0])
-                     +pair_gap(key,other)-max(left[key],left[other])>EPS]
-        bottom[key]=(max(bottom[other]+bounds[other][3]-bounds[other][1]+pair_gap(key,other) for other in previous)
-                     if previous else box[1])
+    # A pair stays separated on every axis where its original boxes are
+    # separated. This preserves the user's rows, columns and diagonal order.
+    predecessors=[{key:[] for key in keys} for _ in range(2)]
+    successors=[{key:[] for key in keys} for _ in range(2)]
+    for index,a in enumerate(keys):
+        for b in keys[index+1:]:
+            separated=False
+            for axis in range(2):
+                low,high=axis,axis+2
+                if bounds[a][high]<=bounds[b][low]+EPS:before,after=a,b
+                elif bounds[b][high]<=bounds[a][low]+EPS:before,after=b,a
+                else:continue
+                predecessors[axis][after].append(before)
+                successors[axis][before].append(after)
+                separated=True
+            if not separated:
+                raise ValueError("서로 겹친 외곽 박스가 있습니다. 먼저 수동으로 분리하세요.")
+
+    def spread_axis(axis:int)->Dict[Tuple[int,int],float]:
+        order=sorted(keys,key=lambda key:(bounds[key][axis],key))
+        sizes={key:bounds[key][axis+2]-bounds[key][axis] for key in keys}
+        limit=sheet[axis]-edge
+        def separation(a,b,spacing):return max(spacing,clearance[a]+clearance[b])
+        # The stock margin is a configured minimum, while the extra space is
+        # spent between parts; otherwise a dense sheet shrinks inward.
+        def border(key):return clearance[key]
+        def earliest(spacing):
+            positions={}
+            for key in order:
+                positions[key]=max([edge+border(key)]+[positions[other]+sizes[other]+separation(other,key,spacing)
+                                            for other in predecessors[axis][key]])
+                if positions[key]+sizes[key]>limit-border(key)+EPS:return None
+            return positions
+        if earliest(gap) is None:
+            raise ValueError("지정 간격으로 정리하면 판재 안에 들어가지 않습니다.")
+        low,high=gap,sheet[axis]
+        for _ in range(40):
+            middle=(low+high)/2
+            if earliest(middle) is None:high=middle
+            else:low=middle
+        first=earliest(low)
+        latest={}
+        for key in reversed(order):
+            latest[key]=min([limit-border(key)-sizes[key]]+
+                [latest[other]-sizes[key]-separation(key,other,low)
+                 for other in successors[axis][key]])
+        # Both boundary solutions obey all separation constraints, so their
+        # midpoint centers rows/columns with slack without squeezing a gap.
+        return {key:(first[key]+latest[key])/2 for key in keys}
+
+    left=spread_axis(0);bottom=spread_axis(1)
     new={key:(left[key],bottom[key],left[key]+bounds[key][2]-bounds[key][0],
               bottom[key]+bounds[key][3]-bounds[key][1]) for key in keys}
-    min_x=min(box[0] for box in new.values());max_x=max(box[2] for box in new.values())
-    min_y=min(box[1] for box in new.values());max_y=max(box[3] for box in new.values())
-    if max_x-min_x>sheet[0]-2*edge+EPS or max_y-min_y>sheet[1]-2*edge+EPS:
-        raise ValueError("지정 간격으로 정리하면 판재 안에 들어가지 않습니다.")
-    shift_x=min(max(0.0,edge-min_x),sheet[0]-edge-max_x)
-    shift_y=min(max(0.0,edge-min_y),sheet[1]-edge-max_y)
-    new={key:(box[0]+shift_x,box[1]+shift_y,box[2]+shift_x,box[3]+shift_y)
-         for key,box in new.items()}
     for index,key in enumerate(keys):
         a=new[key]
         for other in keys[index+1:]:
-            b=new[other];required=pair_gap(key,other)
+            b=new[other];required=clearance[key]+clearance[other]
             if (a[0]<b[2]+required-EPS and b[0]<a[2]+required-EPS and
                     a[1]<b[3]+required-EPS and b[1]<a[3]+required-EPS):
                 raise ValueError("혼합 크기 배치가 새 위치에서 겹칩니다. 일부 객체를 먼저 수동으로 분리하세요.")
@@ -5808,8 +5834,8 @@ class App(tk.Tk):
         ttk.Button(controls,text="판재에 자동 어레이",command=self.auto_nest).grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
         self.manual_array_btn=ttk.Button(controls,text="수동 어레이 시작 (드래그 / R 회전)",command=self.toggle_manual_array)
         self.manual_array_btn.grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
-        ttk.Button(controls,text="현재 배치 외곽 박스 간격 정리",command=self.even_manual_spacing).grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
-        ttk.Label(controls,text="가공물 간격 + 파츠별 외곽 여유 기준 · Ctrl+Z 복원").grid(row=r,columnspan=2,sticky="w");r+=1
+        ttk.Button(controls,text="판재 전체에 외곽 박스 등간격 배치",command=self.even_manual_spacing).grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
+        ttk.Label(controls,text="가공물 간격은 최소값 · 파츠별 외곽 여유 적용 · Ctrl+Z 복원").grid(row=r,columnspan=2,sticky="w");r+=1
         ttk.Button(controls,text="어레이 해제",command=self.clear_nest).grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
         ttk.Separator(controls).grid(row=r, columnspan=2, sticky="ew", pady=8); r += 1
         ttk.Label(controls, text="선택 윤곽 설정").grid(row=r, columnspan=2, sticky="w"); r += 1
@@ -7253,15 +7279,15 @@ class App(tk.Tk):
             return
         changed={key:(dx,dy) for key,(dx,dy) in shifts.items() if abs(dx)>1e-6 or abs(dy)>1e-6}
         if not changed:
-            self.status.set("현재 배치의 외곽 박스 간격이 이미 설정값과 같습니다.")
+            self.status.set("현재 배치가 이미 판재 전체에 등간격으로 놓여 있습니다.")
             return
-        self.push_undo("외곽 박스 간격 정리")
+        self.push_undo("외곽 박스 등간격 배치")
         for key,(dx,dy) in changed.items():move_contour_group(self.contours,key,dx,dy)
         self.sheet_size=sheet;self.preview_cache.clear();self.collision_cache_key=None
         self.preview_order_cache_key=None;self.gcode_signature=None;self.gcode="";self.gcode_parts=[]
         self.text.delete("1.0","end");self.measure_start=None;self.measurement=None
         self.redraw()
-        self.status.set(f"외곽 박스 간격 정리 {len(changed)}개 · 공통 간격 {gap:g} mm · Ctrl+Z 복원")
+        self.status.set(f"외곽 박스 등간격 배치 {len(changed)}개 · 최소 간격 {gap:g} mm · Ctrl+Z 복원")
 
     def toggle_manual_array(self):
         if self.manual_array_mode:
