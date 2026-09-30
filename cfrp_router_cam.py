@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.41"
+APP_VERSION = "1.42"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
@@ -113,6 +113,8 @@ _UI_EN_EXACT = {
     "3D 시뮬레이션은 프로그램 내부 GPU 창에서 엽니다.\nGPU 사용이 어려우면 기본 3D 뷰어를 사용하세요.": "3D simulation opens an internal GPU window.\nUse the classic 3D viewer if GPU is unavailable.",
     "촘촘한 배열 (실제 윤곽 / 180° 엇갈림)": "Contour nesting (180 degree interlocking)",
     "촘촘한 모드: 파츠별 외곽 여유 합산 · 빈칸은 공통 간격의 절반": "Contour mode: add part offsets; blank = half the common gap",
+    "현재 배치 외곽 박스 간격 정리": "Even spacing of placed part boxes",
+    "가공물 간격 + 파츠별 외곽 여유 기준 · Ctrl+Z 복원": "Uses common gap and per-part offsets; Ctrl+Z to undo",
     "외곽 여유 mm": "Offset mm",
     "선택 파츠 외곽 여유 (mm)": "Selected part offset (mm)",
     "여유 적용": "Apply offset",
@@ -236,7 +238,7 @@ _UI_EN_EXACT = {
     "선택 설정 적용": "Apply Selection Settings",
     "절삭 시작점 선택: OFF": "Select Cut Start: OFF",
     "절삭 시작점 선택: ON": "Select Cut Start: ON",
-    "공구 보정경로/순서 표시": "Show Compensated Toolpath/Order",
+    "공구 중심선 참고/순서 표시": "Show Tool-Center Reference/Order",
     "꼬인 작은 루프 자동 잘라내기": "Automatically Trim Small Tangled Loops",
     "파일별 객체 / 배치 수량": "Objects / Quantity by File",
     "객체": "Object",
@@ -1250,6 +1252,57 @@ def contour_group_bounds_map(contours:Sequence[Contour])->Dict[Tuple[int,int],Tu
         else:
             b=bounds[key];b[0]=min(b[0],x0);b[1]=min(b[1],y0);b[2]=max(b[2],x1);b[3]=max(b[3],y1)
     return {key:(b[0],b[1],b[2],b[3]) for key,b in bounds.items()}
+
+
+def even_box_spacing(bounds:Dict[Tuple[int,int],Tuple[float,float,float,float]],gap:float,
+                     sheet:Tuple[float,float],edge:float=0.0,
+                     clearances:Optional[Dict[Tuple[int,int],float]]=None)->Dict[Tuple[int,int],Tuple[float,float]]:
+    """Tighten existing left/right and below/above neighbours by their AABBs."""
+    if not all(math.isfinite(v) for v in (gap,edge,*sheet)) or gap<0 or edge<0 or min(sheet)<=0:
+        raise ValueError("판재 크기와 간격은 유한한 양수, 여유는 0 이상이어야 합니다.")
+    if not bounds:return {}
+    for x0,y0,x1,y1 in bounds.values():
+        if not all(math.isfinite(v) for v in (x0,y0,x1,y1)) or x1<=x0 or y1<=y0:
+            raise ValueError("객체 외곽 사각형이 올바르지 않습니다.")
+    keys=list(bounds)
+    clearance={key:float((clearances or {}).get(key,gap/2)) for key in keys}
+    if any(not math.isfinite(value) or value<0 for value in clearance.values()):
+        raise ValueError("파츠별 외곽 여유는 0 이상의 유한한 값이어야 합니다.")
+    def pair_gap(a,b):return clearance[a]+clearance[b]
+    left={};bottom={}
+    x_order=sorted(keys,key=lambda key:(bounds[key][0],bounds[key][1],key))
+    for index,key in enumerate(x_order):
+        box=bounds[key]
+        previous=[other for other in x_order[:index]
+                  if min(box[3],bounds[other][3])+pair_gap(key,other)-max(box[1],bounds[other][1])>EPS]
+        left[key]=(max(left[other]+bounds[other][2]-bounds[other][0]+pair_gap(key,other) for other in previous)
+                   if previous else box[0])
+    y_order=sorted(keys,key=lambda key:(bounds[key][1],bounds[key][0],key))
+    for index,key in enumerate(y_order):
+        box=bounds[key]
+        previous=[other for other in y_order[:index]
+                  if min(left[key]+box[2]-box[0],left[other]+bounds[other][2]-bounds[other][0])
+                     +pair_gap(key,other)-max(left[key],left[other])>EPS]
+        bottom[key]=(max(bottom[other]+bounds[other][3]-bounds[other][1]+pair_gap(key,other) for other in previous)
+                     if previous else box[1])
+    new={key:(left[key],bottom[key],left[key]+bounds[key][2]-bounds[key][0],
+              bottom[key]+bounds[key][3]-bounds[key][1]) for key in keys}
+    min_x=min(box[0] for box in new.values());max_x=max(box[2] for box in new.values())
+    min_y=min(box[1] for box in new.values());max_y=max(box[3] for box in new.values())
+    if max_x-min_x>sheet[0]-2*edge+EPS or max_y-min_y>sheet[1]-2*edge+EPS:
+        raise ValueError("지정 간격으로 정리하면 판재 안에 들어가지 않습니다.")
+    shift_x=min(max(0.0,edge-min_x),sheet[0]-edge-max_x)
+    shift_y=min(max(0.0,edge-min_y),sheet[1]-edge-max_y)
+    new={key:(box[0]+shift_x,box[1]+shift_y,box[2]+shift_x,box[3]+shift_y)
+         for key,box in new.items()}
+    for index,key in enumerate(keys):
+        a=new[key]
+        for other in keys[index+1:]:
+            b=new[other];required=pair_gap(key,other)
+            if (a[0]<b[2]+required-EPS and b[0]<a[2]+required-EPS and
+                    a[1]<b[3]+required-EPS and b[1]<a[3]+required-EPS):
+                raise ValueError("혼합 크기 배치가 새 위치에서 겹칩니다. 일부 객체를 먼저 수동으로 분리하세요.")
+    return {key:(new[key][0]-bounds[key][0],new[key][1]-bounds[key][1]) for key in keys}
 
 
 def move_contour_group(contours:Sequence[Contour],key:Tuple[int,int],dx:float,dy:float)->int:
@@ -5755,6 +5808,8 @@ class App(tk.Tk):
         ttk.Button(controls,text="판재에 자동 어레이",command=self.auto_nest).grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
         self.manual_array_btn=ttk.Button(controls,text="수동 어레이 시작 (드래그 / R 회전)",command=self.toggle_manual_array)
         self.manual_array_btn.grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
+        ttk.Button(controls,text="현재 배치 외곽 박스 간격 정리",command=self.even_manual_spacing).grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
+        ttk.Label(controls,text="가공물 간격 + 파츠별 외곽 여유 기준 · Ctrl+Z 복원").grid(row=r,columnspan=2,sticky="w");r+=1
         ttk.Button(controls,text="어레이 해제",command=self.clear_nest).grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
         ttk.Separator(controls).grid(row=r, columnspan=2, sticky="ew", pady=8); r += 1
         ttk.Label(controls, text="선택 윤곽 설정").grid(row=r, columnspan=2, sticky="w"); r += 1
@@ -5782,7 +5837,7 @@ class App(tk.Tk):
         self.start_btn = ttk.Button(controls, text="절삭 시작점 선택: OFF", command=self.toggle_start)
         self.start_btn.grid(row=r, columnspan=2, sticky="ew", pady=2); r += 1
         self.var("show_toolpath", True, tk.BooleanVar)
-        ttk.Checkbutton(controls, text="공구 보정경로/순서 표시", variable=self.vars["show_toolpath"],
+        ttk.Checkbutton(controls, text="공구 중심선 참고/순서 표시", variable=self.vars["show_toolpath"],
                         command=self.redraw).grid(row=r, columnspan=2, sticky="w")
         r += 1
         self.var("auto_trim", True, tk.BooleanVar)
@@ -6462,17 +6517,22 @@ class App(tk.Tk):
             self.apply_job_values(data);self._restore_history_state(state);self.config()
         except (ValueError,TypeError,tk.TclError) as exc:
             self.apply_job_values(previous);self._restore_history_state(previous_state);messagebox.showerror("작업 열기 실패",str(exc));return False
-        self._restore_history_state(state)
         self.manual_array_mode=False;self.manual_array_drag=None;self.manual_array_selected=None
         self.manual_array_btn.configure(text="수동 어레이 편집 (드래그 / R 회전)")
         self.canvas_selection_drag=None;self.selected=None;self.selected_contours=[];self.view_only=None
-        self.pick_shortcut(type("Event",(),{"widget":self.canvas,"state":0,"keysym":"Escape"})())
+        # Reset point-picking without its Escape handler's intermediate redraw.
+        self.manual_mode=self.start_mode=self.origin_mode=self.join_mode=self.measure_mode=False
+        self.join_first=None;self.measure_start=None;self.measurement=None
+        for button,label in ((self.manual_btn,"수동 탭 추가: OFF"),(self.start_btn,"절삭 시작점 선택: OFF"),
+                             (self.origin_btn,"DXF XY 원점 선택: OFF"),(self.join_btn,"두 라인 선택 연결: OFF"),
+                             (self.measure_btn,"거리 측정: OFF")):
+            button.configure(text=label)
         self.undo_stack.clear();self.redo_stack.clear();self.preview_cache.clear();self.collision_cache_key=None
         self.preview_order_cache_key=None;self.tree_sort_col=None;self.order_drag=None
         self.gcode="";self.gcode_parts=[];self.gcode_signature=None;self.instance_clipboard=[]
         self.clear_order_drop()
         self.text.delete("1.0","end");self.selection_label.set("선택 없음")
-        self.view_initialized=False;self.refresh_object_tree();self.redraw()
+        self.view_initialized=False;self.refresh_object_tree();self.redraw();self.canvas.focus_set()
         if recovered:
             metadata=data.get("autosave")
             source=metadata.get("source_path","") if isinstance(metadata,dict) else ""
@@ -7159,14 +7219,49 @@ class App(tk.Tk):
             outside=sum(x0<edge-EPS or y0<edge-EPS or x1>sw-edge+EPS or y1>sh-edge+EPS
                         for _,(x0,y0,x1,y1) in boxes)
         overlap=0
-        for i,(_,a) in enumerate(boxes):
-            for _,b in boxes[i+1:]:
+        by_id={part.object_id:part for part in self.part_objects}
+        def clearance(key):
+            part=by_id.get(key[0])
+            return nesting_offset(part,gap) if part is not None else gap/2
+        for i,(key,a) in enumerate(boxes):
+            for other,b in boxes[i+1:]:
                 # Count both overlaps and boxes closer than the configured
                 # clearance so a manual layout cannot silently violate the
                 # same spacing used by automatic nesting.
-                if (a[0]<b[2]+gap-EPS and b[0]<a[2]+gap-EPS and
-                        a[1]<b[3]+gap-EPS and b[1]<a[3]+gap-EPS):overlap+=1
+                required=clearance(key)+clearance(other)
+                if (a[0]<b[2]+required-EPS and b[0]<a[2]+required-EPS and
+                        a[1]<b[3]+required-EPS and b[1]<a[3]+required-EPS):overlap+=1
         return outside,overlap
+
+    def even_manual_spacing(self):
+        if not self.nest_active:
+            messagebox.showinfo("배치 간격", "먼저 객체를 수동 또는 자동으로 배치하세요.")
+            return
+        bounds=contour_group_bounds_map(self.contours)
+        if len(bounds)<2:
+            self.status.set("간격을 맞출 객체가 2개 이상 필요합니다.")
+            return
+        try:
+            gap=float(self.vars["array_gap"].get());edge=float(self.vars["array_edge"].get())
+            sheet=(float(self.vars["sheet_w"].get()),float(self.vars["sheet_h"].get()))
+            by_id={part.object_id:part for part in self.part_objects}
+            clearances={key:nesting_offset(by_id[key[0]],gap) if key[0] in by_id else gap/2
+                        for key in bounds}
+            shifts=even_box_spacing(bounds,gap,sheet,edge,clearances)
+        except (ValueError,tk.TclError) as exc:
+            messagebox.showwarning("배치 간격",str(exc))
+            return
+        changed={key:(dx,dy) for key,(dx,dy) in shifts.items() if abs(dx)>1e-6 or abs(dy)>1e-6}
+        if not changed:
+            self.status.set("현재 배치의 외곽 박스 간격이 이미 설정값과 같습니다.")
+            return
+        self.push_undo("외곽 박스 간격 정리")
+        for key,(dx,dy) in changed.items():move_contour_group(self.contours,key,dx,dy)
+        self.sheet_size=sheet;self.preview_cache.clear();self.collision_cache_key=None
+        self.preview_order_cache_key=None;self.gcode_signature=None;self.gcode="";self.gcode_parts=[]
+        self.text.delete("1.0","end");self.measure_start=None;self.measurement=None
+        self.redraw()
+        self.status.set(f"외곽 박스 간격 정리 {len(changed)}개 · 공통 간격 {gap:g} mm · Ctrl+Z 복원")
 
     def toggle_manual_array(self):
         if self.manual_array_mode:
@@ -7213,32 +7308,45 @@ class App(tk.Tk):
             if style!=current:
                 self.canvas.itemconfigure(item,**style);record[4]=style
 
-    def draw_manual_offsets(self,visible):
+    def draw_manual_offsets(self,visible,order_numbers=None):
+        """Draw only a cutter-center reference; NC safety/planning runs on Generate."""
         try:
             diameter=float(self.vars["tool_d"].get())
             cfg={k:float(self.vars[k].get()) for k in ("inner_size_adjust","outer_size_adjust")}
             if not math.isfinite(diameter) or diameter<=0:return
             if not all(math.isfinite(v) and abs(v)<diameter for v in cfg.values()):return
         except (ValueError,tk.TclError):return
+        climb=bool(self.vars["climb"].get())
         if len(self.preview_cache)>max(512,len(self.contours)*8):self.preview_cache.clear()
         for c in visible:
             if not c.enabled or len(c.points)<2 or c.operation=="pocket":continue
             anchor=c.points[0]
             relative=tuple((round(x-anchor[0],7),round(y-anchor[1],7)) for x,y in c.points)
-            key=("manual-offset",relative,c.closed,c.role,c.operation,diameter,tuple(cfg.items()))
+            key=("manual-offset",relative,c.closed,c.role,c.operation,diameter,tuple(cfg.items()),climb,round(c.start_s,7))
             route=self.preview_cache.get(key)
             if route is None:
-                try:points=compensated_route(c,diameter,False,cfg=cfg)[0] if c.closed and c.operation!="pocket" else c.points
+                try:
+                    if c.closed:
+                        want_ccw=(c.role=="inner") if climb else (c.role!="inner")
+                        source=reverse_if_needed(list(c.points),want_ccw)
+                        points=compensated_route(c,diameter,False,source,cfg=cfg)[0]
+                        if c.start_s>EPS:
+                            start=point_at(c.points,c.start_s,True)[0]
+                            points=rotate_closed_path(points,nearest_path_distance(points,start,True)[1])
+                    else:points=c.points
                 except (ValueError,IndexError):continue
                 route=[(x-anchor[0],y-anchor[1]) for x,y in points];self.preview_cache[key]=route
             if len(route)<2:continue
             points=route+[route[0]] if c.closed else route
             xy=[v for x,y in points for v in self.transform((x+anchor[0],y+anchor[1]))]
-            self.canvas.create_line(*xy,fill="#ffb347",dash=(4,3),width=1,
+            self.canvas.create_line(*xy,fill="#ffb347" if self.manual_array_mode else "#ff6363",dash=(4,3),width=1,
                                     tags=(self.manual_group_tag(contour_group_key(c)),"manual_offset"))
+            if order_numbers is not None and id(c) in order_numbers:
+                x,y=self.transform((route[0][0]+anchor[0],route[0][1]+anchor[1]))
+                self.canvas.create_text(x+9,y-9,text=str(order_numbers[id(c)]),fill="white",font=("Arial",self.ui_font_size,"bold"))
         self.canvas.create_text(12,12,anchor="nw",fill="#ffb347",
-            text="공구 중심선 참고 · 리드인/마모/포켓/충돌검사 제외" if CURRENT_LANGUAGE!="en" else
-                 "Tool-center reference: excludes leads, wear, pockets and collision checks")
+            text="공구 중심선 참고 · 상세 경로/충돌검사는 G-code 생성 시" if CURRENT_LANGUAGE!="en" else
+                 "Tool-center reference; full paths and safety checks run on G-code generation")
 
     def manual_group_at(self,p:Point)->Optional[Tuple[int,int]]:
         visible=self.visible_contours();bounds_by_key=self.manual_pick_bounds
@@ -8171,130 +8279,22 @@ class App(tk.Tk):
                                                fill="#ff4fd8",outline="white",tags=(group_tag,) if group_tag else ())
         self.canvas.addtag_all("view_live")
         detail_marker=self.canvas_item_marker()
-        if self.manual_array_mode and self.vars["show_toolpath"].get():self.draw_manual_offsets(visible)
-        if not self.manual_array_mode and self.vars.get("show_toolpath") and self.vars["show_toolpath"].get():
-            try:
-                preview_cfg={
-                    "inner_size_adjust":self.vars["inner_size_adjust"].get(),
-                    "outer_size_adjust":self.vars["outer_size_adjust"].get(),
-                    "tool_d":self.vars["tool_d"].get(),
-                    "tool_wear_enabled":self.vars["tool_wear_enabled"].get(),
-                    "tool_wear_loss_per_10m":self.vars["tool_wear_loss_per_10m"].get(),
-                    "tool_wear_min_d":self.vars["tool_wear_min_d"].get(),
-                }
-                preview_radius=effective_tool_diameter(preview_cfg,0.0)/2
-                for key in ("inner_size_adjust","outer_size_adjust"):
-                    if not math.isfinite(preview_cfg[key]) or abs(preview_cfg[key])>=preview_radius*2:
-                        preview_cfg[key]=0.0
-            except (tk.TclError, ValueError): preview_radius = 1.0;preview_cfg={}
-            auto_trim_value=bool(self.vars.get("auto_trim") and self.vars["auto_trim"].get())
-            climb_value=bool(self.vars["climb"].get())
-            geometry_signature=hash(tuple((id(c),c.enabled,c.safety_excluded,c.closed,c.role,c.target_depth,
-                tuple((round(x,5),round(y,5)) for x,y in c.points)) for c in self.contours))
-            dimension_key=(preview_cfg.get("inner_size_adjust",0),preview_cfg.get("outer_size_adjust",0))
-            collision_key=(round(preview_radius*2,6),auto_trim_value,geometry_signature,dimension_key)
-            if collision_key!=self.collision_cache_key:
-                # Interactive redraw must never spawn worker processes while a
-                # part is being dragged. Explicit safety/G-code checks use all cores.
-                self.collision_cache=tool_sweep_collisions(
-                    self.contours,preview_radius*2,auto_trim_value,use_parallel=False,cfg=preview_cfg)
-                self.collision_cache_key=collision_key
-            visible_ids={id(c) for c in visible}
-            if len(self.preview_cache)>max(512,len(self.contours)*8):self.preview_cache.clear()
-            rapid_order=bool(self.vars["rapid_optimize"].get())
-            order_signature=hash(tuple((id(c),c.cut_order,c.outer_cut_order,round(c.start_s,6),c.enabled)
-                                       for c in self.contours))
-            outer_mode,center=self.preview_outer_order_settings()
-            depth_first=self.vars["depth_first_order"].get()
-            order_key=(geometry_signature,order_signature,rapid_order,outer_mode,center,depth_first)
-            if order_key!=self.preview_order_cache_key:
-                self.preview_order_cache=ordered_contours(self.contours,rapid_order,outer_order=outer_mode,
-                                                          sheet_center=center,depth_first=depth_first)
-                self.preview_order_cache_key=order_key
-            preview_order=self.preview_order_cache
-            show_order_numbers=len(preview_order)<=60
-            for number, c in enumerate(preview_order, 1):
-                if id(c) not in visible_ids: continue
-                if c.operation=="pocket":
-                    try:
-                        pocket_cfg={k:self.vars[k].get() for k in ("pocket_stepover","pocket_stepdown","pocket_finish","climb","path_tolerance","pocket_stay_down")}
-                        rough,finish,_=pocket_plan(c,preview_radius*2,pocket_cfg)
-                        for route in rough+finish:
-                            xy=[v for p in route+[route[0]] for v in self.transform(p)]
-                            self.canvas.create_line(*xy,fill="#49d8c8",width=1)
-                    except ValueError:
-                        xy=[v for p in c.points+[c.points[0]] for v in self.transform(p)]
-                        self.canvas.create_line(*xy,fill="#ff3030",width=2)
-                    continue
-                if not c.closed:
-                    xy=[]
-                    for p in c.points: xy.extend(self.transform(p))
-                    self.canvas.create_line(*xy,fill="#ff6363",dash=(4,3),width=1)
-                    if show_order_numbers:
-                        x,y=self.transform(c.points[0]); self.canvas.create_text(x+9,y-9,text=str(number),fill="white",font=("Arial",self.ui_font_size,"bold"))
-                    continue
-                auto_trim=auto_trim_value
-                anchor=c.points[0]
-                relative_points=tuple((round(x-anchor[0],7),round(y-anchor[1],7)) for x,y in c.points)
-                cache_key=(relative_points,c.closed,c.role,c.forced_role,c.depth,c.enabled,
-                           round(c.start_s,8),round(preview_radius,8),auto_trim,dimension_key,climb_value)
-                cached=self.preview_cache.get(cache_key)
-                if cached is None:
-                    want_ccw=(c.role=="inner") if climb_value else (c.role!="inner")
-                    source_points=reverse_if_needed(list(c.points),want_ccw)
-                    route,removed_loops,cut_points=compensated_route(
-                        c,preview_radius*2,auto_trim,source_points,cfg=preview_cfg)
-                    if c.start_s > EPS:
-                        start_point=point_at(c.points,c.start_s,True)[0]
-                        route=rotate_closed_path(route,nearest_path_distance(route,start_point,True)[1])
-                    errors,warnings=contour_toolpath_issues(c,preview_radius*2,auto_trim,pocket_cfg=preview_cfg)
-                    rel_route=[(x-anchor[0],y-anchor[1]) for x,y in route]
-                    rel_removed=[[(x-anchor[0],y-anchor[1]) for x,y in loop] for loop in removed_loops]
-                    rel_cuts=[(x-anchor[0],y-anchor[1]) for x,y in cut_points]
-                    cached=(rel_route,rel_removed,rel_cuts,errors,warnings);self.preview_cache[cache_key]=cached
-                rel_route,rel_removed,rel_cuts,errors,warnings=cached
-                errors=list(errors)+self.collision_cache.get(id(c),[])
-                route=[(x+anchor[0],y+anchor[1]) for x,y in rel_route]
-                removed_loops=[[(x+anchor[0],y+anchor[1]) for x,y in loop] for loop in rel_removed]
-                cut_points=[(x+anchor[0],y+anchor[1]) for x,y in rel_cuts]
-                xy=[]
-                for p in route+[route[0]]: xy.extend(self.transform(p))
-                other_warnings=[w for w in warnings if "자동 절단" not in w]
-                try:
-                    stock_value=float(self.vars["stock"].get());target=c.target_depth if c.target_depth is not None else stock_value+float(self.vars["extra"].get())
-                    preview_cfg={"wall_finish":bool(self.vars["wall_finish"].get()),
-                                 "finish_scope":self.vars["finish_scope"].get(),
-                                 "finish_allowance":float(self.vars["finish_allowance"].get())}
-                    if self.vars["onion_split"].get():preview_cfg.update(wall_finish=True,finish_scope="전체")
-                    show_rough=wall_finish_for(c,target,stock_value,preview_cfg)
-                except (tk.TclError,ValueError,KeyError):show_rough=False
-                if show_rough:
-                    rough,_=rough_route_for(c,route,preview_cfg);roughxy=[]
-                    for p in rough+[rough[0]]:roughxy.extend(self.transform(p))
-                    self.canvas.create_line(*roughxy,fill="#ffb347",dash=(7,4),width=2)
-                path_color="#9b8cff" if c.safety_excluded else ("#ff3030" if errors else ("#ff9d3d" if other_warnings else "#ff6363"))
-                path_dash=(8,4) if c.safety_excluded else (() if errors else (4,3))
-                self.canvas.create_line(*xy,fill=path_color,dash=path_dash,width=3 if errors else (2 if c.safety_excluded else 1))
-                x,y=self.transform(route[0])
-                if show_order_numbers:self.canvas.create_text(x+9,y-9,text=str(number),fill="white",font=("Arial",self.ui_font_size,"bold"))
-                if errors or other_warnings:
-                    self.canvas.create_text(x+18,y+10,text="!",fill="#ff3030" if errors else "#ffb13b",font=("Arial",self.ui_font_size+5,"bold"))
-                for loop in removed_loops:
-                    loopxy=[]
-                    for p in loop:loopxy.extend(self.transform(p))
-                    self.canvas.create_line(*loopxy,fill="#ff9d00",width=3,dash=(2,2))
-                for cp in cut_points:
-                    cx,cy=self.transform(cp)
-                    self.canvas.create_text(cx+8,cy-8,text="!",fill="#ffb000",font=("Arial",self.ui_font_size+5,"bold"))
-                try:plan=lead_plan(c,route,self.vars["lead"].get());entry,mode=plan.entry,plan.mode
-                except (tk.TclError,ValueError):plan=LeadPlan(route[0],"none");entry,mode=route[0],"none"
-                if entry != route[0]:
-                    leadxy=[]
-                    for p in lead_arc_points(plan,route[0]) if plan.center is not None else [entry,route[0]]:leadxy.extend(self.transform(p))
-                    ex,ey=self.transform(entry)
-                    self.canvas.create_line(*leadxy,fill="#54e1ff",width=2,arrow="last",smooth=plan.center is not None)
-                    if mode=="center-fallback":
-                        self.canvas.create_oval(ex-4,ey-4,ex+4,ey+4,fill="#54e1ff",outline="white")
+        if self.vars.get("show_toolpath") and self.vars["show_toolpath"].get():
+            order_numbers=None
+            if not self.manual_array_mode:
+                rapid=bool(self.vars["rapid_optimize"].get())
+                outer_mode,center=self.preview_outer_order_settings()
+                depth_first=bool(self.vars["depth_first_order"].get())
+                # The list and small order labels stay current, while cutter
+                # collision checks and full toolpath planning wait for Generate.
+                ordered=ordered_contours(self.contours,rapid,outer_order=outer_mode,
+                                         sheet_center=center,depth_first=depth_first)
+                self.preview_order_cache=ordered
+                self.preview_order_cache_key=(tuple((id(c),c.enabled,c.cut_order,c.outer_cut_order,
+                    round(c.start_s,6),c.points[0] if c.points else None) for c in self.contours),
+                    rapid,outer_mode,center,depth_first)
+                if len(ordered)<=60:order_numbers={id(c):i for i,c in enumerate(ordered,1)}
+            self.draw_manual_offsets(visible,order_numbers)
         self.tag_canvas_items_after(detail_marker,"view_detail")
         overlay_marker=self.canvas_item_marker()
         self.draw_measurement()
