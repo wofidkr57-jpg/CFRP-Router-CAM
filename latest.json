@@ -1,6 +1,6 @@
 {
-  "version": "1.38",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.38/CFRP_Router_CAM.exe",
-  "sha256": "b21df130b9c0872ee26bcc7311932b8acc3d7c73be59deaadc800f0f4aa50783",
-  "message": "중앙→바깥 외곽 순서를 전체 판재 중심(X÷2,Y÷2) 기준으로 수정했습니다. 판재 X/Y를 확인한 뒤 가공코드를 다시 생성하세요. 내부 홀·포켓과 수동 지정 순번은 우선합니다."
+  "version": "1.39",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.39/CFRP_Router_CAM.exe",
+  "sha256": "72cffd934d9d73e29ad76f6927c5a50b26173df4705842f47d392cafe7100b32",
+  "message": "시작점 화살표와 2D 공구 경로가 실제 절삭 방향을 표시합니다. 변경된 작업은 5분마다 별도 임시 파일로 저장하고 비정상 종료 후 복구할 수 있습니다. 기존 NC 절삭 경로는 바뀌지 않습니다."
 }
