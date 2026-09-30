@@ -20,9 +20,13 @@ with tempfile.TemporaryDirectory() as tmp:
         assert app.job_signature(app.config())!=before
         app.vars['inner_size_adjust'].set(.12)
         app.vars['show_toolpath'].set(True);app.redraw();app.update()
-        assert app.collision_cache_key[-1]==(.12,-.08)
-        with mock.patch.object(cam.messagebox,'askokcancel',return_value=True),mock.patch.object(cam.messagebox,'showerror') as errors:
+        # Redraw only draws the offset reference. Collision checks run on Generate.
+        assert app.collision_cache_key is None
+        with mock.patch.object(cam.messagebox,'askokcancel',return_value=True),mock.patch.object(cam.messagebox,'showerror') as errors, \
+             mock.patch.object(cam,'tool_sweep_collisions',wraps=cam.tool_sweep_collisions) as collisions, \
+             mock.patch.object(cam,'contour_toolpath_issues',wraps=cam.contour_toolpath_issues) as paths:
             app.make_gcode()
+        assert collisions.called and paths.called
         assert not errors.called,errors.call_args_list
         assert '(OUTER_SIZE_ADJUST_MM: -0.08)' in app.gcode
         app.vars['inner_size_adjust'].set(float('nan'))
