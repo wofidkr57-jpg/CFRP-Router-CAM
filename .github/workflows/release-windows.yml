@@ -181,7 +181,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "시작점 화살표와 2D 공구 경로가 실제 절삭 방향을 표시합니다. 변경된 작업은 5분마다 별도 임시 파일로 저장하고 비정상 종료 후 복구할 수 있습니다. 기존 NC 절삭 경로는 바뀌지 않습니다."
+            message = "보어·깊이 가공을 먼저 처리하는 선택 옵션과 여러 외곽의 묶음 순서 드래그를 추가했습니다. 윤곽 목록 클릭 반응도 개선했습니다. 깊이 우선 옵션은 기본 꺼짐입니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
