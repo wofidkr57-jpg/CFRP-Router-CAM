@@ -5,7 +5,7 @@
 - 정본 작업 위치: 로컬 `Documents/CFRP-Router-CAM` (OneDrive 외부). `cfrp_router_cam.py`가 단일 소스 정본이며 ChatGPT 프로젝트 미러의 `sources/`는 읽기 전용이다.
 - 저장소: `wofidkr57-jpg/CFRP-Router-CAM`, 기존 공개 상태, 기본 브랜치 `main`.
 - 공개 배포: **V1.43**. PR #25, 태그 `v1.43`, Windows Actions `36698866929`의 검사·빌드·Defender·공개 파일 해시 확인 완료.
-- 현재 개발: **V1.43 기반 기계 프로파일 / 가공 셋업 기능**. `feat/machine-setup-profiles` 브랜치. APP_VERSION·자동 업데이트 매니페스트·공개 배포본은 아직 V1.43이다.
+- 현재 소스: **V1.44 기계 프로파일 / 가공 셋업**. PR #26의 배포 준비. 버전·README·CHANGELOG를 맞췄으며 Windows CI·Defender·공개 파일/매니페스트 검증 후 배포 완료로 갱신한다.
 
 ## 이번 변경
 
@@ -20,11 +20,11 @@
 - 단위 회귀 **163개 통과**.
 - GUI: 신규 프로파일, 기존 작업 파일, 어니언스킨 분리, 첫 실행 ko/en/close, 기본 화면의 **7경로 통과**. 최종 프로파일 검사에서 실제 콤보 이벤트·범위 분리·생성 NC START/END·동일 이동 경로·구버전 설정 이행·이름 보존·980px 창 배치·재시작·작업 스냅샷·실패 복원·AppData 대응·손상 파일 보존 확인.
 - Windows EXE 빌드 통과. 로그: Git 제외 `local-handoff/profiles-build.log`.
-- 실제 CNC 연결/이동/절삭, Mach3 실행, 사용자 실행본 교체는 수행하지 않았다. 이번 변경은 아직 배포/OneDrive 보관하지 않았다.
+- 실제 CNC 연결/이동/절삭, Mach3 실행, 사용자 실행본 교체는 수행하지 않았다. V1.44 배포/OneDrive 보관은 아직 검증 전이다.
 
 ## 미해결 / 다음 작업
 
-- 사용자 배포 요청 시 버전·README·CHANGELOG·태그·검증된 EXE·매니페스트를 일치시켜 릴리스한다.
+- 사용자 배포 요청에 따라 PR #26을 병합하고 검증된 EXE·태그·매니페스트를 게시한다.
 - 실제 기계별 START/END·주차·교체 매크로 조합은 해당 기계에서 원점/Z 기준을 확인하고 공중 드라이런해야 한다.
 - 이전에 보고된 Mach3 G2/G3 경로 계산 지연은 현장 비교 전까지 원인 미확정이다.
 - 과거 배포·성능·마모 시험 기록과 당시 검증은 [PROJECT_HISTORY.md](PROJECT_HISTORY.md)에 보존했다. 이전 완료 항목을 현재 미완료 작업으로 재실행하지 않는다.

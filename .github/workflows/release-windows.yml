@@ -187,7 +187,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "배치된 파츠를 한쪽으로 모으지 않고 판재 전체에 등간격으로 펼치도록 수정했습니다. 파츠별 외곽·판재 가장자리 여유를 지키며 Ctrl+Z로 복원할 수 있습니다. 실제 가공 전 NC 확인과 공중 드라이런이 필요합니다."
+            message = "기계별 START/END·주차·교체 매크로와 가공 셋업을 이름별로 저장하고 상단에서 선택할 수 있습니다. 설정 탭에서 저장·새 이름 저장·이름 변경·삭제를 지원합니다. 기존 작업은 저장 당시 설정을 유지합니다. 실제 가공 전 기계별 원점·Z 기준과 NC를 확인하세요."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
