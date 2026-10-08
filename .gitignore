@@ -6,6 +6,8 @@ dist/
 *.spec
 settings.json
 settings.json.tmp
+profiles.json
+profiles.json.tmp
 *.nc
 *.gcode
 *.tap

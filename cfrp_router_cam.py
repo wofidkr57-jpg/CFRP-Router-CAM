@@ -46,7 +46,7 @@ import tkinter.font as tkfont
 from concurrent.futures import ProcessPoolExecutor, as_completed
 from dataclasses import dataclass, field, asdict, fields, is_dataclass
 from datetime import datetime
-from tkinter import filedialog, messagebox, ttk
+from tkinter import filedialog, messagebox, simpledialog, ttk
 from typing import Callable, Dict, List, Optional, Sequence, Tuple, Union, get_args, get_origin, get_type_hints
 
 Point = Tuple[float, float]
@@ -58,9 +58,24 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.43"
+APP_VERSION = "1.44"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
+PROFILES_FILENAME = "profiles.json"
+PROFILE_VAR_KEYS = {
+    "machine": ("machine_home_enabled", "machine_park_x", "machine_park_y", "machine_park_z",
+                "tool_change_macro", "tool_change_return_z", "tool_change_dwell"),
+    "setup": ("tool_d", "inner_size_adjust", "outer_size_adjust", "rpm", "feed", "plunge",
+              "stock", "extra", "safe_z", "safe_z_auto", "lead", "approach_z", "path_tolerance",
+              "passes", "arc_fit_enabled", "preflight_enabled", "preflight_z", "preflight_feed",
+              "pocket_stay_down", "step_pockets", "pocket_stepover", "pocket_stepdown", "pocket_finish",
+              "tool_wear_enabled", "tool_wear_loss_per_10m", "tool_wear_min_d", "tab_count",
+              "tab_flat", "tab_remain", "tab_ramp", "tab_shape", "z_origin", "climb", "full_depth",
+              "rapid_optimize", "depth_first_order", "outer_order_mode", "m8_enabled", "wall_finish",
+              "onion_skin_enabled", "onion_split", "onion_split_percent", "finish_scope", "onion_skin",
+              "finish_allowance", "finish_feed_pct", "tool_change_enabled", "tool_change_limit_m"),
+}
+PROFILE_CODE_ATTRS = ("start_text", "end_text", "onion_start_text", "onion_end_text")
 SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
 UPDATE_DOWNLOAD_PREFIX = "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/"
@@ -84,6 +99,14 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "기계 프로파일":"Machine profile", "가공 셋업":"Machining setup", "프로파일 관리":"Manage profiles",
+    "저장":"Save", "새 이름 저장":"Save as", "이름 변경":"Rename", "삭제":"Delete",
+    "프로파일 이름":"Profile name", "프로파일 저장":"Save profile",
+    "현재값 (미저장)":"Current values (unsaved)", "저장값과 동일":"Saved values",
+    "수정됨 · 저장 필요":"Modified - save needed", "파일 읽기 오류":"File read error",
+    "선택 즉시 적용 · * 수정됨 · 저장 버튼으로 보관":"Selection applies immediately; * means modified; use Save to keep edits",
+    "START/END · 어니언스킨 전용 코드 · G53 주차 · 교체 매크로/복귀 높이/대기":"START/END, onion-skin codes, G53 parking, tool-change macro/return Z/dwell",
+    "공구·RPM·피드·두께·Z 기준·패스·탭·포켓·정삭·보정·교체 사용/거리\n형상·배치·XY 원점은 유지":"Tool, RPM, feed, thickness, Z origin, passes, tabs, pockets, finishing, compensation, change interval\nGeometry, layout and XY origin stay as they are",
     "깊이 가공 우선 (보어 → 내경 → 외경)": "Depth first (bore → inner → outer)",
     "외곽 자동 가공 순서": "Automatic outer cutting order",
     "외곽 자동 가공 순서를 확인하세요.": "Check the automatic outer cutting order.",
@@ -5565,8 +5588,16 @@ class App(tk.Tk):
         self.step_matrix: Optional[List[List[float]]] = None
         self.view = (1.0, 0.0, 0.0)
         self.vars = {}
+        self.profiles={"machine":{},"setup":{}}
+        self.profile_names={kind:tk.StringVar(value="") for kind in self.profiles}
+        self.profile_states={kind:DisplayStringVar(value="현재값 (미저장)") for kind in self.profiles}
+        self.profile_marks={kind:tk.StringVar(value="") for kind in self.profiles}
+        self.profile_combos={kind:[] for kind in self.profiles}
+        self.profile_active={kind:"" for kind in self.profiles}
+        self._profiles_ready=False;self._profile_refresh_job=None;self._profiles_load_error=""
         self._build()
         self.load_settings()
+        self.load_profiles()
         self.protocol("WM_DELETE_WINDOW",self.on_close)
         for key in ("s","S","o","O"):
             self.bind(f"<Control-{key}>",self.job_shortcut)
@@ -5658,6 +5689,14 @@ class App(tk.Tk):
         self.job_label=ttk.Label(jobs,text="작업 파일: 저장 안 됨");self.job_label.pack(side="left",padx=10)
         self.status = DisplayStringVar(value="DXF 또는 STEP을 열어 주세요 (단위: mm)")
         ttk.Label(top, textvariable=self.status).pack(side="left", padx=12)
+
+        profiles_bar=ttk.Frame(self,padding=(6,0,6,4));profiles_bar.pack(fill="x")
+        for kind,label in (("machine","기계 프로파일"),("setup","가공 셋업")):
+            ttk.Label(profiles_bar,text=label).pack(side="left",padx=(0,5))
+            combo=self.profile_selector(profiles_bar,kind)
+            combo.pack(side="left",padx=(0,6))
+            ttk.Label(profiles_bar,textvariable=self.profile_marks[kind],width=1).pack(side="left",padx=(0,8))
+        ttk.Button(profiles_bar,text="프로파일 관리",command=self.show_profile_settings).pack(side="left")
 
         pan = ttk.Panedwindow(self, orient="horizontal"); pan.pack(fill="both", expand=True)
         self.main_pan=pan;self.panel_ratios=None;self.panel_width=0;self.panel_job=None
@@ -5949,6 +5988,7 @@ class App(tk.Tk):
         notebook = ttk.Notebook(right_pan); right_pan.add(notebook, weight=2)
         preview_tab = ttk.Frame(notebook); post_tab = ttk.Frame(notebook); help_tab = ttk.Frame(notebook); settings_tab=ttk.Frame(notebook)
         notebook.add(preview_tab, text="G-code 미리보기"); notebook.add(post_tab, text="START / END"); notebook.add(help_tab, text="Z 설정 도움말"); notebook.add(settings_tab,text="설정")
+        self.settings_notebook=notebook;self.settings_tab=settings_tab
         self.text = tk.Text(preview_tab, wrap="none", font=("Consolas", 9), undo=False)
         self.text.configure(bg="#08101f",fg="#dce7f5",insertbackground="#dce7f5",selectbackground="#154c52",
                             selectforeground="#f3fffd",relief="flat",borderwidth=0,padx=8,pady=8)
@@ -6049,6 +6089,21 @@ class App(tk.Tk):
         settings_window=self.settings_canvas.create_window((0,0),window=settings_tab,anchor="nw")
         settings_tab.bind("<Configure>",lambda e:self.settings_canvas.configure(scrollregion=self.settings_canvas.bbox("all")))
         self.settings_canvas.bind("<Configure>",lambda e:self.settings_canvas.itemconfigure(settings_window,width=e.width))
+        for kind,label,description in (
+            ("machine","기계 프로파일","START/END · 어니언스킨 전용 코드 · G53 주차 · 교체 매크로/복귀 높이/대기"),
+            ("setup","가공 셋업","공구·RPM·피드·두께·Z 기준·패스·탭·포켓·정삭·보정·교체 사용/거리\n형상·배치·XY 원점은 유지")):
+            box=ttk.LabelFrame(settings_tab,text=label,padding=10);box.pack(fill="x",padx=10,pady=(8,0))
+            self.profile_selector(box,kind).pack(fill="x")
+            buttons=ttk.Frame(box);buttons.pack(fill="x",pady=4)
+            for label,action in (("저장",lambda k=kind:self.save_profile(k)),
+                                 ("새 이름 저장",lambda k=kind:self.save_profile(k,save_as=True)),
+                                 ("이름 변경",lambda k=kind:self.rename_profile(k)),
+                                 ("삭제",lambda k=kind:self.delete_profile(k))):
+                ttk.Button(buttons,text=label,command=action).pack(side="left",padx=(0,3))
+            ttk.Label(box,textvariable=self.profile_states[kind]).pack(anchor="w")
+            hint=ttk.Label(box,text=description,justify="left",wraplength=380);hint.pack(fill="x",pady=(4,0))
+            hint.bind("<Configure>",lambda e,w=hint:w.configure(wraplength=max(120,e.width-4)))
+        ttk.Label(settings_tab,text="선택 즉시 적용 · * 수정됨 · 저장 버튼으로 보관",padding=10).pack(anchor="w")
         language_box=ttk.LabelFrame(settings_tab,text="언어 설정",padding=12);language_box.pack(fill="x",padx=10,pady=10)
         self.language_var=tk.StringVar(value="한국어" if self.language=="ko" else "English")
         ttk.Combobox(language_box,state="readonly",values=("한국어","English"),
@@ -6105,6 +6160,11 @@ class App(tk.Tk):
         self.after_idle(self.reset_panel_widths)
         for key in ("tool_d","inner_size_adjust","outer_size_adjust"):
             self.vars[key].trace_add("write",lambda *_:self.schedule_view_redraw() if self.manual_array_mode else None)
+        for keys in PROFILE_VAR_KEYS.values():
+            for key in keys:self.vars[key].trace_add("write",self.schedule_profile_refresh)
+        for attr in PROFILE_CODE_ATTRS:
+            widget=getattr(self,attr);widget.edit_modified(False)
+            widget.bind("<<Modified>>",self.profile_code_modified,add="+")
 
     def controls_min_width(self):
         columns=[0,0];spans=0
@@ -6273,6 +6333,209 @@ class App(tk.Tk):
 
     def portable_settings_path(self)->str:
         return os.path.join(self.executable_dir(),SETTINGS_FILENAME)
+
+    def profile_selector(self,parent,kind):
+        # Profile names are user data; the general UI translator must not change them.
+        combo=_OriginalTtkCombobox(parent,state="readonly",width=20,textvariable=self.profile_names[kind])
+        combo.bind("<<ComboboxSelected>>",lambda event:self.load_profile(kind))
+        self.profile_combos[kind].append(combo)
+        return combo
+
+    def show_profile_settings(self):
+        self.settings_notebook.select(self.settings_tab)
+        self.settings_canvas.yview_moveto(0)
+
+    def capture_profile(self,kind):
+        values={key:self.vars[key].get() for key in PROFILE_VAR_KEYS[kind]}
+        for key in ("finish_scope","outer_order_mode"):
+            if key in values:values[key]=_ENUM_KO.get(values[key],values[key])
+        codes={attr:getattr(self,attr).get("1.0","end-1c").strip() for attr in PROFILE_CODE_ATTRS} if kind=="machine" else {}
+        return self.validate_profile(kind,{"vars":values,"codes":codes})
+
+    def validate_profile(self,kind,payload):
+        if (not isinstance(payload,dict) or set(payload)!={"vars","codes"} or
+                not isinstance(payload["vars"],dict) or set(payload["vars"])!=set(PROFILE_VAR_KEYS[kind]) or
+                not isinstance(payload["codes"],dict) or set(payload["codes"])!=(set(PROFILE_CODE_ATTRS) if kind=="machine" else set())):
+            raise ValueError("프로파일 항목이 현재 버전과 맞지 않습니다.")
+        result=copy.deepcopy(payload)
+        for key,value in result["vars"].items():
+            var=self.vars[key]
+            scalar=bool if isinstance(var,tk.BooleanVar) else int if isinstance(var,tk.IntVar) else float if isinstance(var,tk.DoubleVar) else str
+            result["vars"][key]=decode_job_value(value,scalar)
+        for value in result["codes"].values():decode_job_value(value,str)
+        for key,choices in (("z_origin",("Top","Bottom")),("tab_shape",("Flat+ramp","Triangle")),
+                            ("finish_scope",("전체","외곽만","내부홀만")),("outer_order_mode",OUTER_ORDER_CHOICES)):
+            if key in result["vars"]:
+                value=_ENUM_KO.get(result["vars"][key],result["vars"][key])
+                if value not in choices:raise ValueError("프로파일의 선택값이 올바르지 않습니다.")
+                result["vars"][key]=value
+        return result
+
+    @staticmethod
+    def profile_name(value):
+        name=str(value).strip()
+        if not name or len(name)>80 or any(ord(c)<32 for c in name):
+            raise ValueError("프로파일 이름은 1~80자로 입력하세요.")
+        return name
+
+    def profile_file_path(self):
+        portable=os.path.join(self.executable_dir(),PROFILES_FILENAME)
+        fallback=os.path.join(os.path.dirname(self.appdata_settings_path()),PROFILES_FILENAME)
+        return portable if os.path.isfile(portable) or not os.path.isfile(fallback) else fallback
+
+    def write_profiles(self):
+        if self._profiles_load_error:raise ValueError(self._profiles_load_error)
+        path=self.profile_file_path()
+        data={"format":"CFRP_CAM_PROFILES","schema":1,**self.profiles}
+        try:self.write_settings_file(path,data)
+        except OSError:
+            # Never leave a stale, existing portable library shadowing a new fallback.
+            fallback=os.path.join(os.path.dirname(self.appdata_settings_path()),PROFILES_FILENAME)
+            if os.path.isfile(path) or os.path.abspath(path)==os.path.abspath(fallback):raise
+            self.write_settings_file(fallback,data)
+
+    def load_profiles(self):
+        try:
+            with open(self.profile_file_path(),encoding="utf-8") as f:data=json.load(f)
+            if not isinstance(data,dict) or data.get("format")!="CFRP_CAM_PROFILES" or data.get("schema")!=1:
+                raise ValueError("지원하지 않는 프로파일 파일 형식입니다.")
+            decoded={}
+            for kind in self.profiles:
+                entries=data[kind]
+                if not isinstance(entries,dict):raise ValueError("프로파일 목록이 올바르지 않습니다.")
+                decoded[kind]={};seen=set()
+                for name,payload in entries.items():
+                    clean=self.profile_name(name)
+                    if clean!=name or name.casefold() in seen:raise ValueError("프로파일 이름이 중복되거나 올바르지 않습니다.")
+                    decoded[kind][name]=self.validate_profile(kind,payload);seen.add(name.casefold())
+            self.profiles=decoded
+        except FileNotFoundError:
+            try:
+                self.profiles={"machine":{"기존 기계":self.capture_profile("machine")},
+                               "setup":{"기존 가공 셋업":self.capture_profile("setup")}}
+                self.write_profiles()
+            except (OSError,ValueError,TypeError,tk.TclError) as exc:
+                self.status.set(f"프로파일 초기 저장 실패: {exc}")
+        except (OSError,ValueError,TypeError,KeyError) as exc:
+            self._profiles_load_error=f"프로파일 파일을 읽지 못했습니다. 원본을 보존했습니다: {exc}"
+            self.status.set(self._profiles_load_error)
+        self._profiles_ready=True
+        self.match_current_profiles()
+
+    def match_current_profiles(self):
+        # Jobs carry actual values. A matching local name is only a label, never
+        # a reference that can override the job when the library later changes.
+        for kind in self.profiles:
+            try:current=self.capture_profile(kind)
+            except (ValueError,TypeError,tk.TclError):current=None
+            name=next((name for name,payload in self.profiles[kind].items() if payload==current),"")
+            self.profile_active[kind]=name;self.profile_names[kind].set(name)
+        self.refresh_profile_state()
+
+    def schedule_profile_refresh(self,*_):
+        if self._profiles_ready and self._profile_refresh_job is None:
+            self._profile_refresh_job=self.after_idle(self.refresh_profile_state)
+
+    def profile_code_modified(self,event):
+        if event.widget.edit_modified():
+            event.widget.edit_modified(False);self.schedule_profile_refresh()
+
+    def refresh_profile_state(self):
+        self._profile_refresh_job=None
+        for kind,entries in self.profiles.items():
+            for combo in self.profile_combos[kind]:combo.configure(values=tuple(entries))
+            name=self.profile_active[kind]
+            try:same=name in entries and self.capture_profile(kind)==entries[name]
+            except (ValueError,TypeError,tk.TclError):same=False
+            state="저장값과 동일" if same else "수정됨 · 저장 필요" if name in entries else "현재값 (미저장)"
+            self.profile_states[kind].set("파일 읽기 오류" if self._profiles_load_error else state)
+            self.profile_marks[kind].set("" if same else "*")
+
+    def set_profile_values(self,payload,normalize=True):
+        values=payload["vars"]
+        # Avoid the stock trace overwriting a saved manual safe Z.
+        if "safe_z_auto" in values:self.vars["safe_z_auto"].set(False)
+        for key,value in values.items():
+            if key not in ("safe_z","safe_z_auto"):
+                self.vars[key].set(localized_enum_value(value) if key in ("finish_scope","outer_order_mode") else value)
+        if "safe_z" in values:self.vars["safe_z"].set(values["safe_z"])
+        if "safe_z_auto" in values:self.vars["safe_z_auto"].set(values["safe_z_auto"])
+        if not normalize and "safe_z" in values:self.vars["safe_z"].set(values["safe_z"])
+        for attr,text in payload["codes"].items():
+            widget=getattr(self,attr);widget.configure(state="normal");widget.delete("1.0","end");widget.insert("1.0",text)
+        if normalize and "onion_split" in values:self.sync_onion_split()
+        else:
+            for attr in ("onion_start_text","onion_end_text"):
+                getattr(self,attr).configure(state="normal" if self.vars["onion_split"].get() else "disabled")
+
+    def load_profile(self,kind):
+        name=self.profile_names[kind].get()
+        previous=self.profile_active[kind]
+        # Preserve even incomplete numeric input if validation fails.
+        before={"vars":{key:self.getvar(var._name) for key,var in self.vars.items()},
+                "codes":{attr:getattr(self,attr).get("1.0","end-1c") for attr in PROFILE_CODE_ATTRS}}
+        try:
+            payload=self.validate_profile(kind,self.profiles[kind][name])
+            self.set_profile_values(payload)
+            self.config()
+        except (ValueError,TypeError,KeyError,tk.TclError) as exc:
+            self.set_profile_values(before,normalize=False)
+            self.profile_names[kind].set(previous);self.refresh_profile_state()
+            messagebox.showerror("프로파일 불러오기 실패",str(exc));return False
+        self.profile_active[kind]=name
+        self.gcode="";self.gcode_parts=[];self.gcode_signature=None;self.text.delete("1.0","end")
+        self.refresh_profile_state()
+        if kind=="setup":
+            self.preview_cache.clear();self.preview_order_cache_key=None;self.collision_cache_key=None
+            self.redraw()
+        self.status.set(f"프로파일 적용: {name} · G-code를 다시 생성하세요.")
+        return True
+
+    def save_profile(self,kind,save_as=False):
+        old=self.profile_active[kind];name=old
+        if save_as or not name:
+            name=simpledialog.askstring(ui_text("프로파일 저장"),ui_text("프로파일 이름"),parent=self)
+            if name is None:return False
+        before=copy.deepcopy(self.profiles)
+        try:
+            name=self.profile_name(name)
+            duplicate=next((n for n in self.profiles[kind] if n.casefold()==name.casefold()),None)
+            if duplicate is not None:
+                name=duplicate
+                if (save_as or not old) and not messagebox.askyesno("프로파일 덮어쓰기",f"'{name}'의 저장값을 바꿀까요?"):return False
+            self.profiles[kind][name]=self.capture_profile(kind)
+            if kind=="setup":self.config()
+            self.write_profiles()
+        except (OSError,ValueError,TypeError,tk.TclError) as exc:
+            self.profiles=before;messagebox.showerror("프로파일 저장 실패",str(exc));return False
+        self.profile_active[kind]=name;self.profile_names[kind].set(name);self.refresh_profile_state()
+        self.status.set(f"프로파일 저장 완료: {name}");return True
+
+    def rename_profile(self,kind):
+        old=self.profile_active[kind]
+        if old not in self.profiles[kind]:return False
+        name=simpledialog.askstring(ui_text("이름 변경"),ui_text("프로파일 이름"),initialvalue=old,parent=self)
+        if name is None:return False
+        before=copy.deepcopy(self.profiles)
+        try:
+            name=self.profile_name(name)
+            if any(n!=old and n.casefold()==name.casefold() for n in self.profiles[kind]):raise ValueError("같은 이름의 프로파일이 있습니다.")
+            self.profiles[kind]={name if n==old else n:p for n,p in self.profiles[kind].items()}
+            self.write_profiles()
+        except (OSError,ValueError,TypeError) as exc:
+            self.profiles=before;messagebox.showerror("프로파일 저장 실패",str(exc));return False
+        self.profile_active[kind]=name;self.profile_names[kind].set(name);self.refresh_profile_state();return True
+
+    def delete_profile(self,kind):
+        name=self.profile_active[kind]
+        if name not in self.profiles[kind]:return False
+        if not messagebox.askyesno("프로파일 삭제",f"'{name}'을 삭제할까요? 현재 화면의 값은 유지됩니다."):return False
+        before=copy.deepcopy(self.profiles)
+        try:
+            del self.profiles[kind][name];self.write_profiles()
+        except (OSError,ValueError,TypeError) as exc:
+            self.profiles=before;messagebox.showerror("프로파일 저장 실패",str(exc));return False
+        self.profile_active[kind]="";self.profile_names[kind].set("");self.refresh_profile_state();return True
 
     def appdata_settings_path(self)->str:
         base=os.environ.get("APPDATA") or os.path.expanduser("~")
@@ -6559,6 +6822,7 @@ class App(tk.Tk):
         self.clear_order_drop()
         self.text.delete("1.0","end");self.selection_label.set("선택 없음")
         self.view_initialized=False;self.refresh_object_tree();self.redraw();self.canvas.focus_set()
+        self.match_current_profiles()
         if recovered:
             metadata=data.get("autosave")
             source=metadata.get("source_path","") if isinstance(metadata,dict) else ""
