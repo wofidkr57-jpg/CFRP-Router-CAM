@@ -9,6 +9,11 @@ try:
     omitted=[];moves=cam.parse_gcode_moves(code,omitted=omitted)
     view=cam.Toolpath3D(root,moves,dict(stock=6.,z_origin='Top',tool_d=2.,_preview_omitted=omitted))
     view.update()
+    # Configure schedules projection after 16 ms. A fast runner can still have
+    # the constructor's 1x1 viewport here; finish the mapped-size projection
+    # before comparing mode-only cache reuse, without relying on wall-clock time.
+    view.draw()
+    assert view._scene_key[-2:]==(view.canvas.winfo_width(),view.canvas.winfo_height())
     assert view.bounds==(0.,0.,-6.,60.,10.,5.),view.bounds
     assert len(view.canvas.find_withtag('restart_marker'))==1
     view.sim_time=view.total_time;view.update_frame()
@@ -18,6 +23,12 @@ try:
     view.sim_mode.set('깊이맵');view.mode_changed();view.update()
     assert view.move_items==paths
     assert view.collect_depth_levels()==[6.],view.collect_depth_levels()
+    # Resizing legitimately invalidates the projection; mode switching does not.
+    view.geometry('900x650');view.update();view.draw()
+    assert view.move_items!=paths
+    resized=list(view.move_items)
+    view.sim_mode.set('공구경로');view.mode_changed();view.update()
+    assert view.move_items==resized
     view.close()
 finally:root.destroy()
 print('PREVIEW_COORDINATES_GUI_OK')
