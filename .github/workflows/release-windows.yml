@@ -97,6 +97,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_job_file.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
+          python verification/gui_smoke_profiles.py
+          if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_tool_replacement.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_preview_coordinates.py
@@ -175,7 +177,7 @@ jobs:
 
           Copy-Item dist/CFRP_Router_CAM.exe (Join-Path $releaseDir "CFRP_Router_CAM.exe")
           Copy-Item dist/CFRP_Router_CAM.exe (Join-Path $releaseDir "CFRP_Router_CAM_V${version}.exe")
-          Copy-Item cfrp_router_cam.py, README.md, CHANGELOG.md, AGENTS.md, PROJECT_STATE.md, requirements.txt, build_windows.ps1 $sourceDir
+          Copy-Item cfrp_router_cam.py, README.md, CHANGELOG.md, AGENTS.md, PROJECT_STATE.md, PROJECT_HISTORY.md, requirements.txt, build_windows.ps1 $sourceDir
           Copy-Item verification/*.py (Join-Path $sourceDir "verification")
 
           $zip = Join-Path $releaseDir "${sourceName}.zip"
