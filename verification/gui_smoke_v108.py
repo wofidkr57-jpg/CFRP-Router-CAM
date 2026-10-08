@@ -26,6 +26,9 @@ with tempfile.TemporaryDirectory() as folder:
     app = cam.App()
     app.update_idletasks()
     visible = []
+    # Named profiles are user data, like imported part names. Keep their exact
+    # spelling across UI languages; only translated UI choices belong here.
+    profile_selectors={widget for widgets in getattr(app,"profile_combos",{}).values() for widget in widgets}
     stack = [app]
     while stack:
         widget = stack.pop()
@@ -36,6 +39,7 @@ with tempfile.TemporaryDirectory() as folder:
                 visible.append((str(widget), str(text)))
         except Exception:
             pass
+        if widget in profile_selectors:continue
         try:
             values = widget.cget("values")
             visible.extend((str(widget), str(value)) for value in values)

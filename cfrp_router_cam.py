@@ -5928,6 +5928,9 @@ class App(tk.Tk):
         ttk.Label(center, text="클릭: 단일 선택  |  좌→우 드래그: 창 안 윤곽  |  우→좌 드래그: 걸친 윤곽  |  Ctrl/Shift: 선택 추가").pack(fill="x")
 
         right_pan = ttk.Panedwindow(right, orient="vertical"); right_pan.pack(fill="both", expand=True)
+        self.right_pan=right_pan;self.right_panel_ratios=None
+        right_pan.bind("<Configure>",self.layout_right_panels)
+        right_pan.bind("<ButtonRelease-1>",self.remember_right_panels)
         object_frame=ttk.LabelFrame(right_pan,text="파일별 객체 / 배치 수량",padding=4)
         right_pan.add(object_frame,weight=1)
         self.object_tree=ttk.Treeview(object_frame,columns=("name","qty","contours","offset"),show="headings",height=5,selectmode="browse")
@@ -6165,6 +6168,24 @@ class App(tk.Tk):
         for attr in PROFILE_CODE_ATTRS:
             widget=getattr(self,attr);widget.edit_modified(False)
             widget.bind("<<Modified>>",self.profile_code_modified,add="+")
+
+    def layout_right_panels(self,event=None):
+        height=self.right_pan.winfo_height()
+        if height<300 or not hasattr(self,"order_tree"):return
+        ratios=self.right_panel_ratios or (.22,.63)
+        # Keep at least three complete contour rows below its buttons/header.
+        # Natural widget requests can otherwise shrink this pane to a partial
+        # row when an extra toolbar reduces the available window height.
+        row_height=int(ttk.Style(self).lookup("Treeview","rowheight") or 24)
+        requested_rows=int(self.order_tree.cget("height"))
+        order_min=max(150,self.order_tree.master.winfo_reqheight()-max(0,requested_rows-3)*row_height)+8
+        first=max(80,min(round(height*ratios[0]),height-140-order_min))
+        second=min(height-140,max(first+order_min,round(height*ratios[1])))
+        self.right_pan.sashpos(0,first);self.right_pan.sashpos(1,second)
+
+    def remember_right_panels(self,event=None):
+        height=max(self.right_pan.winfo_height(),1)
+        self.right_panel_ratios=tuple(self.right_pan.sashpos(i)/height for i in (0,1))
 
     def controls_min_width(self):
         columns=[0,0];spans=0

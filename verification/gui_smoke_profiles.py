@@ -48,6 +48,9 @@ with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"CFRP_CAM
             app.geometry("980x700");app.update()
             for widget in app.profile_combos["machine"][0].master.winfo_children():
                 assert widget.winfo_viewable() and widget.winfo_x()+widget.winfo_width()<=widget.master.winfo_width()
+            row_height=int(cam.ttk.Style(app).lookup("Treeview","rowheight"))
+            header=app.order_tree.winfo_reqheight()-int(app.order_tree.cget("height"))*row_height
+            assert app.order_tree.winfo_height()>=header+3*row_height, (app.order_tree.winfo_height(),header,row_height,app.order_tree.master.winfo_reqheight(),app.right_pan.winfo_height(),app.right_pan.sashpos(0),app.right_pan.sashpos(1))
             assert app.vars["feed"].get()==500 and app.vars["rpm"].get()==16500
             a=app.capture_profile("machine");thick=app.capture_profile("setup")
             assert "START A" in a["codes"]["start_text"]
