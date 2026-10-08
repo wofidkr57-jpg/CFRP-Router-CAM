@@ -423,3 +423,11 @@ Windows에서 DXF와 STEP 형상을 불러와 CFRP 판재용 Mach3 2D/2.5D G-cod
 - 두 릴리스 EXE와 `latest.json` SHA-256 일치: `fc52d8703d9a7d7bc3ef44cc7a895c30c70e1cab7b4698bda10c6adfac175a5b`. 공개 EXE 재다운로드 해시도 일치. 소스 ZIP SHA-256 `4337ab68c9206ca487d217aa30d12a8ff29796761843217d59e9a80d38c960e3`.
 - 릴리스 https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/tag/v1.21
 - 실제 CNC·소재 절삭은 미검증. 사용자 PC에서 자동 업데이트 후 경고/차단 창, 생성 NC, 시뮬레이션과 공중 운전을 확인한다.
+
+## V1.44 배포 확인 — 2026-10-08
+
+- PR #26 (`6cc6231`)으로 기계 프로파일·가공 셋업을 추가했다. 초기 CI `37724427647`은 3D 캐시 검사에서 초기 창 크기 반영을 기다리지 않던 조건으로 실패했다. 지연된 최초 투영을 재현하여 `18a9285`에서 검사를 결정적으로 수정했다.
+- CI `37724698515`에서 상단 선택줄 추가 후 작은 창의 가공 순서 목록이 부분 행으로 줄어드는 문제가 드러났다. `00f6ccf`에서 기본 목록 공간을 세 행 이상으로 확보하고 프로파일 이름은 사용자 데이터로서 번역 검사에서 분리했다.
+- 최종 CI `37725366675`: 단위163개·GUI30경로·EXE 빌드·Defender clean·릴리스·매니페스트 모두 통과. 태그 v1.44=`00f6ccfcade2a905c3c556176262ae90c9dbc7eb`, 매니페스트=`ddcd034e3741952237ea71fbfd308a3c2c7cd668`.
+- 공개 EXE 2종/매니페스트/재다운로드 SHA-256 `29cfbb8c5ba5409a3f629362f101f6352cc3659ee76b548fa0e0668263b3a2e1` 일치. 소스 ZIP `a607e7f67e4c440064438b25154b0d21946d12e5a4fc02ac4c48e3510e18a6c7`, 66개 파일이 태그와 줄바꿈 정규화 후 동일. 개인 설정·프로파일·NC 제외.
+- 개인 OneDrive `ChatGPT_Projects/CFRP_Router_CAM/v1.44`에 네 파일을 새로 복사하고 해시 확인. 서버 동기화·사용자 PC 설치·Mach3·실가공 미검증. 근거는 Git 제외 `local-handoff/release-v1.44/verified.json` 및 `ci.log`.
