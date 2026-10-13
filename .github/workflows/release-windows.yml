@@ -98,6 +98,7 @@ jobs:
           python verification/gui_smoke_job_file.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_profiles.py
+          python verification/gui_smoke_manual_settings.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_tool_replacement.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }

@@ -43,6 +43,7 @@ class SettingsHarness:
     sync_safe_z = cam.App.sync_safe_z
     load_settings = cam.App.load_settings
     save_settings = cam.App.save_settings
+    settings_payload = cam.App.settings_payload
     write_settings_file = cam.App.write_settings_file
 
     def __init__(self, portable_dir, appdata_path):
