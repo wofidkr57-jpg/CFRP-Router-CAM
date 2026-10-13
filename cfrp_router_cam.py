@@ -3030,11 +3030,11 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
         rough_len=path_length(rough,True)
         rough_plan=lead_plan(c,rough,cfg["lead"])
         rough_lead=(math.pi*.5*dist(rough_plan.entry,rough_plan.center)) if rough_plan.center is not None else dist(rough_plan.entry,rough[0])
-        rough_mm=rough_len*passes+rough_lead*(passes+1);finish_mm=route_len+lead_one*2
+        rough_mm=rough_len*passes+rough_lead*2;finish_mm=route_len+lead_one*2
         cut_mm=rough_mm+finish_mm
         cut_min=rough_mm/max(cfg["feed"],EPS)+finish_mm/max(cfg["feed"]*cfg["finish_feed_pct"]/100.0,EPS)
         rough_target=rough_target_for(target,stock,cfg,use_onion)
-        plunge_min=sum(rapid_approach_clearance(cfg)+rough_target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
+        plunge_min=(rapid_approach_clearance(cfg)+rough_target)/max(cfg["plunge"],EPS)
         plunge_min+=(rapid_approach_clearance(cfg)+target)/max(cfg["plunge"],EPS)
         if cfg.get("_machining_stage")=="rough":
             cut_mm=rough_mm;cut_min=rough_mm/max(cfg["feed"],EPS)
@@ -3043,9 +3043,11 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
             cut_mm=finish_mm;cut_min=finish_mm/max(cfg["feed"]*cfg["finish_feed_pct"]/100.0,EPS)
             plunge_min=(rapid_approach_clearance(cfg)+target)/max(cfg["plunge"],EPS)
     else:
-        cut_mm=route_len*passes+lead_one*(passes+1)
+        cut_mm=route_len*passes+lead_one*(2 if c.closed else passes+1)
         cut_min=cut_mm/max(cfg["feed"],EPS)
-        plunge_min=sum(rapid_approach_clearance(cfg)+target*i/passes for i in range(1,passes+1))/max(cfg["plunge"],EPS)
+        plunge_mm=(rapid_approach_clearance(cfg)+target if c.closed else
+                   sum(rapid_approach_clearance(cfg)+target*i/passes for i in range(1,passes+1)))
+        plunge_min=plunge_mm/max(cfg["plunge"],EPS)
     return cut_mm,cut_min,plunge_min
 
 
@@ -3641,12 +3643,14 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             start_z=(z_for_distance(0.0,total,active_tabs,depth,
                                      machine_z(stock-cfg["tab_remain"]),tab_flat,cfg["tab_ramp"])
                      if c.closed else depth)
-            dst.append(f"G0 Z{fmt(approach_machine_z)}")
+            continuous=c.closed and pi>1
+            if not continuous:dst.append(f"G0 Z{fmt(approach_machine_z)}")
+            else:dst.append("(Closed profile: continue next depth at contour start)")
             dst.append(f"G1 Z{fmt(start_z)} F{fmt(cfg['plunge'])}")
-            if center is not None:
+            if not continuous and center is not None:
                 code="G2" if plan.clockwise else "G3"
                 dst.append(f"{code} X{fmt(p0[0])} Y{fmt(p0[1])} I{fmt(center[0]-lead[0])} J{fmt(center[1]-lead[1])} F{fmt(feed)}")
-            elif lead!=p0:dst.append(f"G1 X{fmt(p0[0])} Y{fmt(p0[1])} F{fmt(feed)}")
+            elif not continuous and lead!=p0:dst.append(f"G1 X{fmt(p0[0])} Y{fmt(p0[1])} F{fmt(feed)}")
             if c.closed:
                 events=toolpath_with_events(shifted,active_tabs,tab_flat,cfg["tab_ramp"])
                 xyz=[(p0[0],p0[1],start_z)]
@@ -3656,7 +3660,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
                     xyz.append((p[0],p[1],z))
                 dst.extend(cut_xyz_lines(xyz,feed,tolerance,arc_fit))
             else:dst.extend(cut_xyz_lines([(x,y,start_z) for x,y in shifted],feed,tolerance,arc_fit))
-            if pi!=len(depths):dst.extend((f"G0 Z{fmt(safe_machine_z)}",f"G0 X{fmt(lead[0])} Y{fmt(lead[1])}"))
+            if pi!=len(depths) and not c.closed:dst.extend((f"G0 Z{fmt(safe_machine_z)}",f"G0 X{fmt(lead[0])} Y{fmt(lead[1])}"))
         if c.closed and cfg["lead"]>0:
             if center is not None:
                 code="G3" if plan.clockwise else "G2"

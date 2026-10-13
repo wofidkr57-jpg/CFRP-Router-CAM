@@ -28,12 +28,13 @@ class RapidApproachTests(unittest.TestCase):
                 self.assertEqual(m.start[:2],m.end[:2])
                 descents.append(m)
             if not m.rapid and m.start[:2]==m.end[:2] and m.end[2]<m.start[2]-1e-6:
-                self.assertAlmostEqual(m.start[2],approach)
+                self.assertTrue(abs(m.start[2]-approach)<1e-6 or m.start[2]<top)
         self.assertTrue(descents)
         lines=code.splitlines()
         for i,line in enumerate(lines):
             if line.startswith('G1 Z'):
-                self.assertEqual(lines[i-1],f'G0 Z{cam.fmt(approach)}')
+                self.assertIn(lines[i-1],(f'G0 Z{cam.fmt(approach)}',
+                                         '(Closed profile: continue next depth at contour start)'))
                 self.assertIn(f"F{cam.fmt(cfg['plunge'])}",line)
         return code
 
@@ -63,7 +64,7 @@ class RapidApproachTests(unittest.TestCase):
         cfg['safe_z']=30
         b=cam.contour_cut_metrics(c,cfg,2,.1,2)
         self.assertEqual(a,b)
-        self.assertAlmostEqual(a[2],((1+1.05)+(1+2.1))/150)
+        self.assertAlmostEqual(a[2],(1+2.1)/150)
 
     def test_legacy_settings_default(self):
         cfg=self.cfg();del cfg['approach_z']
