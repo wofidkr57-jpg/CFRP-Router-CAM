@@ -99,6 +99,10 @@ CURRENT_LANGUAGE = "ko"
 SUPPORTED_LANGUAGES = ("ko", "en")
 
 _UI_EN_EXACT = {
+    "시작 기본값": "Startup Defaults",
+    "현재 설정 저장": "Save Current Settings",
+    "저장한 설정으로 다음 실행을 시작합니다. 종료 시 자동 저장하지 않습니다.": "Next launch uses saved settings. Closing does not save changes automatically.",
+    "현재 설정 저장 완료 · 다음 실행부터 적용됩니다.": "Settings saved for the next launch.",
     "기계 프로파일":"Machine profile", "가공 셋업":"Machining setup", "프로파일 관리":"Manage profiles",
     "저장":"Save", "새 이름 저장":"Save as", "이름 변경":"Rename", "삭제":"Delete",
     "프로파일 이름":"Profile name", "프로파일 저장":"Save profile",
@@ -5597,6 +5601,7 @@ class App(tk.Tk):
         self._profiles_ready=False;self._profile_refresh_job=None;self._profiles_load_error=""
         self._build()
         self.load_settings()
+        self._saved_settings_snapshot=self.settings_payload()
         self.load_profiles()
         self.protocol("WM_DELETE_WINDOW",self.on_close)
         for key in ("s","S","o","O"):
@@ -6045,7 +6050,7 @@ class App(tk.Tk):
             "수동 어레이: 수량 지정 → 수동 어레이 시작 → 객체 드래그 이동, R키 90° 회전.\n"
             "어니언스킨 파일 분리: ROUGH 황삭 후 새 공구로 FINISH 정삭을 실행합니다.\n"
             "분리 시 바닥 잔여율 기본 10%, 전체 측면 정삭이며 마이크로탭은 사용하지 않습니다. XY 원점과 고정을 유지하세요.\n"
-            "공구·어레이·탭·원점·START/END 설정은 종료 시 자동 저장됩니다.\n"
+            "다음 실행의 기본값은 설정 탭의 현재 설정 저장을 눌러야 바뀝니다.\n"
             "\nSTEP 작업 순서:\n"
             "  1) STEP 열기 → 가공면 선택 → 선택면을 +Z/Z0 정렬\n"
             "  2) 꼭짓점 또는 원점 프리셋으로 XYZ0 설정\n"
@@ -6075,7 +6080,7 @@ class App(tk.Tk):
                 "Add Files creates one object per file. Set quantities in the object list, then array.\n"
                 "Enable onion-skin split to save ROUGH and FINISH files. Default remaining floor is 10%.\n"
                 "Before FINISH, replace the tool and re-zero Z only. Preserve XY and workholding; no microtabs in split mode.\n"
-                "Tool, array, tab, origin and START/END settings are saved automatically.\n\n"
+                "Use Save Current Settings in Settings to change the next startup defaults.\n\n"
                 "STEP workflow:\n"
                 "  1) Open STEP, select machining faces and align the selected faces to +Z/Z0.\n"
                 "  2) Set XYZ0 with a vertex or origin preset.\n"
@@ -6092,6 +6097,10 @@ class App(tk.Tk):
         settings_window=self.settings_canvas.create_window((0,0),window=settings_tab,anchor="nw")
         settings_tab.bind("<Configure>",lambda e:self.settings_canvas.configure(scrollregion=self.settings_canvas.bbox("all")))
         self.settings_canvas.bind("<Configure>",lambda e:self.settings_canvas.itemconfigure(settings_window,width=e.width))
+        save_box=ttk.LabelFrame(settings_tab,text=ui_text("시작 기본값"),padding=10)
+        save_box.pack(fill="x",padx=10,pady=(8,0))
+        ttk.Button(save_box,text=ui_text("현재 설정 저장"),command=self.save_current_settings).pack(anchor="w")
+        ttk.Label(save_box,text=ui_text("저장한 설정으로 다음 실행을 시작합니다. 종료 시 자동 저장하지 않습니다."),wraplength=420).pack(anchor="w",pady=(4,0))
         for kind,label,description in (
             ("machine","기계 프로파일","START/END · 어니언스킨 전용 코드 · G53 주차 · 교체 매크로/복귀 높이/대기"),
             ("setup","가공 셋업","공구·RPM·피드·두께·Z 기준·패스·탭·포켓·정삭·보정·교체 사용/거리\n형상·배치·XY 원점은 유지")):
@@ -6238,7 +6247,7 @@ class App(tk.Tk):
         selected=str(self.language_var.get()).strip()
         language="en" if selected.lower()=="english" else "ko"
         self.language=language
-        try:self.save_settings()
+        try:self.save_settings(preserve_saved=True)
         except (OSError,ValueError,TypeError,tk.TclError) as exc:
             messagebox.showerror("설정 오류",str(exc));return
         messagebox.showinfo("언어 설정","재시작 후 적용됩니다.")
@@ -6647,7 +6656,7 @@ class App(tk.Tk):
             except OSError:pass
             raise
 
-    def save_settings(self):
+    def settings_payload(self):
         data={"version":APP_VERSION,"language":getattr(self,"language","ko"),
               "vars":{k:v.get() for k,v in self.vars.items()},
               "font_size":int(self.font_size_var.get()),
@@ -6655,6 +6664,23 @@ class App(tk.Tk):
               "end_code":self.end_text.get("1.0","end").strip()}
         for key,attr in (("onion_start_code","onion_start_text"),("onion_end_code","onion_end_text")):
             if hasattr(self,attr):data[key]=getattr(self,attr).get("1.0","end").strip()
+        return data
+
+    def save_current_settings(self):
+        try:
+            self.config()
+            self.save_settings()
+        except (OSError,ValueError,TypeError,tk.TclError) as exc:
+            messagebox.showerror(ui_text("설정 오류"),str(exc));return False
+        self.status.set(ui_text("현재 설정 저장 완료 · 다음 실행부터 적용됩니다."))
+        return True
+
+    def save_settings(self,preserve_saved=False):
+        # Language changes, close and updater must not commit temporary job values.
+        if preserve_saved and hasattr(self,"_saved_settings_snapshot"):
+            data=copy.deepcopy(self._saved_settings_snapshot)
+            data.update(version=APP_VERSION,language=getattr(self,"language","ko"))
+        else:data=self.settings_payload()
         portable=self.portable_settings_path()
         try:
             self.write_settings_file(portable,data)
@@ -6664,6 +6690,7 @@ class App(tk.Tk):
                 raise
             try:self.write_settings_file(fallback,data)
             except OSError:raise portable_error
+        self._saved_settings_snapshot=copy.deepcopy(data)
 
     def job_shortcut(self,event):
         if event.widget.winfo_toplevel() is not self:return
@@ -6864,8 +6891,6 @@ class App(tk.Tk):
 
     def on_close(self):
         if not self.confirm_job_replace():return
-        try:self.save_settings()
-        except (OSError,ValueError,TypeError,tk.TclError):pass
         self.clear_autosave()
         self.destroy()
 
@@ -6930,7 +6955,7 @@ class App(tk.Tk):
         source,info=payload;target=os.path.abspath(sys.executable)
         if not self.confirm_job_replace():return
         try:
-            self.save_settings()
+            self.save_settings(preserve_saved=True)
             subprocess.Popen([source,"--apply-update",target,str(os.getpid()),info["sha256"]],
                              cwd=os.path.dirname(target),close_fds=True)
         except Exception as exc:
