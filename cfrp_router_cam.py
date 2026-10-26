@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.44"
+APP_VERSION = "1.45-preview.1"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 PROFILES_FILENAME = "profiles.json"
@@ -76,7 +76,21 @@ PROFILE_VAR_KEYS = {
               "finish_allowance", "finish_feed_pct", "tool_change_enabled", "tool_change_limit_m"),
 }
 PROFILE_CODE_ATTRS = ("start_text", "end_text", "onion_start_text", "onion_end_text")
-SETTINGS_APPDATA_DIR = "CFRP_Router_CAM"
+TOUCH_DEFAULTS = {
+    "touch_material": "카본", "touch_aux": "legacy", "touch_support_height": 0.0,
+    "touch_support_override": False,
+    "touch_probe_macro": "M881", "touch_probe_datum": "Bottom",
+    "touch_coolant_on": "M8", "touch_coolant_off": "M9",
+    "touch_dust_on": "", "touch_dust_off": "", "touch_aux_reviewed": False,
+    "touch_xy_mode": "fixture", "touch_origin_x": 0.0, "touch_origin_y": 0.0,
+}
+TOUCH_MACHINE_KEYS = ("touch_support_height", "touch_support_override", "touch_probe_macro", "touch_probe_datum",
+                      "touch_coolant_on", "touch_coolant_off", "touch_dust_on", "touch_dust_off",
+                      "touch_aux_reviewed")
+TOUCH_SETUP_KEYS = ("touch_material", "touch_aux")
+PROFILE_VAR_KEYS["machine"] += TOUCH_MACHINE_KEYS
+PROFILE_VAR_KEYS["setup"] += TOUCH_SETUP_KEYS
+SETTINGS_APPDATA_DIR = "CFRP_Router_CAM_TouchPreview" if "-preview" in APP_VERSION else "CFRP_Router_CAM"
 UPDATE_MANIFEST_URL = "https://raw.githubusercontent.com/wofidkr57-jpg/CFRP-Router-CAM/main/latest.json"
 UPDATE_DOWNLOAD_PREFIX = "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/"
 UPDATE_TEMP_FILENAME = "_CFRP_Router_CAM_update.exe"
@@ -665,6 +679,7 @@ class Contour:
     pocket_holes: List[List[Point]] = field(default_factory=list)
     pocket_stock: List[Point] = field(default_factory=list)
     pocket_max_depth: Optional[float] = None
+    additional_depth: float = 0.0  # explicit extra depth; imported STEP floor is retained
 
     @property
     def area(self) -> float:
@@ -711,6 +726,8 @@ def decode_job_value(value, kind):
         return [decode_job_value(v,args[0]) for v in value]
     if is_dataclass(kind):
         hints=get_type_hints(kind)
+        if kind is Contour and isinstance(value,dict) and "additional_depth" not in value:
+            value=dict(value,additional_depth=0.0)
         if not isinstance(value,dict) or set(value)!=set(hints):raise ValueError("Invalid project fields")
         return kind(**{k:decode_job_value(v,hints[k]) for k,v in value.items()})
     if kind is float:
@@ -2008,10 +2025,23 @@ def pocket_link_schedule(c:Contour,rough,finish,tool_d:float,cfg:dict):
     return schedule,level_link
 
 
+def effective_contour_depth(c:Contour,stock:float,extra:float) -> float:
+    """Keep the legacy base depth, then apply only the explicit per-contour extra."""
+    additional=float(c.additional_depth)
+    if not math.isfinite(additional) or additional<0:
+        raise ValueError("Additional depth must be a finite value of zero or more.")
+    if c.operation=="pocket":
+        if c.target_depth is None:raise ValueError("Pocket depth is required.")
+        base=float(c.target_depth)
+    else:base=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
+    return base+additional
+
+
 def validate_pocket(c:Contour,cfg:dict) -> None:
     depth=c.target_depth
     if depth is None or not math.isfinite(depth) or depth<=0 or c.pocket_max_depth is None or depth>c.pocket_max_depth+EPS:
         raise ValueError("Pocket depth must be positive and cannot exceed the imported STEP floor.")
+    depth=effective_contour_depth(c,float(cfg.get("stock",depth+1)),float(cfg.get("extra",0)))
     if "stock" in cfg and depth>=cfg["stock"]:
         raise ValueError("Pocket depth must be less than stock thickness.")
     for key,default,lo,hi in (("pocket_stepover",40.0,1,50),("pocket_stepdown",.25,.001,1000),
@@ -2355,7 +2385,8 @@ def expected_stepped_feature_pair(a:Contour,b:Contour)->bool:
     """Treat nested inner profiles at different Z depths as one stepped hole/pocket."""
     if not (a.closed and b.closed and a.role=="inner" and b.role=="inner"):return False
     if a.object_id and b.object_id and (a.object_id!=b.object_id or a.instance_id!=b.instance_id):return False
-    depth_a=a.target_depth;depth_b=b.target_depth
+    depth_a=None if a.target_depth is None else a.target_depth+a.additional_depth
+    depth_b=None if b.target_depth is None else b.target_depth+b.additional_depth
     if depth_a is None and depth_b is None:return False
     if depth_a is not None and depth_b is not None and abs(depth_a-depth_b)<=.01:return False
     center_a=polygon_centroid(a.points);center_b=polygon_centroid(b.points)
@@ -2636,8 +2667,8 @@ def ordered_contours(contours: Sequence[Contour],rapid_optimize:bool=True,
         outer=[c for c in active if c.operation!="pocket" and c.closed and c.role!="inner"]
         result=[];current=start_point
         phases=[pockets]
-        phases.extend([c for c in depth_inner if c.target_depth==depth]
-                      for depth in sorted({c.target_depth for c in depth_inner}))
+        phases.extend([c for c in depth_inner if c.target_depth+c.additional_depth==depth]
+                      for depth in sorted({c.target_depth+c.additional_depth for c in depth_inner}))
         phases.extend((through_inner,opened,outer))
         for phase in phases:
             if not phase:continue
@@ -2647,7 +2678,7 @@ def ordered_contours(contours: Sequence[Contour],rapid_optimize:bool=True,
             if last.closed:current=_contour_nearest_point(last,current)[1]
             elif last.points:current=last.points[-1]
         return result
-    pockets=sorted((c for c in contours if c.enabled and c.operation=="pocket"),key=lambda c:c.target_depth or 0)
+    pockets=sorted((c for c in contours if c.enabled and c.operation=="pocket"),key=lambda c:(c.target_depth or 0)+c.additional_depth)
     if pockets:
         return pockets+ordered_contours([c for c in contours if c.operation!="pocket"],rapid_optimize,start_point,mode,sheet_center)
     active=[c for c in contours if c.enabled]
@@ -2976,7 +3007,7 @@ def stage_contours(contours:Sequence[Contour],cfg:dict)->List[Contour]:
     if cfg.get("_machining_stage")!="finish":return active
     stock=cfg["stock"];extra=cfg["extra"]
     return [c for c in active if staged_finish_for(
-        c,min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra),stock,cfg)]
+        c,effective_contour_depth(c,stock,extra),stock,cfg)]
 
 
 def machining_jobs(contours:Sequence[Contour],cfg:dict)->List[Tuple[str,dict]]:
@@ -2984,7 +3015,7 @@ def machining_jobs(contours:Sequence[Contour],cfg:dict)->List[Tuple[str,dict]]:
     cfg=resolved_z_config(cfg)
     if not cfg.get("onion_split"):return [("FULL",cfg)]
     active=stage_contours(contours,cfg)
-    if not any(onion_skin_for(c,c.target_depth if c.target_depth is not None else cfg["stock"]+cfg["extra"],cfg["stock"],cfg) for c in active):
+    if not any(onion_skin_for(c,effective_contour_depth(c,cfg["stock"],cfg["extra"]),cfg["stock"],cfg) for c in active):
         raise ValueError("분리 가공에는 어니언스킨을 남길 관통 외곽이 필요합니다.")
     origin=work_origin_for_contours(active,cfg)
     rough=dict(cfg,_machining_stage="rough",_xy_origin_override=origin,
@@ -3002,7 +3033,8 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
     """Return cutting millimetres, XY cutting minutes, and plunge minutes."""
     if c.operation=="pocket":
         rough,finish,_=pocket_plan(c,tool_d,cfg)
-        passes=max(1,math.ceil(c.target_depth/float(cfg.get("pocket_stepdown",.25))))
+        target=effective_contour_depth(c,stock,extra)
+        passes=max(1,math.ceil(target/float(cfg.get("pocket_stepdown",.25))))
         schedule,level_link=pocket_link_schedule(c,rough,finish,tool_d,cfg)
         rough_mm=sum(path_length(p,True)+(path_length(link,False) if link else 0)
                      for label,p,link in schedule if label=="rough")*passes
@@ -3010,14 +3042,14 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
                       for label,p,link in schedule if label=="finish")*passes
         if level_link:rough_mm+=path_length(level_link,False)*(passes-1)
         starts=sum(link is None for _,_,link in schedule)
-        plunge_mm=sum(rapid_approach_clearance(cfg)+c.target_depth*i/passes for i in range(1,passes+1))*starts
+        plunge_mm=sum(rapid_approach_clearance(cfg)+target*i/passes for i in range(1,passes+1))*starts
         if level_link:
-            plunge_mm-=sum(rapid_approach_clearance(cfg)+c.target_depth*i/passes for i in range(2,passes+1))
-            plunge_mm+=c.target_depth/passes*(passes-1)
+            plunge_mm-=sum(rapid_approach_clearance(cfg)+target*i/passes for i in range(2,passes+1))
+            plunge_mm+=target/passes*(passes-1)
         plunge=plunge_mm/cfg["plunge"]
         return rough_mm+finish_mm,rough_mm/cfg["feed"]+finish_mm/(cfg["feed"]*.8),plunge
     passes=1 if cfg["full_depth"] else max(1,cfg["passes"])
-    target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
+    target=effective_contour_depth(c,stock,extra)
     if c.closed and len(c.points)>=3:
         route,_,_=compensated_route(c,tool_d,cfg.get("auto_trim",False),cfg=cfg);route_len=path_length(route,True)
         plan=lead_plan(c,route,cfg["lead"])
@@ -3096,7 +3128,7 @@ def tool_replacement_plan(ordered:Sequence[Contour],cfg:dict,stock:float,extra:f
         if not math.isfinite(float(cfg.get("tool_change_dwell",3))) or float(cfg.get("tool_change_dwell",3))<0:
             raise ValueError("스핀들 안정 대기는 0 이상의 초로 설정하세요.")
         if cfg.get("_machining_stage") not in ("rough","finish") and any(
-            c.role=="outer" and staged_finish_for(c,c.target_depth if c.target_depth is not None else stock+extra,stock,cfg) for c in ordered):
+            c.role=="outer" and staged_finish_for(c,effective_contour_depth(c,stock,extra),stock,cfg) for c in ordered):
             raise ValueError("중간 교체와 외곽 후정삭을 함께 쓰려면 어니언스킨 황삭/정삭 파일 분리를 사용하세요.")
     def measure(groups):
         planned=[];loads=[]
@@ -3125,9 +3157,9 @@ def tool_replacement_plan(ordered:Sequence[Contour],cfg:dict,stock:float,extra:f
 def _gcode_route_worker(task)->Tuple[int,float,List[Point],int,float]:
     """CPU-heavy compensation stage; safe to run outside the Tk process."""
     ci,c,cfg,stock,extra,tool_d=task
-    target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
+    target=effective_contour_depth(c,stock,extra)
     pts=list(c.points);removed_count=0
-    if c.operation=="pocket":return ci,float(c.target_depth),pts,0,tool_d
+    if c.operation=="pocket":return ci,target,pts,0,tool_d
     if c.closed:
         want_ccw=(c.role=="inner") if cfg["climb"] else (c.role!="inner")
         pts=reverse_if_needed(pts,want_ccw)
@@ -3261,14 +3293,14 @@ def default_gcode_filename(part_objects:Sequence[PartObject],filename:str,contou
 
 
 def version_numbers(value:str)->Tuple[int,...]:
-    numbers=tuple(int(part) for part in re.findall(r"\d+",str(value)))
+    numbers=tuple(int(part) for part in re.findall(r"\d+",str(value).split("-",1)[0]))
     return numbers or (0,)
 
 
 def newer_version(candidate:str,current:str)->bool:
     left=list(version_numbers(candidate));right=list(version_numbers(current))
     size=max(len(left),len(right));left.extend([0]*(size-len(left)));right.extend([0]*(size-len(right)))
-    return tuple(left)>tuple(right)
+    return tuple(left)>tuple(right) or (left==right and "-" in str(current) and "-" not in str(candidate))
 
 
 def validated_update_manifest(data:dict,current_version:str=APP_VERSION)->Optional[dict]:
@@ -3424,7 +3456,8 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
     stock=float(cfg["stock"]);extra=float(cfg["extra"])
     bottom_zero=cfg.get("z_origin")=="Bottom"
     final_through_z=-extra if bottom_zero else -(stock+extra)
-    custom_depths=sorted({round(float(c.target_depth),6) for c in active if c.target_depth is not None})
+    custom_depths=sorted({round(effective_contour_depth(c,stock,extra) if c.additional_depth else float(c.target_depth),6)
+                         for c in active if c.target_depth is not None or c.additional_depth})
     custom_text=",".join(fmt(value) for value in custom_depths) if custom_depths else "NONE"
     closed_count=sum(bool(c.closed) for c in active)
     safety_excluded=sum(bool(c.safety_excluded) for c in active)
@@ -3697,16 +3730,20 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         out.append(f"(BALANCED TOOL LOADS M: {', '.join(fmt(v) for v in tool_loads)})")
         out.append(f"(MID JOB TOOL CHANGES: {len(change_indices)})")
     finish_tasks=[]
-    if any(staged_finish_for(c,min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra),stock,cfg) for c in ordered):
+    if any(staged_finish_for(c,effective_contour_depth(c,stock,extra),stock,cfg) for c in ordered):
         out.append("(Stage 1: complete internal features before outer-profile cutting)")
     for (ci,target,pts,removed_count,effective_d),c in zip(prepared_routes,ordered):
         if ci-1 in change_indices:
             out.extend([f"(TOOL CHANGE BEFORE CONTOUR {ci} - NEW TOOL / WEAR RESET)",
-                        f"G90 G0 Z{fmt(safe_machine_z)}","M5","M9",
+                        f"G90 G0 Z{fmt(safe_machine_z)}","M5"])
+            auxiliary=cfg.get("_touch_aux_commands")
+            out.extend(auxiliary[1] if auxiliary is not None else ["M9"])
+            out.extend([
                         str(cfg["tool_change_macro"]).strip(),
                         "G21 G90 G17 G94 G40 G49 G80 G54",
                         f"G90 G53 G0 Z{fmt(float(cfg['tool_change_return_z']))}"])
-            if cfg.get("m8_enabled"):out.append("M8")
+            if auxiliary is not None:out.extend(auxiliary[0])
+            elif cfg.get("m8_enabled"):out.append("M8")
             out.extend([f"S{int(cfg['rpm'])} M3",f"G4 P{fmt(float(cfg.get('tool_change_dwell',3)))}"])
             returning_from_change=True
         report(38+42*ci/max(len(ordered),1),f"G-code 조립 {ci}/{len(ordered)}")
@@ -4269,6 +4306,7 @@ class StepSetupDialog(tk.Toplevel):
     def __init__(self,parent,model:StepModel,on_apply,on_cancel=None):
         super().__init__(parent);self.title(f"CFRP Router CAM V{APP_VERSION} - STEP 작업좌표계")
         self.geometry("1180x820");self.minsize(920,650);self.model=model;self.on_apply=on_apply;self.on_cancel=on_cancel
+        self.touch_mode=bool(getattr(parent,"_touch_active",False))
         self.selected_face:Optional[int]=None;self.selected_faces:List[int]=[];self.selected_vertex:Optional[int]=None
         self.face_aligned=False;self.work_origin_set=False
         self.mode=tk.StringVar(value="face");self.az=math.radians(-35);self.el=math.radians(28)
@@ -4278,44 +4316,166 @@ class StepSetupDialog(tk.Toplevel):
         self.native_view=None;self.native_pending=sys.platform=="win32" and model.shape is not None;self.native_error=""
         self.pick_faces=[];self.face_loop_cache={};self.raw_wire_loop_cache={};self.wire_loop_cache={};self.mesh_cache_key=None;self.mesh_cache=[];self.planar_view=tk.BooleanVar(value=False)
         self.rotation=tk.DoubleVar(value=0.0);self.preset=tk.StringVar(value="좌하단")
-        bar=ttk.Frame(self,padding=6);bar.pack(fill="x")
-        ttk.Radiobutton(bar,text="① 가공면 선택 (Ctrl 다중)",variable=self.mode,value="face",command=self.mode_changed).pack(side="left")
-        ttk.Button(bar,text="선택면 → +Z / Z0",command=self.align_face).pack(side="left",padx=4)
-        ttk.Radiobutton(bar,text="② 원점 꼭짓점",variable=self.mode,value="vertex",command=self.mode_changed).pack(side="left",padx=(10,0))
-        ttk.Button(bar,text="선택점 → XYZ0",command=self.set_vertex_origin).pack(side="left",padx=4)
-        ttk.Radiobutton(bar,text="③ XY 끌기",variable=self.mode,value="move",command=self.mode_changed).pack(side="left",padx=(10,0))
-        ttk.Button(bar,text="취소",command=self.cancel).pack(side="right")
-        ttk.Button(bar,text="CAM으로 가져오기",command=self.commit,style="Accent.TButton").pack(side="right",padx=6)
-        ttk.Button(bar,text="초기화",command=self.reset).pack(side="right")
         self.include_pockets=getattr(parent,"vars",{}).get("step_pockets")
         if self.include_pockets is None:self.include_pockets=tk.BooleanVar(value=True)
-        pocket_bar=ttk.Frame(self,padding=(6,0,6,4));pocket_bar.pack(fill="x")
-        ttk.Checkbutton(pocket_bar,text="단차 면을 아일랜드 포켓으로 가져오기",variable=self.include_pockets).pack(side="left")
-        second=ttk.Frame(self,padding=(6,0,6,6));second.pack(fill="x")
-        ttk.Label(second,text="Z 회전 °").pack(side="left")
-        ttk.Entry(second,width=8,textvariable=self.rotation).pack(side="left",padx=3)
-        ttk.Button(second,text="회전 적용",command=self.apply_rotation).pack(side="left")
-        ttk.Button(second,text="−90°",command=lambda:self.rotate_fixed(-90)).pack(side="left",padx=(6,2))
-        ttk.Button(second,text="+90°",command=lambda:self.rotate_fixed(90)).pack(side="left")
-        ttk.Label(second,text="원점 프리셋").pack(side="left",padx=(18,3))
-        ttk.Combobox(second,width=9,state="readonly",textvariable=self.preset,
-                     values=("좌하단","좌상단","우하단","우상단","중앙")).pack(side="left")
-        ttk.Button(second,text="적용",command=self.apply_preset).pack(side="left",padx=3)
-        ttk.Button(second,text="반대면",command=lambda:self.set_view(0,180)).pack(side="right")
-        ttk.Button(second,text="Top",command=lambda:self.set_view(0,0)).pack(side="right",padx=3)
-        ttk.Button(second,text="등각",command=lambda:self.set_view(-35,28)).pack(side="right")
-        ttk.Label(second,text="OCCT GPU 음영 + 외곽선",foreground="#dce7ef").pack(side="right",padx=(0,10))
+        if self.touch_mode:self._build_touch_controls()
+        else:
+            bar=ttk.Frame(self,padding=6);bar.pack(fill="x")
+            ttk.Radiobutton(bar,text="① 가공면 선택 (Ctrl 다중)",variable=self.mode,value="face",command=self.mode_changed).pack(side="left")
+            ttk.Button(bar,text="선택면 → +Z / Z0",command=self.align_face).pack(side="left",padx=4)
+            ttk.Radiobutton(bar,text="② 원점 꼭짓점",variable=self.mode,value="vertex",command=self.mode_changed).pack(side="left",padx=(10,0))
+            ttk.Button(bar,text="선택점 → XYZ0",command=self.set_vertex_origin).pack(side="left",padx=4)
+            ttk.Radiobutton(bar,text="③ XY 끌기",variable=self.mode,value="move",command=self.mode_changed).pack(side="left",padx=(10,0))
+            ttk.Button(bar,text="취소",command=self.cancel).pack(side="right")
+            ttk.Button(bar,text="CAM으로 가져오기",command=self.commit,style="Accent.TButton").pack(side="right",padx=6)
+            ttk.Button(bar,text="초기화",command=self.reset).pack(side="right")
+            pocket_bar=ttk.Frame(self,padding=(6,0,6,4));pocket_bar.pack(fill="x")
+            ttk.Checkbutton(pocket_bar,text="단차 면을 아일랜드 포켓으로 가져오기",variable=self.include_pockets).pack(side="left")
+            second=ttk.Frame(self,padding=(6,0,6,6));second.pack(fill="x")
+            ttk.Label(second,text="Z 회전 °").pack(side="left")
+            ttk.Entry(second,width=8,textvariable=self.rotation).pack(side="left",padx=3)
+            ttk.Button(second,text="회전 적용",command=self.apply_rotation).pack(side="left")
+            ttk.Button(second,text="−90°",command=lambda:self.rotate_fixed(-90)).pack(side="left",padx=(6,2))
+            ttk.Button(second,text="+90°",command=lambda:self.rotate_fixed(90)).pack(side="left")
+            ttk.Label(second,text="원점 프리셋").pack(side="left",padx=(18,3))
+            ttk.Combobox(second,width=9,state="readonly",textvariable=self.preset,
+                         values=("좌하단","좌상단","우하단","우상단","중앙")).pack(side="left")
+            ttk.Button(second,text="적용",command=self.apply_preset).pack(side="left",padx=3)
+            ttk.Button(second,text="반대면",command=lambda:self.set_view(0,180)).pack(side="right")
+            ttk.Button(second,text="Top",command=lambda:self.set_view(0,0)).pack(side="right",padx=3)
+            ttk.Button(second,text="등각",command=lambda:self.set_view(-35,28)).pack(side="right")
+            ttk.Label(second,text="OCCT GPU 음영 + 외곽선",foreground="#dce7ef").pack(side="right",padx=(0,10))
         self.status=DisplayStringVar(value="가공할 평면을 클릭한 뒤 ‘선택면 → +Z / Z0’을 누르세요.")
-        ttk.Label(self,textvariable=self.status,padding=(8,3)).pack(fill="x")
+        status_label=ttk.Label(self,textvariable=self.status,padding=(8,3));status_label.pack(fill="x")
+        if self.touch_mode:
+            status_label.configure(font=("맑은 고딕",12),wraplength=900)
+            status_label.bind("<Configure>",lambda e:status_label.configure(wraplength=max(200,e.width-16)))
+            foot=ttk.Frame(self,padding=8);foot.pack(side="bottom",fill="x")
+            foot.columnconfigure(0,weight=1);foot.columnconfigure(1,weight=3);foot.rowconfigure(0,minsize=72)
+            for column,text,command in ((0,self._touch_text("취소","Cancel"),self.cancel),
+                                        (1,self._touch_text("CAM으로 가져오기","Import into CAM"),self.commit)):
+                button=ttk.Button(foot,text=text,command=command,style="StepTouch.TButton")
+                button.grid(row=0,column=column,sticky="nsew",padx=4);self.touch_buttons.append(button)
         self.canvas=tk.Canvas(self,bg="#11161c",highlightthickness=0);self.canvas.pack(fill="both",expand=True)
         self.canvas.bind("<Configure>",self.canvas_configure);self.canvas.bind("<Motion>",self.hover_move);self.canvas.bind("<ButtonPress-1>",self.left_press)
         self.canvas.bind("<B1-Motion>",self.left_move);self.canvas.bind("<ButtonRelease-1>",self.left_release)
         self.canvas.bind("<ButtonPress-2>",self.pan_start);self.canvas.bind("<B2-Motion>",self.pan_move);self.canvas.bind("<ButtonRelease-2>",self.pan_end)
         self.canvas.bind("<ButtonPress-3>",self.orbit_start);self.canvas.bind("<B3-Motion>",self.orbit_move);self.canvas.bind("<ButtonRelease-3>",self.orbit_end)
         self.canvas.bind("<MouseWheel>",self.wheel)
-        foot=ttk.Frame(self,padding=7);foot.pack(fill="x")
-        ttk.Label(foot,text="좌클릭: 단일 선택 · Ctrl+클릭: 면 추가/해제 · 좌/우 드래그: 회전 · 휠 버튼 드래그: 화면 이동 · 휠: 확대/축소").pack(side="left")
+        if not self.touch_mode:
+            foot=ttk.Frame(self,padding=7);foot.pack(fill="x")
+            ttk.Label(foot,text="좌클릭: 단일 선택 · Ctrl+클릭: 면 추가/해제 · 좌/우 드래그: 회전 · 휠 버튼 드래그: 화면 이동 · 휠: 확대/축소").pack(side="left")
         self.protocol("WM_DELETE_WINDOW",self.cancel);self.transient(parent);self.grab_set();self.after_idle(self.init_native_view)
+
+    def _touch_text(self,korean,english):return english if CURRENT_LANGUAGE=="en" else korean
+
+    def _build_touch_controls(self):
+        style=ttk.Style(self)
+        style.configure("StepTouch.TButton",font=("맑은 고딕",15,"bold"),padding=(8,10))
+        style.configure("StepTouchSelected.TButton",font=("맑은 고딕",15,"bold"),padding=(8,10),foreground="#20b5e8")
+        self.touch_add_faces=tk.BooleanVar(self,value=False);self.touch_buttons=[];self.touch_mode_buttons={}
+        panel=ttk.Frame(self,padding=(8,6,8,2));panel.pack(fill="x");self.touch_panel=panel
+        rows=(
+            (("가공면 선택","Pick face",lambda:self._touch_set_mode("face"),"face"),
+             ("면 추가 OFF","Multi OFF",self._touch_toggle_faces,"add"),
+             ("탑면 +Z / Z0","Top +Z / Z0",self.align_face,None),
+             ("꼭짓점 선택","Pick vertex",lambda:self._touch_set_mode("vertex"),"vertex"),
+             ("선택점 원점","Vertex origin",self.set_vertex_origin,None),
+             ("XY 이동","Move XY",lambda:self._touch_set_mode("move"),"move")),
+            (("−90° 회전","Rotate −90°",lambda:self.rotate_fixed(-90),None),
+             ("+90° 회전","Rotate +90°",lambda:self.rotate_fixed(90),None),
+             ("각도 입력","Set angle",self._touch_rotation_dialog,None),
+             ("원점 위치","Origin preset",self._touch_preset_dialog,None),
+             ("위에서 보기","Top view",lambda:self.set_view(0,0),None),
+             ("등각 보기","Isometric",lambda:self.set_view(-35,28),None)),
+            (("축소 −","Zoom −",lambda:self._touch_zoom(1/1.2),None),
+             ("확대 +","Zoom +",lambda:self._touch_zoom(1.2),None),
+             ("화면 맞춤","Fit view",self._touch_fit_view,None),
+             ("반대면 보기","Opposite",lambda:self.set_view(0,180),None),
+             ("단차 포켓 ON","Pockets ON",self._touch_toggle_pockets,"pockets"),
+             ("초기화","Reset",self.reset,None)))
+        for column in range(6):panel.columnconfigure(column,weight=1,uniform="touch_step")
+        for row,items in enumerate(rows):
+            panel.rowconfigure(row,minsize=70)
+            for column,(ko,en,command,key) in enumerate(items):
+                button=ttk.Button(panel,text=self._touch_text(ko,en),command=command,style="StepTouch.TButton",width=1)
+                button.grid(row=row,column=column,sticky="nsew",padx=3,pady=3);self.touch_buttons.append(button)
+                if key:self.touch_mode_buttons[key]=button
+        self.mode.trace_add("write",lambda *_:self._touch_refresh_controls())
+        self._touch_refresh_controls()
+
+    def _touch_refresh_controls(self):
+        for mode in ("face","vertex","move"):
+            self.touch_mode_buttons[mode].configure(style="StepTouchSelected.TButton" if self.mode.get()==mode else "StepTouch.TButton")
+        for key,active,ko,en in (("add",self.touch_add_faces.get(),"면 추가","Multi"),
+                                 ("pockets",self.include_pockets.get(),"단차 포켓","Pockets")):
+            self.touch_mode_buttons[key].configure(text=f"{self._touch_text(ko,en)} {'ON' if active else 'OFF'}",
+                                                   style="StepTouchSelected.TButton" if active else "StepTouch.TButton")
+
+    def _touch_set_mode(self,mode):self.mode.set(mode);self.mode_changed()
+
+    def _touch_toggle_faces(self):
+        self.touch_add_faces.set(not self.touch_add_faces.get());self._touch_set_mode("face");self._touch_refresh_controls()
+
+    def _touch_toggle_pockets(self):
+        self.include_pockets.set(not self.include_pockets.get());self._touch_refresh_controls()
+
+    def _touch_zoom(self,factor):
+        if self.native_view:self.native_view.zoom(factor);return
+        self.zoom=max(.15,min(15,self.zoom*factor));self.queue_draw(True)
+
+    def _touch_fit_view(self):
+        if self.native_view:self.native_view.fit();return
+        self.zoom=1.0;self.panx=self.pany=0.0;self.queue_draw(True)
+
+    def _touch_popup(self,title):
+        popup=tk.Toplevel(self);popup.title(title);popup.transient(self);popup.resizable(False,False)
+        popup.geometry(f"480x600+{self.winfo_rootx()+max(0,(self.winfo_width()-480)//2)}+{self.winfo_rooty()+20}")
+        def close():
+            popup.destroy()
+            if self.winfo_exists():self.grab_set()
+        popup.protocol("WM_DELETE_WINDOW",close);popup.grab_set()
+        return popup,close
+
+    def _touch_rotation_dialog(self):
+        popup,close=self._touch_popup(self._touch_text("Z축 회전 각도 (°)","Z rotation angle (°)"))
+        value=tk.StringVar(popup,value="0");replace=[True]
+        entry=ttk.Entry(popup,textvariable=value,font=("맑은 고딕",24),justify="right")
+        entry.pack(fill="x",padx=12,pady=12);entry.focus_set();entry.selection_range(0,"end")
+        error=ttk.Label(popup,text="",font=("맑은 고딕",12));error.pack(fill="x",padx=12)
+        keys=ttk.Frame(popup,padding=8);keys.pack(fill="both",expand=True)
+        def key(char):
+            if char=="C":value.set("0");replace[0]=True;return
+            if char=="⌫":value.set(value.get()[:-1] or "0");replace[0]=False;return
+            if char=="±":value.set(value.get()[1:] if value.get().startswith("-") else "-"+value.get());replace[0]=False;return
+            current=value.get()
+            value.set(char if replace[0] or current=="0" else "-"+char if current=="-0" else current+char);replace[0]=False
+        for column in range(3):keys.columnconfigure(column,weight=1,uniform="step_keypad")
+        for row,chars in enumerate((("7","8","9"),("4","5","6"),("1","2","3"),("±","0","."),("C","⌫"))):
+            keys.rowconfigure(row,weight=1,minsize=64)
+            for column,char in enumerate(chars):
+                ttk.Button(keys,text=char,command=lambda c=char:key(c),style="StepTouch.TButton",width=1).grid(row=row,column=column,sticky="nsew",padx=3,pady=3)
+        def apply():
+            try:angle=float(value.get())
+            except ValueError:angle=float("nan")
+            if not math.isfinite(angle):error.configure(text=self._touch_text("숫자 각도를 입력하세요.","Enter a numeric angle."));return
+            self.rotation.set(angle);self.apply_rotation();close()
+        actions=ttk.Frame(popup,padding=8);actions.pack(fill="x")
+        for column,(label,command) in enumerate(((self._touch_text("취소","Cancel"),close),(self._touch_text("회전 적용","Apply rotation"),apply))):
+            actions.columnconfigure(column,weight=1);actions.rowconfigure(0,minsize=68)
+            ttk.Button(actions,text=label,command=command,style="StepTouch.TButton",width=1).grid(row=0,column=column,sticky="nsew",padx=3)
+        popup.bind("<Return>",lambda _:apply());popup.bind("<Escape>",lambda _:close())
+
+    def _touch_preset_dialog(self):
+        popup,close=self._touch_popup(self._touch_text("작업 원점 위치","Work origin preset"))
+        panel=ttk.Frame(popup,padding=12);panel.pack(fill="both",expand=True)
+        def apply(preset):self.preset.set(preset);self.apply_preset();close()
+        for row,(ko,en) in enumerate((("좌하단","Bottom left"),("좌상단","Top left"),("우하단","Bottom right"),("우상단","Top right"),("중앙","Center"))):
+            panel.rowconfigure(row,weight=1,minsize=68)
+            ttk.Button(panel,text=self._touch_text(ko,en),command=lambda p=ko:apply(p),style="StepTouch.TButton").grid(row=row,column=0,sticky="nsew",pady=3)
+        panel.columnconfigure(0,weight=1);panel.rowconfigure(5,weight=1,minsize=68)
+        ttk.Button(panel,text=self._touch_text("취소","Cancel"),command=close,style="StepTouch.TButton").grid(row=5,column=0,sticky="nsew",pady=3)
+        popup.bind("<Escape>",lambda _:close())
 
     def init_native_view(self):
         if not self.native_pending:
@@ -4323,7 +4483,7 @@ class StepSetupDialog(tk.Toplevel):
         try:
             self.native_view=OcctNativeStepView(self.canvas,self.model)
             self.native_view.set_selection_mode(self.mode.get())
-            self.status.set("OCCT GPU 뷰어 · 좌클릭 단일 선택 / Ctrl+클릭 면 추가·해제")
+            self.status.set(self._touch_text("평면을 터치하세요. 여러 면은 ‘면 추가 ON’으로 선택합니다.","Tap a face. Use Multi ON to select more faces.") if self.touch_mode else "OCCT GPU 뷰어 · 좌클릭 단일 선택 / Ctrl+클릭 면 추가·해제")
         except Exception as exc:
             self.native_error=f"{type(exc).__name__}: {exc}";self.native_view=None
             self.status.set("GPU 뷰어 초기화 실패 · 호환 뷰어로 표시합니다: "+self.native_error)
@@ -4508,7 +4668,10 @@ class StepSetupDialog(tk.Toplevel):
         if self.native_view:self.native_view.set_selection_mode(self.mode.get())
         if self.mode.get()=="move":self.set_view(0,0);self.status.set("모델을 좌클릭 드래그하여 작업 XY에서 이동하세요.")
         elif self.mode.get()=="vertex":self.status.set("원점으로 사용할 꼭짓점을 클릭하세요.");self.draw()
-        else:self.face_aligned=False;self.status.set("가공할 평면을 클릭하세요. 여러 면은 Ctrl+클릭으로 추가/해제합니다.");self.draw()
+        else:
+            self.face_aligned=False
+            self.status.set(self._touch_text("가공할 평면을 터치하세요. ‘면 추가 ON’이면 터치로 추가/해제합니다.","Tap a machining face. Multi ON enables tap to add/remove.") if self.touch_mode else "가공할 평면을 클릭하세요. 여러 면은 Ctrl+클릭으로 추가/해제합니다.")
+            self.draw()
     def wheel(self,e):
         if self.native_view:self.native_view.zoom(1.15 if e.delta>0 else 1/1.15);return
         self.zoom=max(.15,min(15,self.zoom*(1.15 if e.delta>0 else 1/1.15)));self.queue_draw(True)
@@ -4539,7 +4702,7 @@ class StepSetupDialog(tk.Toplevel):
         if self.native_view:self.native_view.start_rotation(e.x,e.y);self.drag=("pick_native",e.x,e.y);return
         self.drag=("pick",e.x,e.y,self.az,self.el)
     def pick_at(self,e):
-        additive=bool(getattr(e,"state",0)&0x0004)
+        additive=bool(getattr(e,"state",0)&0x0004) or (self.touch_mode and self.touch_add_faces.get())
         if self.native_view:
             shape=self.native_view.pick(e.x,e.y)
             if self.mode.get()=="face":
@@ -4568,7 +4731,7 @@ class StepSetupDialog(tk.Toplevel):
                 p=vertices[i]
                 x,y,z=self.project(p,b);d=math.hypot(e.x-x,e.y-y)
                 if best is None or d<best[0]:best=(d,i)
-            if best and best[0]<=18:
+            if best and best[0]<=(30 if self.touch_mode else 18):
                 self.selected_vertex=best[1];p=self.transformed_vertices()[best[1]]
                 self.status.set(f"꼭짓점 선택: X{p[0]:.3f} Y{p[1]:.3f} Z{p[2]:.3f}");self.draw()
     def left_move(self,e):
@@ -5523,6 +5686,25 @@ class NativeToolpath3D(Toolpath3D):
 
 
 class App(tk.Tk):
+    def enable_touch_mode(self):
+        if not hasattr(self,"touch_workspace"):
+            self._advanced_widgets=[(w,w.pack_info()) for w in self.pack_slaves()]
+            self._advanced_canvas=self.canvas
+            self.touch_workspace=TouchWorkspace(self)
+        for widget,_ in self._advanced_widgets:widget.pack_forget()
+        self._touch_active=True
+        self.canvas=self.touch_workspace.canvas
+        self.touch_workspace.pack(fill="both",expand=True)
+        self.touch_workspace.refresh()
+        self.after_idle(self.fit_view)
+
+    def enable_advanced_mode(self):
+        if not hasattr(self,"touch_workspace"):return
+        self.touch_workspace.pack_forget();self._touch_active=False
+        self.canvas=self._advanced_canvas
+        for widget,options in self._advanced_widgets:widget.pack(**options)
+        self.after_idle(self.reset_panel_widths);self.after_idle(self.fit_view)
+
     def __init__(self):
         super().__init__()
         self._configure_theme()
@@ -5674,6 +5856,8 @@ class App(tk.Tk):
         self.option_add("*TCombobox*Listbox.selectForeground","#f3fffd")
 
     def _build(self):
+        for key,value in TOUCH_DEFAULTS.items():
+            self.var(key,value,tk.BooleanVar if isinstance(value,bool) else tk.DoubleVar if isinstance(value,float) else tk.StringVar)
         top = ttk.Frame(self, padding=6); top.pack(fill="x")
         ttk.Button(top, text="DXF 열기", command=self.open_dxf).pack(side="left")
         ttk.Button(top, text="STEP 열기", command=self.open_step).pack(side="left", padx=4)
@@ -5695,6 +5879,7 @@ class App(tk.Tk):
         ttk.Button(jobs,text="작업 열기",command=self.open_job).pack(side="left")
         ttk.Button(jobs,text="작업 저장",command=self.save_job).pack(side="left",padx=4)
         ttk.Button(jobs,text="작업 다른 이름 저장",command=lambda:self.save_job(save_as=True)).pack(side="left")
+        ttk.Button(jobs,text="터치 기본 모드",command=self.enable_touch_mode).pack(side="left",padx=6)
         self.job_label=ttk.Label(jobs,text="작업 파일: 저장 안 됨");self.job_label.pack(side="left",padx=10)
         self.status = DisplayStringVar(value="DXF 또는 STEP을 열어 주세요 (단위: mm)")
         ttk.Label(top, textvariable=self.status).pack(side="left", padx=12)
@@ -6343,7 +6528,7 @@ class App(tk.Tk):
             raise ValueError("어레이 간격, 가장자리 여유, 수량은 음수가 될 수 없습니다.")
         for c in self.contours:
             if c.enabled and c.operation=="pocket":validate_pocket(c,cfg)
-        return cfg
+        return apply_touch_machine_options(cfg)
 
     def job_signature(self,cfg:dict):
         machining_keys=("inner_size_adjust","outer_size_adjust","tool_d","tool_wear_enabled","tool_wear_loss_per_10m","tool_wear_min_d",
@@ -6357,9 +6542,9 @@ class App(tk.Tk):
                         "tool_change_enabled","tool_change_limit_m","tool_change_macro","tool_change_return_z","tool_change_dwell")
         contour_key=tuple((tuple((round(x,7),round(y,7)) for x,y in c.points),c.closed,c.role,
                            tuple(round(s,7) for s in c.tabs),c.layer,c.target_depth,c.tabs_enabled,
-                           c.tabs_cleared,c.enabled,c.safety_excluded,round(c.start_s,7),c.cut_order,c.outer_cut_order,c.operation,repr(c.pocket_holes),repr(c.pocket_stock))
+                           c.tabs_cleared,c.enabled,c.safety_excluded,round(c.start_s,7),c.cut_order,c.outer_cut_order,c.operation,repr(c.pocket_holes),repr(c.pocket_stock),c.additional_depth)
                           for c in self.contours)
-        return hash((contour_key,tuple((key,repr(cfg.get(key))) for key in machining_keys)))
+        return hash((contour_key,tuple((key,repr(cfg.get(key))) for key in machining_keys+tuple(TOUCH_DEFAULTS))))
 
     def executable_dir(self)->str:
         """Return the folder the user launched the app/source from."""
@@ -6387,6 +6572,10 @@ class App(tk.Tk):
         return self.validate_profile(kind,{"vars":values,"codes":codes})
 
     def validate_profile(self,kind,payload):
+        if kind in ("machine","setup") and isinstance(payload,dict) and isinstance(payload.get("vars"),dict):
+            payload=copy.deepcopy(payload)
+            for key in TOUCH_MACHINE_KEYS if kind=="machine" else TOUCH_SETUP_KEYS:
+                payload["vars"].setdefault(key,TOUCH_DEFAULTS[key])
         if (not isinstance(payload,dict) or set(payload)!={"vars","codes"} or
                 not isinstance(payload["vars"],dict) or set(payload["vars"])!=set(PROFILE_VAR_KEYS[kind]) or
                 not isinstance(payload["codes"],dict) or set(payload["codes"])!=(set(PROFILE_CODE_ATTRS) if kind=="machine" else set())):
@@ -6841,6 +7030,7 @@ class App(tk.Tk):
         return result
 
     def apply_job_values(self,data):
+        for key,value in TOUCH_DEFAULTS.items():self.vars[key].set(data["vars"].get(key,value))
         for k,v in data["vars"].items():self.vars[k].set(localized_enum_value(v) if k in ("xy_origin","finish_scope","outer_order_mode") else v)
         for attr,text in data["codes"].items():
             widget=getattr(self,attr);widget.configure(state="normal");widget.delete("1.0","end");widget.insert("1.0",text)
@@ -6894,6 +7084,7 @@ class App(tk.Tk):
         return self.load_job_file(path) if path else False
 
     def on_close(self):
+        if getattr(self,"touch_workspace",None):self.touch_workspace.close_bridge()
         if not self.confirm_job_replace():return
         self.clear_autosave()
         self.destroy()
@@ -7380,7 +7571,6 @@ class App(tk.Tk):
             self.add_part_object(group,filename,stock,f"{base_name}_P{part_number}",layout_group)
         self.step_matrix=matrix
         self.vars["xy_origin"].set("선택점")
-        self.vars["z_origin"].set("Top")
         self.status.set(f"{os.path.basename(filename)} | STEP 객체 {len(parts)}개 · 윤곽 {len(self.contours)}개 (깊이 {depth_count}, 카운터보어 추가홀 {added_count}) | 판두께 {stock:.3f} mm")
 
     def example(self):
@@ -7718,6 +7908,22 @@ class App(tk.Tk):
         self.status.set("Flipped left/right | Ctrl+Z to undo" if CURRENT_LANGUAGE=="en" else
                         "선택 개체 좌우 반전 | Ctrl+Z로 되돌리기")
         return "break"
+
+    def rotate_selected_instances(self,degrees:float,keys=None)->int:
+        """Rotate placed instances about each centre without rebuilding their CAM features."""
+        angle=float(degrees)
+        if not math.isfinite(angle):raise ValueError("회전 각도는 유한한 숫자로 입력하세요.")
+        chosen=set(self.selected_instance_keys() if keys is None else keys)
+        chosen&={contour_group_key(c) for c in self.contours if c.points}
+        if not chosen or abs(angle%360)<EPS:return 0
+        self.push_undo(f"선택 개체 {angle:g}° 회전")
+        if not self.nest_active:
+            self.sync_part_sources_from_preview();self.nest_source=copy.deepcopy(self.contours);self.nest_active=True
+        for key in chosen:rotate_contour_group(self.contours,key,angle)
+        self.preview_cache.clear();self.collision_cache_key=None;self.measurement=None;self.measure_start=None
+        self.redraw(refresh_tree=False)
+        self.status.set(f"개체 {len(chosen)}개 {angle:g}° 회전 | Ctrl+Z로 되돌리기")
+        return len(chosen)
 
     def rotate_manual_array_selected(self,event=None):
         if not self.manual_array_mode or self.manual_array_selected is None:return None
@@ -8962,6 +9168,817 @@ class App(tk.Tk):
         Toolpath3D(self,moves,cfg)
 
 
+def apply_touch_machine_options(cfg):
+    """Explicit touch choices only; legacy jobs retain their exact START/END."""
+    cfg=dict(cfg)
+    cfg.pop("_touch_aux_commands",None)
+    applied_origin=cfg.pop("_touch_origin_applied",None)
+    mode=cfg.get("touch_aux","legacy")
+    if mode not in ("legacy","none","coolant","dust"):
+        raise ValueError("보조장치 선택을 확인하세요.")
+    if mode!="legacy":
+        if not cfg.get("touch_aux_reviewed",False):
+            raise ValueError("기계 연결 설정에서 시작/종료·교체 매크로의 보조출력과 장치 명령을 먼저 확인하세요.")
+        on=str(cfg.get("touch_"+mode+"_on","")).strip() if mode!="none" else ""
+        off=str(cfg.get("touch_"+mode+"_off","")).strip() if mode!="none" else ""
+        if mode!="none" and (not on or not off):raise ValueError("선택한 장치의 켜기/끄기 명령을 기계 연결 설정에 등록하세요.")
+        for commands in (on,off):
+            if any(not re.fullmatch(r"M\d+",line.strip(),re.I) for line in commands.splitlines()):
+                raise ValueError("보조장치 명령은 등록된 M 코드만 입력하세요. 이동 명령은 사용할 수 없습니다.")
+        # Only standard coolant words and explicitly registered output commands
+        # are known here. Other M macros remain intact; their internal outputs
+        # cannot be inferred from NC, hence the machine-profile review above.
+        known={7,8,9}
+        for device in ("coolant","dust"):
+            for action in ("on","off"):
+                for line in str(cfg.get("touch_"+device+"_"+action,"")).splitlines():
+                    if re.fullmatch(r"M\d+",line.strip(),re.I):known.add(int(line.strip()[1:]))
+        def executable(line):return re.sub(r"\([^)]*\)","",line).split(";",1)[0]
+        def has_mcode(line,numbers):
+            return any(int(number) in numbers for number in re.findall(r"(?<![A-Za-z])M(\d+)(?![\d.])",executable(line),re.I))
+        def clean(code):
+            result=[]
+            for line in str(code).splitlines():
+                # Preserve comments and every unregistered M macro.
+                pieces=re.split(r"(\([^)]*\)|;.*$)",line)
+                for i in range(0,len(pieces),2):
+                    pieces[i]=re.sub(r"(?<![A-Za-z])M(\d+)(?![\d.])",
+                                     lambda m:"" if int(m.group(1)) in known else m.group(0),pieces[i],flags=re.I)
+                value="".join(pieces).strip()
+                if value:result.append(value)
+            return result
+        for start_key,end_key in (("start_code","end_code"),("onion_start_code","onion_end_code")):
+            if start_key.startswith("onion") and not cfg.get("onion_split"):continue
+            start=clean(cfg.get(start_key) or DEFAULT_START_CODE)
+            end=clean(cfg.get(end_key) or DEFAULT_END_CODE)
+            if on:
+                pos=next((i for i,s in enumerate(start) if has_mcode(s,{3,4})),len(start))
+                start[pos:pos]=on.splitlines()
+            if off:
+                pos=next((i for i,s in enumerate(end) if has_mcode(s,{2,30}) or s=="%"),len(end))
+                end[pos:pos]=off.splitlines()
+            # Keep an intentionally emptied template from falling back to the
+            # default START/END during NC generation.
+            cfg[start_key]="\n".join(start) or "(TOUCH AUXILIARY OUTPUTS REMOVED)"
+            cfg[end_key]="\n".join(end) or "(TOUCH AUXILIARY OUTPUTS REMOVED)"
+        cfg["_touch_aux_commands"]=(tuple(line.strip() for line in on.splitlines()),
+                                    tuple(line.strip() for line in off.splitlines()))
+        cfg["m8_enabled"]=False
+    if cfg.get("touch_xy_mode","fixture")=="current":
+        x=float(cfg["touch_origin_x"]);y=float(cfg["touch_origin_y"])
+        if not all(math.isfinite(v) for v in (x,y)):raise ValueError("배치 원점 좌표를 확인하세요.")
+        origin=f"G10 L2 P1 X{fmt(x)} Y{fmt(y)}"
+        for key in ("start_code","onion_start_code"):
+            if key.startswith("onion") and not cfg.get("onion_split"):continue
+            lines=[];replaced=False;previous=""
+            for line in str(cfg.get(key) or DEFAULT_START_CODE).splitlines():
+                executable=re.sub(r"\([^)]*\)","",line).split(";",1)[0].strip()
+                block=re.sub(r"^N\d+\s*","",executable,flags=re.I).strip()
+                gcodes=[float(v) for v in re.findall(r"(?<![A-Za-z])G(\d+(?:\.\d*)?)(?![\d.])",block,re.I)]
+                if any(52<=g<53 or (92<=g<93 and g not in (92.1,92.2)) or 68<=g<69 for g in gcodes):
+                    raise ValueError("현재 위치 배치 시작 코드에 G52/G92 오프셋 설정·복원 또는 G68 회전이 있습니다. 상충하는 원점 설정을 먼저 정리하세요.")
+                if any(g in (20,91) or 54<g<60 for g in gcodes):
+                    raise ValueError("현재 위치 배치는 G21(mm), G90(절대), G54 기준입니다. 시작 코드의 다른 단위·거리모드·워크좌표 선택을 먼저 정리하세요.")
+                if 10 in gcodes:
+                    if not (applied_origin==(x,y) and block==origin and previous=="G21 G90 G54"):
+                        raise ValueError("시작 코드에 별도 G10 원점 설정이 있습니다. 현재 위치 배치와의 중복을 먼저 정리하세요.")
+                    replaced=True
+                if re.search(r"(?<![A-Za-z])M0*880(?![\d.])",block,re.I):
+                    if not re.fullmatch(r"M0*880",block,re.I):
+                        raise ValueError("현재 위치 배치에서는 M880을 다른 명령과 분리된 한 줄로 입력하세요.")
+                    # Keep any N label and comments on the replacement block.
+                    lines.append("G21 G90 G54")
+                    pieces=re.split(r"(\([^)]*\)|;.*$)",line)
+                    for i in range(0,len(pieces),2):pieces[i]=re.sub(r"M0*880(?![\d.])",origin,pieces[i],flags=re.I)
+                    lines.append("".join(pieces));replaced=True
+                else:lines.append(line)
+                if block:previous=block
+            if not replaced:
+                def header(line):
+                    code=re.sub(r"\([^)]*\)","",line).split(";",1)[0].strip()
+                    return not code or code=="%" or re.fullmatch(r"O\d+",code,re.I)
+                pos=next((i for i,s in enumerate(lines) if not header(s)),len(lines))
+                lines[pos:pos]=["G21 G90 G54",origin]
+            cfg[key]="\n".join(lines)
+        cfg["_touch_origin_applied"]=(x,y)
+    return cfg
+
+
+def touch_boundary_program(contours,cfg):
+    """Conservative cutter envelope; excludes travel inside user macros.
+
+    Bound both wear endpoints, rough/finish offsets and any optimized lead
+    start. Two lead radii cover the complete lead circle regardless of start
+    direction; cutter radius and path tolerance include the swept tool area.
+    This deliberately overestimates the box instead of clipping curved leads.
+    """
+    cfg=resolved_z_config(cfg)
+    active=[c for c in stage_contours(contours,cfg) if c.enabled]
+    if not active:raise ValueError("가공할 형상이 없습니다.")
+    origin=work_origin_for_contours(active,cfg)
+    points=[]
+    for c in active:
+        diameters={float(cfg["tool_d"])}
+        if cfg.get("tool_wear_enabled"):diameters.add(float(cfg.get("tool_wear_min_d",cfg["tool_d"])))
+        for diameter in diameters:
+            route,_,_=compensated_route(c,diameter,cfg.get("auto_trim",False),cfg=cfg)
+            if not route:continue
+            routes=[route]
+            target=effective_contour_depth(c,float(cfg["stock"]),float(cfg.get("extra",0)))
+            if wall_finish_for(c,target,float(cfg["stock"]),cfg):
+                rough,_=rough_route_for(c,route,cfg)
+                routes.append(rough)
+            padding=float(cfg["tool_d"])/2+max(0.,float(cfg.get("path_tolerance",.02)))
+            if c.closed and c.operation!="pocket":padding+=2*max(0.,float(cfg.get("lead",0)))
+            for path in routes:
+                if path:
+                    points.extend(((min(p[0] for p in path)-padding,min(p[1] for p in path)-padding),
+                                   (max(p[0] for p in path)+padding,max(p[1] for p in path)+padding)))
+    if not points:raise ValueError("범위를 계산할 공구경로가 없습니다.")
+    x0=min(p[0] for p in points)-origin[0];x1=max(p[0] for p in points)-origin[0]
+    y0=min(p[1] for p in points)-origin[1];y1=max(p[1] for p in points)-origin[1]
+    height=float(cfg.get("preflight_z",30))+(float(cfg["stock"]) if cfg["z_origin"]=="Bottom" else 0)
+    feed=float(cfg.get("preflight_feed",1000))
+    if not all(math.isfinite(v) for v in (height,feed,x0,y0,x1,y1)) or height<=0 or feed<=0:raise ValueError("범위 확인 높이와 속도를 확인하세요.")
+    validate_preflight(dict(cfg,preflight_enabled=True))
+    lines=["%","(TOUCH BOUNDARY - CONSERVATIVE CUTTER ENVELOPE)",
+           "(LEADS, FINISH AND CUTTER RADIUS INCLUDED; MACRO TRAVEL EXCLUDED)","G21 G90 G17 G94 G54","M5"]
+    if cfg.get("touch_xy_mode")=="current":lines.append(f'G10 L2 P1 X{fmt(cfg["touch_origin_x"])} Y{fmt(cfg["touch_origin_y"])}')
+    lines += [f"G0 Z{fmt(height)}",f"G1 X{fmt(x0)} Y{fmt(y0)} F{fmt(feed)}",
+              f"G1 X{fmt(x1)} Y{fmt(y0)}",f"G1 X{fmt(x1)} Y{fmt(y1)}",
+              f"G1 X{fmt(x0)} Y{fmt(y1)}",f"G1 X{fmt(x0)} Y{fmt(y0)}","M30","%"]
+    return "\n".join(lines)+"\n",(x0,y0,x1,y1)
+
+
+class Mach3BridgeError(RuntimeError):
+    """Mach3 connection/command failure; never implies a physical machine state."""
+
+
+class Mach3Bridge:
+    """Explicit local COM client for an already running Mach3 instance.
+
+    Keep this object and every call on one thread (normally Tk's UI thread).
+    connect/snapshot/disconnect send no motion, reset, output, or launch commands.
+    The UI owns polling; load_file() never starts a job. After poll_loaded() is
+    True, an explicit start_loaded() sends Cycle Start once. No method retries a
+    command after a COM error. A successful call means dispatch, not motion proof.
+
+    API/IDs: Mach3 V3.x Macro Programmers Reference, revision 0.23,
+    https://www.machsupport.com/wp-content/uploads/2013/02/Mach3_V3.x_Macro_Prog_Ref.pdf
+    Work XYZ uses 178..180, not display-mode-dependent DROs 800..802.
+    COM attachment: official MachRemote example (Mach4.Document is Mach3's ID),
+    https://www.machsupport.com/downloads-updates/mach3-downloads/
+    """
+
+    START_BUTTON = 1000
+    HOLD_BUTTON = 1001
+    STOP_BUTTON = 1003
+    RESUME_BUTTON = 1005
+
+    def __init__(self, connector=None):
+        # connector is dependency injection for tests; it returns a document
+        # with GetScriptDispatch(). The default only attaches via GetActiveObject.
+        self._connector = connector
+        self._document = None
+        self._script = None
+        self._pythoncom = None
+        self._thread_id = None
+        self._pending_path = None
+        self.last_error = ""
+
+    @property
+    def connected(self):
+        return self._script is not None
+
+    @property
+    def pending_path(self):
+        return self._pending_path
+
+    @staticmethod
+    def _file_key(path):
+        return os.path.normcase(os.path.abspath(str(path).strip().strip('"')))
+
+    def _check_thread(self):
+        if self._thread_id is not None and threading.get_ident() != self._thread_id:
+            raise Mach3BridgeError("Mach3 연결과 명령은 같은 스레드에서 실행해야 합니다.")
+
+    def connect(self):
+        self._check_thread()
+        if self.connected:
+            return self.snapshot()
+        self._thread_id = threading.get_ident()
+        self.last_error = ""
+        try:
+            if self._connector is not None:
+                self._document = self._connector()
+                self._script = self._document.GetScriptDispatch()
+            else:
+                if sys.platform != "win32":
+                    raise Mach3BridgeError("Mach3 연결은 Windows에서 사용할 수 있습니다.")
+                try:
+                    import pythoncom
+                    import win32com.client
+                except ImportError as exc:
+                    raise Mach3BridgeError("Mach3 연결 구성요소(pywin32)가 설치되지 않았습니다.") from exc
+                pythoncom.CoInitializeEx(pythoncom.COINIT_APARTMENTTHREADED)
+                self._pythoncom = pythoncom
+                # GetActiveObject never creates/starts a Mach3 process.
+                self._document = win32com.client.GetActiveObject("Mach4.Document")
+                self._script = win32com.client.Dispatch(self._document.GetScriptDispatch())
+            if self._script is None:
+                raise Mach3BridgeError("실행 중인 Mach3의 명령 인터페이스를 읽지 못했습니다.")
+            return self.snapshot()
+        except Exception as exc:
+            message = str(exc) if isinstance(exc, Mach3BridgeError) else (
+                "실행 중인 Mach3에 연결하지 못했습니다. Mach3와 이 앱의 실행 권한을 확인하세요. " + str(exc))
+            self.disconnect()
+            self.last_error = message
+            raise Mach3BridgeError(message) from exc
+
+    def disconnect(self):
+        """Release only this client's references; never stop/close Mach3."""
+        self._check_thread()
+        self._pending_path = None
+        self._script = None
+        self._document = None
+        pythoncom = self._pythoncom
+        self._pythoncom = None
+        self._thread_id = None
+        if pythoncom is not None:
+            pythoncom.CoUninitialize()
+
+    def _call(self, name, *args):
+        self._check_thread()
+        if not self.connected:
+            raise Mach3BridgeError("Mach3에 연결되어 있지 않습니다.")
+        try:
+            return getattr(self._script, name)(*args)
+        except Exception as exc:
+            # Cancel an outstanding start intent; do not retry an uncertain call.
+            message = "Mach3 통신 오류 (" + name + "): " + str(exc)
+            self.disconnect()
+            self.last_error = message
+            raise Mach3BridgeError(message) from exc
+
+    def snapshot(self):
+        """Return Mach3-reported values, never encoder-confirmed tool positions."""
+        return {
+            "profile": str(self._call("GetActiveProfileName")),
+            "file": str(self._call("FileName")),
+            "machine_xyz": tuple(float(self._call("GetOEMDRO", n)) for n in (83, 84, 85)),
+            "work_xyz": tuple(float(self._call("GetOEMDRO", n)) for n in (178, 179, 180)),
+            "reset": bool(self._call("GetOEMLED", 800)),
+            "program_running": bool(self._call("GetOEMLED", 804)),
+            "feed_hold": bool(self._call("GetOEMLED", 805)),
+            "tool_change": bool(self._call("GetOEMLED", 806)),
+            "macro_running": bool(self._call("GetOEMLED", 162)),
+            "homed_xyz": tuple(not bool(self._call("GetOEMLED", n)) for n in (807, 808, 809)),
+            "g92_active": bool(self._call("GetOEMLED", 10)),
+            "rotation_active": bool(self._call("GetOEMLED", 108)),
+            "rotation_degrees": float(self._call("GetOEMDRO", 118)),
+            "loading": bool(self._call("IsLoading")),
+            "moving_reported": bool(self._call("IsMoving")),
+            "units_mm": bool(self._call("GetOEMLED", 802)),
+            "current_line": int(self._call("GetOEMDRO", 816)),
+        }
+
+    def cancel_pending(self):
+        """Cancel UI launch intent only; no machine command is sent."""
+        self._pending_path = None
+
+    def load_file(self, path):
+        """Load a local NC only. The caller must poll on subsequent UI ticks."""
+        self.cancel_pending()
+        path = os.path.abspath(os.fspath(path))
+        if not os.path.isfile(path):
+            raise Mach3BridgeError("불러올 NC 파일이 없습니다: " + path)
+        status = self.snapshot()
+        if any(status[k] for k in ("program_running", "feed_hold", "tool_change", "macro_running", "loading", "moving_reported")):
+            raise Mach3BridgeError("Mach3 작업 중에는 다른 NC 파일을 불러올 수 없습니다.")
+        self._call("LoadFile", path)
+        self._pending_path = path
+        return path
+
+    def poll_loaded(self):
+        """True only when the requested file is loaded; does not start it."""
+        if self._pending_path is None:
+            return False
+        if bool(self._call("IsLoading")):
+            return False
+        loaded = str(self._call("FileName"))
+        if self._file_key(loaded) != self._file_key(self._pending_path):
+            self.cancel_pending()
+            raise Mach3BridgeError("Mach3에 요청한 NC 파일이 불러와지지 않았습니다. 시작하지 않았습니다.")
+        return True
+
+    def start_loaded(self):
+        """Dispatch one Cycle Start for the just-loaded file, never a stale job."""
+        if self._pending_path is None:
+            raise Mach3BridgeError("이 앱에서 불러온 실행 대기 NC가 없습니다.")
+        if not self.poll_loaded():
+            raise Mach3BridgeError("Mach3가 NC 파일을 불러오는 중입니다.")
+        status = self.snapshot()
+        if status["loading"] or self._file_key(status["file"]) != self._file_key(self._pending_path):
+            self.cancel_pending()
+            raise Mach3BridgeError("Mach3의 NC 파일이 변경되었습니다. 시작하지 않았습니다.")
+        if status["reset"]:
+            raise Mach3BridgeError("Mach3 Reset 상태입니다. Mach3에서 상태를 확인하세요.")
+        if any(status[k] for k in ("program_running", "feed_hold", "tool_change", "macro_running", "moving_reported")):
+            raise Mach3BridgeError("Mach3 작업 상태를 확인하세요. 새 가공을 시작하지 않았습니다.")
+        # Clear BEFORE dispatch: an error may occur after Mach3 receives a command.
+        self.cancel_pending()
+        self._call("DoOEMButton", self.START_BUTTON)
+
+    def _require_idle(self, allow_reset=False):
+        status = self.snapshot()
+        if status["reset"] and not allow_reset:
+            raise Mach3BridgeError("Mach3 Reset 상태입니다. Mach3에서 상태를 확인하세요.")
+        if any(status[k] for k in ("program_running", "feed_hold", "tool_change", "macro_running", "loading", "moving_reported")):
+            raise Mach3BridgeError("Mach3 작업 중에는 이 명령을 보낼 수 없습니다.")
+        return status
+
+    def execute_mdi(self, command):
+        """Send one explicit UI-selected command; return is not completion proof."""
+        command = str(command).strip()
+        if not command or any(ch in command for ch in ("\r", "\n", "\x00")):
+            raise Mach3BridgeError("Mach3 명령은 비어 있지 않은 한 줄이어야 합니다.")
+        self._require_idle()
+        self.cancel_pending()
+        self._call("Code", command)
+
+    def set_user_dro(self, code, value):
+        """Write a configured user DRO (1000..2254), e.g. Gage Block 1001."""
+        try:
+            number, value = int(code), float(value)
+        except (TypeError, ValueError, OverflowError) as exc:
+            raise Mach3BridgeError("사용자 DRO 번호와 값은 숫자여야 합니다.") from exc
+        if number != float(code) or not 1000 <= number <= 2254 or not math.isfinite(value):
+            raise Mach3BridgeError("사용자 DRO 번호는 1000~2254, 값은 유한한 숫자여야 합니다.")
+        self._require_idle(allow_reset=True)
+        self.cancel_pending()
+        self._call("SetUserDRO", number, value)
+
+    def hold(self):
+        self.cancel_pending()
+        self._call("DoOEMButton", self.HOLD_BUTTON)
+
+    def resume(self):
+        self.cancel_pending()
+        self._call("DoOEMButton", self.RESUME_BUTTON)
+
+    def stop(self):
+        # OEM Stop retains the active Mach3 profile's behavior, including Safe Z.
+        # It is not a hardware emergency-stop substitute. No Reset/M5/M9 appended.
+        self.cancel_pending()
+        self._call("DoOEMButton", self.STOP_BUTTON)
+
+
+class TouchWorkspace(ttk.Frame):
+    """Touch facade over the existing App model; advanced UI stays alive."""
+    def __init__(self,app):
+        super().__init__(app,padding=8);self.app=app;self.bridge=None;self.busy=False
+        self.pending_signature=None;self.last_machine=None;self.closed=False
+        self.machine_status=tk.StringVar(value="Mach3 미연결 · NC 생성/저장 가능")
+        self.coords=tk.StringVar(value="X —    Y —    Z —")
+        self.file_label=tk.StringVar(value="STEP 파일을 가져오세요")
+        self.depth_label=tk.StringVar(value="자동 관통")
+        self.aux_label=tk.StringVar();self.position_label=tk.StringVar();self.support_label=tk.StringVar()
+        self.buttons=[];self._configure_styles()
+        header=ttk.Frame(self);header.pack(fill="x")
+        for label,command in (("STEP 가져오기",app.open_step),("작업 열기",app.open_job),
+                              ("작업 저장",app.save_job),("기계 / 셋업",self.choose_profile),
+                              ("고급 모드",app.enable_advanced_mode)):
+            self.button(header,label,command).pack(side="left",fill="x",expand=True,padx=3)
+        ttk.Label(self,textvariable=self.file_label,font=("맑은 고딕",13,"bold")).pack(fill="x",pady=(8,4))
+        footer=ttk.Frame(self);footer.pack(side="bottom",fill="x",pady=(8,0))
+        ttk.Label(footer,textvariable=self.coords,font=("맑은 고딕",17,"bold")).pack(side="left",fill="x",expand=True)
+        for text,command,style in (("커팅 시작",self.cut,"TouchRun.TButton"),("일시정지",self.hold,"TouchPause.TButton"),
+                                   ("재개",self.resume,"Touch.TButton"),("정지",self.stop,"TouchStop.TButton")):
+            self.button(footer,text,command,style).pack(side="left",padx=3)
+        ttk.Label(self,textvariable=self.machine_status,font=("맑은 고딕",11)).pack(side="bottom",fill="x",pady=4)
+        status=ttk.Label(self,textvariable=app.status,wraplength=1000);status.pack(side="bottom",fill="x")
+        body=ttk.Frame(self);body.pack(fill="both",expand=True)
+        side=ttk.Frame(body,width=344);side.pack(side="right",fill="y",padx=(10,0));side.pack_propagate(False)
+        controls=ttk.Frame(side);controls.pack(side="bottom",fill="x")
+        self.button(controls,"현재 위치에 배치",self.capture_origin).pack(fill="x",pady=3)
+        row=ttk.Frame(controls);row.pack(fill="x")
+        self.button(row,"높이 맞추기",self.height_dialog).pack(side="left",fill="x",expand=True,padx=2)
+        self.button(row,"범위 확인",self.boundary).pack(side="left",fill="x",expand=True,padx=2)
+        scroll_buttons=ttk.Frame(controls);scroll_buttons.pack(fill="x")
+        form_canvas=tk.Canvas(side,bg="#0b1220",highlightthickness=0);form_canvas.pack(fill="both",expand=True)
+        self.button(scroll_buttons,"설정 ▲",lambda:form_canvas.yview_scroll(-3,"units")).pack(side="left",expand=True,fill="x",padx=2)
+        self.button(scroll_buttons,"설정 ▼",lambda:form_canvas.yview_scroll(3,"units")).pack(side="left",expand=True,fill="x",padx=2)
+        form=ttk.Frame(form_canvas);window=form_canvas.create_window(0,0,window=form,anchor="nw")
+        form.bind("<Configure>",lambda e:form_canvas.configure(scrollregion=form_canvas.bbox("all")))
+        form_canvas.bind("<Configure>",lambda e:form_canvas.itemconfigure(window,width=e.width))
+        self.field(form,"소재",app.vars["touch_material"],self.choose_material)
+        self.field(form,"Z 기준",app.vars["z_origin"],lambda:self.choose("Z 기준",[("탑 기준","Top"),("바텀 기준","Bottom")],lambda v:self.set_value("z_origin",v)))
+        self.field(form,"소재 두께 mm",app.vars["stock"],lambda:self.number("소재 두께 mm",app.vars["stock"],minimum=.001))
+        self.field(form,"가공 깊이 mm",self.depth_label,self.global_depth)
+        self.field(form,"관통 여유 mm",app.vars["extra"],lambda:self.number("관통 여유 mm",app.vars["extra"],minimum=0))
+        self.field(form,"받침 높이 mm",self.support_label,self.support_height)
+        self.field(form,"공구 지름 mm",app.vars["tool_d"],lambda:self.number("공구 지름 mm",app.vars["tool_d"],minimum=.001))
+        self.field(form,"보조장치",self.aux_label,lambda:self.choose("보조장치",[("기존 코드 유지","legacy"),("없음","none"),("절삭유","coolant"),("집진기","dust")],lambda v:self.set_value("touch_aux",v)))
+        self.button(form,"가공 조건 / 탭 설정",self.cutting_settings).pack(fill="x",pady=4)
+        self.button(form,"Mach3 연결 / 출력 설정",self.machine_dialog).pack(fill="x",pady=4)
+        self.button(form,"NC 생성 / 저장",self.generate_and_save).pack(fill="x",pady=4)
+        self.button(form,"기존 지그 원점 사용",lambda:self.set_value("touch_xy_mode","fixture")).pack(fill="x",pady=4)
+        ttk.Label(form,textvariable=self.position_label,wraplength=310).pack(fill="x",pady=4)
+        left=ttk.Frame(body);left.pack(fill="both",expand=True)
+        viewer_tools=ttk.Frame(left);viewer_tools.pack(fill="x")
+        for label,command in (("위에서 / 맞춤",app.fit_view),("3D 경로",app.open_3d),("확대 +",lambda:self.zoom(1.25)),("축소 −",lambda:self.zoom(.8))):
+            self.button(viewer_tools,label,command).pack(side="left",fill="x",expand=True,padx=2)
+        edit=ttk.Frame(left);edit.pack(side="bottom",fill="x",pady=(6,0))
+        for label,command in (("선택",self.select_mode),("배치 이동",self.move_mode),("탭 추가",self.add_tab),("부분 깊이",self.partial_depth),("되돌리기",app.undo)):
+            self.button(edit,label,command).pack(side="left",fill="x",expand=True,padx=2)
+        rotation=ttk.Frame(left);rotation.pack(side="bottom",fill="x",pady=4)
+        for label,angle in (("−90°",-90),("−15°",-15),("+15°",15),("+90°",90)):
+            self.button(rotation,label,lambda a=angle:self.rotate(a)).pack(side="left",fill="x",expand=True,padx=2)
+        self.button(rotation,"각도 입력",self.rotate_input).pack(side="left",fill="x",expand=True,padx=2)
+        self.canvas=tk.Canvas(left,bg="#08101f",highlightthickness=0);self.canvas.pack(fill="both",expand=True,pady=4)
+        for event,command in (("<Configure>",lambda e:app.redraw() if getattr(app,"_touch_active",False) else None),
+                              ("<ButtonPress-1>",app.canvas_press),("<B1-Motion>",app.canvas_left_drag),
+                              ("<ButtonRelease-1>",app.canvas_left_release),("<MouseWheel>",app.canvas_zoom),
+                              ("<ButtonPress-2>",app.pan_start),("<B2-Motion>",app.pan_move),("<ButtonRelease-2>",app.pan_end)):
+            self.canvas.bind(event,command)
+        self.after(400,self.tick)
+
+    def _configure_styles(self):
+        style=ttk.Style(self)
+        style.configure("Touch.TButton",font=("맑은 고딕",14,"bold"),padding=(12,18))
+        for name,color in (("TouchRun.TButton","#008760"),("TouchPause.TButton","#9c6900"),("TouchStop.TButton","#b83241")):
+            style.configure(name,font=("맑은 고딕",16,"bold"),padding=(18,20),background=color,foreground="white")
+            style.map(name,background=[("active",color),("pressed",color)])
+
+    def button(self,parent,text,command,style="Touch.TButton"):
+        widget=ttk.Button(parent,text=text,command=command,style=style);self.buttons.append(widget);return widget
+
+    def field(self,parent,label,var,command):
+        row=ttk.Frame(parent);row.pack(fill="x",pady=3)
+        ttk.Label(row,text=label,font=("맑은 고딕",12),width=13).pack(side="left")
+        button=self.button(row,"",command);button.configure(textvariable=var);button.pack(side="right",fill="x",expand=True)
+
+    def dialog(self,title):
+        win=tk.Toplevel(self.app);win.title(title);win.transient(self.app);win.configure(bg="#0b1220")
+        win.grab_set();win.minsize(420,240);return win
+
+    def choose(self,title,choices,callback):
+        win=self.dialog(title);frame=ttk.Frame(win,padding=14);frame.pack(fill="both",expand=True)
+        for label,value in choices:
+            self.button(frame,label,lambda v=value:(win.destroy(),callback(v))).pack(fill="x",pady=4)
+        self.button(frame,"취소",win.destroy).pack(fill="x",pady=4)
+
+    def number(self,title,var=None,minimum=None,maximum=None,callback=None):
+        win=self.dialog(title);frame=ttk.Frame(win,padding=14);frame.pack(fill="both",expand=True)
+        value=tk.StringVar(value=str(var.get()) if var is not None else "0")
+        entry=ttk.Entry(frame,textvariable=value,font=("맑은 고딕",24),justify="right");entry.grid(row=0,column=0,columnspan=3,sticky="ew",pady=8)
+        fresh=[True]
+        def press(char):
+            old=value.get()
+            if char=="⌫":value.set(old[:-1]);fresh[0]=False
+            elif char=="±":value.set(old[1:] if old.startswith("-") else "-"+old);fresh[0]=False
+            else:value.set(char if fresh[0] else old+char);fresh[0]=False
+        for i,char in enumerate(("7","8","9","4","5","6","1","2","3","±","0",".","⌫")):
+            self.button(frame,char,lambda c=char:press(c)).grid(row=1+i//3,column=i%3,sticky="nsew",padx=3,pady=3)
+        def accept():
+            try:
+                number=float(value.get())
+                if not math.isfinite(number) or (minimum is not None and number<minimum) or (maximum is not None and number>maximum):raise ValueError()
+                if var is not None:var.set(int(number) if isinstance(var,tk.IntVar) else number)
+                win.destroy()
+                if callback:callback(number)
+                self.refresh();self.app.redraw(refresh_tree=False)
+            except (ValueError,tk.TclError):messagebox.showerror(title,"입력 범위와 숫자를 확인하세요.",parent=win)
+        self.button(frame,"적용",accept,"TouchRun.TButton").grid(row=6,column=0,columnspan=2,sticky="ew",padx=3,pady=8)
+        self.button(frame,"취소",win.destroy).grid(row=6,column=2,sticky="ew",padx=3)
+        for i in range(3):frame.columnconfigure(i,weight=1)
+        entry.bind("<Return>",lambda e:accept());entry.focus_set();entry.selection_range(0,"end")
+
+    def set_value(self,key,value):
+        self.app.vars[key].set(value);self.refresh();self.app.redraw(refresh_tree=False)
+
+    def support_height(self):
+        self.choose("기준 베드 위 받침 높이",[("두께 직접 입력","edit"),("Mach3 기존 값 유지","keep")],
+                    lambda action:self.number("기준 베드 위 받침 높이 mm",self.app.vars["touch_support_height"],minimum=0,
+                                              callback=lambda n:self.set_value("touch_support_override",True))
+                    if action=="edit" else self.set_value("touch_support_override",False))
+
+    def choose_profile(self):
+        choices=[("기계: "+name,("machine",name)) for name in self.app.profiles["machine"]]
+        choices += [("셋업: "+name,("setup",name)) for name in self.app.profiles["setup"]]
+        def apply(value):
+            kind,name=value;self.app.profile_names[kind].set(name);self.app.load_profile(kind);self.refresh()
+        self.choose("기계 / 가공 셋업",choices,apply)
+
+    def choose_material(self):
+        def apply(value):
+            self.set_value("touch_material",value)
+            self.app.status.set("재질별 RPM·이송·공구 조건을 확인하세요. 재질 선택만으로 기존 절삭조건을 바꾸지 않습니다.")
+            self.cutting_settings()
+        self.choose("소재",[("카본","카본"),("알루미늄","알루미늄")],apply)
+
+    def global_depth(self):
+        def automatic():
+            self.app.push_undo("자동 관통 깊이")
+            for c in self.app.contours:
+                if c.operation=="profile":c.target_depth=None
+            self.refresh();self.app.redraw()
+        def custom(value):
+            self.app.push_undo("전체 윤곽 깊이")
+            for c in self.app.contours:
+                if c.operation=="profile":c.target_depth=value
+            self.refresh();self.app.redraw()
+        self.choose("가공 깊이",[("STEP 두께 + 관통 여유","auto"),("직접 깊이 지정","custom")],
+                    lambda v:automatic() if v=="auto" else self.number("탑에서 가공할 깊이 mm",minimum=.001,callback=custom))
+
+    def select_mode(self):
+        app=self.app
+        if app.manual_array_mode:app.manual_array_mode=False;app.manual_array_drag=None
+        for name in ("manual_mode","join_mode","start_mode","origin_mode","measure_mode"):setattr(app,name,False)
+        app.status.set("가공할 윤곽을 터치하세요.");app.redraw(refresh_tree=False)
+
+    def move_mode(self):
+        self.select_mode();app=self.app
+        if not app.nest_active:
+            app.sync_part_sources_from_preview();app.nest_source=copy.deepcopy(app.contours);app.nest_active=True
+        app.manual_array_mode=True;app.status.set("부품 안쪽을 누른 채 끌어 배치합니다. 회전은 아래 버튼을 사용하세요.");app.redraw(refresh_tree=False)
+
+    def add_tab(self):self.select_mode();self.app.toggle_manual()
+
+    def rotate(self,angle):
+        try:
+            if not self.app.selected_instance_keys():raise ValueError("먼저 회전할 부품을 선택하세요.")
+            self.app.rotate_selected_instances(angle);self.refresh()
+        except (ValueError,tk.TclError) as exc:messagebox.showerror("배치 회전",str(exc),parent=self.app)
+
+    def rotate_input(self):self.number("선택 부품을 추가 회전할 각도 °",callback=self.rotate)
+
+    def zoom(self,factor):
+        c=self.canvas;self.app.queue_view_transform(scale=factor,anchor=(c.winfo_width()/2,c.winfo_height()/2));self.app.finish_view_redraw()
+
+    def partial_depth(self):
+        targets=list(self.app.selected_contours)
+        if not targets:messagebox.showinfo("부분 깊이","미리보기에서 구멍·포켓·외곽을 먼저 선택하세요.",parent=self.app);return
+        def modify(value,extra):
+            previous=[(c,c.target_depth,c.additional_depth) for c in targets]
+            try:
+                for c in targets:
+                    if extra:c.additional_depth=value
+                    else:
+                        if c.operation=="pocket" and value>c.pocket_max_depth+EPS:raise ValueError("STEP 바닥보다 더 깊은 부분은 '추가 깊이'로 지정하세요.")
+                        c.target_depth=value
+                self.app.config()
+            except Exception as exc:
+                for c,depth,additional in previous:c.target_depth=depth;c.additional_depth=additional
+                messagebox.showerror("부분 깊이",str(exc),parent=self.app);return
+            for c,depth,additional in previous:c.target_depth=depth;c.additional_depth=additional
+            self.app.push_undo("부분 추가 깊이" if extra else "부분 기본 깊이")
+            for c in targets:
+                if extra:c.additional_depth=value
+                else:c.target_depth=value
+            self.app.preview_cache.clear();self.app.collision_cache_key=None;self.app.redraw();self.refresh()
+        self.choose("선택한 부분 깊이",[("탑에서 기본 깊이 지정",False),("기존 깊이에 추가 (+mm)",True)],
+                    lambda extra:self.number("추가 깊이 mm" if extra else "탑 기준 깊이 mm",minimum=0 if extra else .001,callback=lambda n:modify(n,extra)))
+
+    def cutting_settings(self):
+        win=self.dialog("가공 조건 / 마이크로탭");frame=ttk.Frame(win,padding=10);frame.pack(fill="both",expand=True)
+        entries=(("rpm","RPM",1),("feed","이송 mm/min",1),("plunge","진입 mm/min",1),("passes","깊이 횟수",1),
+                 ("tab_count","탭 개수",0),("tab_flat","탭 폭 mm",0),("tab_remain","탭 잔여두께 mm",0),
+                 ("preflight_z","범위 확인: 소재 위 mm",.001),("preflight_feed","범위 확인 속도",1))
+        for i,(key,label,minimum) in enumerate(entries):
+            cell=ttk.Frame(frame);cell.grid(row=i//2,column=i%2,sticky="ew",padx=5,pady=2)
+            ttk.Label(cell,text=label).pack(anchor="w")
+            button=self.button(cell,"",lambda k=key,l=label,m=minimum:self.number(l,self.app.vars[k],minimum=m));button.configure(textvariable=self.app.vars[key]);button.pack(fill="x")
+        self.button(frame,"자동 탭 배치",self.app.apply_auto_tabs).grid(row=5,column=0,sticky="ew",padx=5,pady=4)
+        self.button(frame,"탭 모두 지우기",self.app.clear_tabs).grid(row=5,column=1,sticky="ew",padx=5,pady=4)
+        self.button(frame,"나누어 가공 / 한 번에",lambda:self.choose("깊이 가공",[("나누어 가공",False),("한 번에 가공",True)],lambda v:self.set_value("full_depth",v))).grid(row=6,column=0,sticky="ew",padx=5,pady=4)
+        self.button(frame,"닫기",win.destroy).grid(row=6,column=1,sticky="ew",padx=5,pady=4)
+        for i in range(2):frame.columnconfigure(i,weight=1)
+
+    def macro_keypad(self,key,label):
+        value=self.app.vars[key]
+        def apply(number):
+            if number!=int(number):
+                messagebox.showerror(label,"M 코드 번호는 정수로 입력하세요.",parent=self.app);return
+            self.set_value(key,f"M{int(number)}")
+        self.choose(label,[("M 코드 번호 입력","edit"),("미지정으로 비우기","clear")],
+                    lambda action:self.number(label+" (M 뒤 숫자)",minimum=0,maximum=9999,callback=apply)
+                    if action=="edit" else self.set_value(key,""))
+
+    def machine_dialog(self):
+        win=self.dialog("Mach3 연결 / 기계 설정");frame=ttk.Frame(win,padding=12);frame.pack(fill="both",expand=True)
+        self.button(frame,"실행 중인 Mach3 연결",self.connect).grid(row=0,column=0,sticky="ew",padx=4,pady=4)
+        self.button(frame,"연결 해제",self.close_bridge).grid(row=0,column=1,sticky="ew",padx=4,pady=4)
+        for i,(key,label) in enumerate((("touch_probe_macro","높이 측정 매크로"),("touch_coolant_on","절삭유 켜기"),
+                                       ("touch_coolant_off","절삭유 끄기"),("touch_dust_on","집진기 켜기"),("touch_dust_off","집진기 끄기")),1):
+            ttk.Label(frame,text=label,font=("맑은 고딕",13)).grid(row=i,column=0,sticky="w",padx=4)
+            entry=self.button(frame,"",lambda k=key,l=label:self.macro_keypad(k,l))
+            entry.configure(textvariable=self.app.vars[key]);entry.grid(row=i,column=1,sticky="ew",padx=4,pady=3)
+        self.button(frame,"매크로 출력 확인",lambda:self.choose("시작·종료·교체 매크로의 보조출력",[("확인 완료",True),("아직 확인 안 함",False)],lambda v:self.set_value("touch_aux_reviewed",v))).grid(row=6,column=0,sticky="ew",padx=4,pady=4)
+        self.button(frame,"측정 매크로 Z 기준",lambda:self.choose("기존 측정 매크로가 설정하는 Z0",[("탑 기준","Top"),("바텀 기준","Bottom")],lambda v:self.set_value("touch_probe_datum",v))).grid(row=6,column=1,sticky="ew",padx=4,pady=4)
+        ttk.Label(frame,text="집진기 M 코드는 실제 출력에 맞게 등록합니다. 기존 매크로는 수정하지 않습니다.\n정지는 Mach3 Stop이며 기존 Safe Z 설정이 적용될 수 있습니다.",wraplength=650).grid(row=7,column=0,columnspan=2,sticky="w",pady=8)
+        self.button(frame,"기계 프로파일에 저장",lambda:self.app.save_profile("machine")).grid(row=8,column=0,sticky="ew",padx=4,pady=4)
+        self.button(frame,"닫기",win.destroy).grid(row=8,column=1,sticky="ew",padx=4,pady=4)
+
+    def connect(self):
+        try:
+            self.close_bridge()
+            self.bridge=Mach3Bridge();self.bridge.connect();self.last_machine=self.bridge.snapshot();self.refresh()
+        except Exception as exc:self.machine_error(exc)
+
+    def close_bridge(self):
+        if self.bridge:
+            try:self.bridge.disconnect()
+            except Exception:pass
+        self.bridge=None;self.last_machine=None;self.busy=False;self.pending_signature=None
+        self.machine_status.set("Mach3 미연결 · NC 생성/저장 가능");self.coords.set("X —    Y —    Z —")
+
+    def machine_error(self,exc):
+        if self.bridge:self.bridge.cancel_pending()
+        self.busy=False;self.pending_signature=None
+        self.machine_status.set("명령 완료 미확인 · "+str(exc))
+        messagebox.showerror("Mach3 연결/명령",str(exc),parent=self.app)
+
+    def snapshot(self):
+        if self.bridge is None:raise ValueError("기계 연결 설정에서 실행 중인 Mach3에 연결하세요.")
+        state=self.bridge.snapshot()
+        if not state["units_mm"]:raise ValueError("현재 Mach3 단위를 mm로 맞춘 뒤 사용하세요.")
+        return state
+
+    def capture_origin(self):
+        try:
+            state=self.snapshot()
+            if state["moving_reported"] or state["program_running"]:raise ValueError("정지 상태에서 현재 위치를 지정하세요.")
+            if not all(state["homed_xyz"]):raise ValueError("기계 원점이 확인된 상태에서 현재 위치를 지정하세요.")
+            if state["g92_active"] or state["rotation_active"]:raise ValueError("G92/좌표 회전이 적용되어 있습니다. 기존 원점 설정을 먼저 확인하세요.")
+            x,y,_=state["machine_xyz"]
+            self.app.vars["touch_origin_x"].set(x);self.app.vars["touch_origin_y"].set(y);self.app.vars["touch_xy_mode"].set("current")
+            self.app.status.set("현재 위치를 다음 NC의 G54 XY 원점으로 저장했습니다. 기계 이동 없음.");self.refresh()
+        except Exception as exc:messagebox.showerror("현재 위치 배치",str(exc),parent=self.app)
+
+    def show_boundary_preview(self,bounds,cfg):
+        origin=work_origin_for_contours([c for c in stage_contours(self.app.contours,cfg) if c.enabled],cfg)
+        x0,y0,x1,y1=bounds
+        left,bottom=self.app.transform((x0+origin[0],y0+origin[1]))
+        right,top=self.app.transform((x1+origin[0],y1+origin[1]))
+        self.canvas.delete("touch_boundary")
+        self.canvas.create_rectangle(left,top,right,bottom,outline="#4de2c7",width=3,dash=(10,5),tags=("touch_boundary","view_live"))
+        self.canvas.create_text(left+8,top+8,text="범위 · 공구 / 진입 여유 포함",fill="#4de2c7",anchor="nw",
+                                font=("맑은 고딕",13,"bold"),tags=("touch_boundary","view_live"))
+
+    def height_dialog(self):
+        def measure():
+            try:
+                self.snapshot();selected=self.app.vars["z_origin"].get();datum=self.app.vars["touch_probe_datum"].get()
+                if selected!=datum:raise ValueError("선택한 Z 기준과 기존 측정 매크로 기준이 다릅니다. 일치하는 매크로를 등록하거나 Mach3에서 기준면을 직접 설정하세요.")
+                macro=self.app.vars["touch_probe_macro"].get().strip()
+                if not re.fullmatch(r"M\d+",macro,re.I):raise ValueError("기계의 높이 측정 M 코드를 등록하세요.")
+                macro="M"+str(int(macro[1:]))
+                if macro=="M881" and datum!="Bottom":raise ValueError("현재 M881은 바텀 기준입니다. 탑 전용 매크로로 이름만 바꾸어 사용할 수 없습니다.")
+                self.pending_signature=None;self.busy=False
+                # Existing M881 consumes Gage Block Height; no new probing routine.
+                if macro=="M881" and self.app.vars["touch_support_override"].get():
+                    support_height=float(self.app.vars["touch_support_height"].get())
+                    if not math.isfinite(support_height) or support_height<0:raise ValueError("받침 높이는 0 이상의 유한한 숫자여야 합니다.")
+                    self.bridge.set_user_dro(1001,support_height)
+                self.bridge.execute_mdi(macro)
+                self.machine_status.set("높이 측정 명령 전달 · Mach3 확인창/결과를 확인하세요.")
+            except Exception as exc:self.machine_error(exc)
+        def direct():
+            self.app.status.set("Mach3에서 선택한 기준면의 Z0을 설정하세요. 터치플레이트 사용 시 두께를 보정합니다. 받침 높이는 중복 적용하지 않습니다.")
+        self.choose("높이 맞추기",[("기존 고정 프로브로 측정","probe"),("기준면 직접 측정 안내","direct")],lambda v:measure() if v=="probe" else direct())
+
+    def generate_and_save(self):self.app.make_gcode();self.refresh();self.app.save_gcode() if self.app.gcode else None
+
+    def check_datum(self,cfg):
+        if cfg["z_origin"]=="Top" and re.search(r"\bM0*881\b",cfg.get("start_code",""),re.I):
+            raise ValueError("시작 코드의 M881은 바텀 기준입니다. Top 작업에는 해당 기계의 Top 기준 시작 코드를 사용하세요.")
+
+    def send_program(self,code,cfg,label):
+        if not isinstance(code,str) or not code.strip():raise ValueError("전송할 NC 코드가 없습니다.")
+        executable=re.sub(r"\([^)]*\)|;[^\r\n]*","",code)
+        has_m881=bool(re.search(r"(?<![A-Za-z])M0*881(?![\d.])",executable,re.I))
+        if has_m881 and cfg["z_origin"]=="Top":
+            raise ValueError("전송할 NC의 M881은 바텀 기준입니다. Top 기준 시작 코드를 사용하세요.")
+        support_height=None
+        if has_m881 and cfg.get("touch_support_override",False):
+            support_height=float(cfg["touch_support_height"])
+            if not math.isfinite(support_height) or support_height<0:raise ValueError("받침 높이는 0 이상의 유한한 숫자여야 합니다.")
+        state=self.snapshot()
+        if state["g92_active"] or state["rotation_active"]:raise ValueError("G92/좌표 회전 상태를 먼저 확인하세요.")
+        folder=os.path.join(os.path.dirname(self.app.appdata_settings_path()),"machine-jobs")
+        os.makedirs(folder,exist_ok=True)
+        path=os.path.join(folder,datetime.now().strftime("%Y%m%d_%H%M%S_%f_")+label+".nc")
+        with open(path,"x",encoding="utf-8",newline="\n") as stream:stream.write(code)
+        if support_height is not None:self.bridge.set_user_dro(1001,support_height)
+        self.pending_signature=self.app.job_signature(cfg);self.busy=True
+        self.bridge.load_file(path);self.machine_status.set("Mach3 NC 불러오는 중 · "+os.path.basename(path))
+
+    def cut(self):
+        if self.busy:return
+        self.busy=True
+        try:
+            self.snapshot();cfg=self.app.config();self.check_datum(cfg)
+            self.app.make_gcode()
+            if not self.busy:return
+            cfg=copy.deepcopy(self.app.config());signature=self.app.gcode_signature
+            if not self.app.gcode or signature!=self.app.job_signature(cfg):
+                self.busy=False;return
+            if len(self.app.gcode_parts)>1:
+                self.busy=False
+                self.choose("실행할 가공 단계",[(label,(label,code)) for label,code in self.app.gcode_parts],
+                            lambda item:self.run_selected_program(item,cfg,signature));return
+            self.send_program(self.app.gcode,cfg,"cut")
+        except Exception as exc:self.machine_error(exc)
+
+    def run_selected_program(self,item,cfg,signature):
+        if self.busy:return
+        try:
+            if signature!=self.app.gcode_signature or signature!=self.app.job_signature(self.app.config()):
+                raise ValueError("설정이나 형상이 바뀌었습니다. 커팅을 다시 눌러 경로를 갱신하세요.")
+            self.send_program(item[1],cfg,"cut")
+        except Exception as exc:self.machine_error(exc)
+
+    def boundary(self):
+        try:
+            cfg=copy.deepcopy(self.app.config());signature=self.app.job_signature(cfg)
+            code,bounds=touch_boundary_program(self.app.contours,cfg)
+            self.show_boundary_preview(bounds,cfg)
+            self.app.status.set(f"범위 X {bounds[0]:.2f}~{bounds[2]:.2f}, Y {bounds[1]:.2f}~{bounds[3]:.2f} mm · 공구·리드인 여유 포함 / 매크로 이동 제외")
+            self.choose("범위 확인",[("화면으로 확인","view"),("기계로 외곽 따라가기","run")],
+                        lambda mode:self.run_selected_boundary(code,cfg,signature) if mode=="run" else None)
+        except Exception as exc:messagebox.showerror("범위 확인",str(exc),parent=self.app)
+
+    def run_selected_boundary(self,code,cfg,signature):
+        if self.busy:return
+        try:
+            if cfg.get("touch_xy_mode")!="current":
+                raise ValueError("범위 이동 전에 현재 위치를 XY 원점으로 지정하세요. 기존 매크로 원점은 화면에서만 확인합니다.")
+            if signature!=self.app.job_signature(self.app.config()):raise ValueError("설정이나 형상이 바뀌었습니다. 범위를 다시 계산하세요.")
+            self.send_program(code,cfg,"boundary")
+        except Exception as exc:self.machine_error(exc)
+
+    def hold(self):
+        self.pending_signature=None;self.busy=False
+        try:
+            if self.bridge is None:raise ValueError("실행 중인 Mach3에 연결하세요.")
+            self.bridge.hold()
+        except Exception as exc:self.machine_error(exc)
+
+    def resume(self):
+        self.pending_signature=None;self.busy=False
+        try:
+            if self.bridge is None:raise ValueError("실행 중인 Mach3에 연결하세요.")
+            self.bridge.resume()
+        except Exception as exc:self.machine_error(exc)
+
+    def stop(self):
+        self.pending_signature=None;self.busy=False
+        try:
+            if self.bridge is None:raise ValueError("실행 중인 Mach3에 연결하세요.")
+            self.bridge.stop()
+        except Exception as exc:self.machine_error(exc)
+
+    def refresh(self):
+        app=self.app
+        self.support_label.set(f'{app.vars["touch_support_height"].get():g}' if app.vars["touch_support_override"].get() else "Mach3 기존 값")
+        self.file_label.set((os.path.basename(app.filename) or "STEP 파일을 가져오세요")+"   ·   "+(app.profile_names["machine"].get() or "기계 미선택"))
+        self.aux_label.set({"legacy":"기존 코드","none":"없음","coolant":"절삭유","dust":"집진기"}.get(app.vars["touch_aux"].get(),"선택"))
+        depths={c.target_depth for c in app.contours if c.operation=="profile" and c.enabled}
+        self.depth_label.set("자동 관통" if not depths or depths=={None} else str(next(iter(depths))) if len(depths)==1 else "부분별 지정")
+        self.position_label.set("기존 지그 원점 사용" if app.vars["touch_xy_mode"].get()=="fixture" else f'현재 위치 원점 X{app.vars["touch_origin_x"].get():.3f} Y{app.vars["touch_origin_y"].get():.3f}')
+
+    def tick(self):
+        if self.closed:return
+        try:
+            self.refresh()
+            if self.bridge:
+                state=self.bridge.snapshot();self.last_machine=state
+                self.coords.set("  ".join(f"{a} {v:.3f}" for a,v in zip("XYZ",state["work_xyz"])))
+                status=("Reset" if state["reset"] else "NC 불러오는 중" if state["loading"] else
+                        "공구 교체 중" if state["tool_change"] else "매크로 실행 중" if state["macro_running"] else
+                        "일시정지" if state["feed_hold"] else "실행 중" if state["program_running"] else
+                        "이동 보고 중" if state["moving_reported"] else "대기")
+                unit="mm" if state["units_mm"] else "inch"
+                self.machine_status.set(f'Mach3 {state["profile"]} · {status} · {state["current_line"]}행 · 보고 좌표 ({unit})')
+                if self.pending_signature is not None:
+                    if self.pending_signature!=self.app.job_signature(self.app.config()):
+                        self.bridge.cancel_pending();self.pending_signature=None;self.busy=False
+                        self.machine_status.set("설정 변경으로 시작 요청 취소 · 다시 커팅을 누르세요.")
+                    elif self.bridge.poll_loaded():
+                        ready=self.snapshot()
+                        if ready["g92_active"] or ready["rotation_active"]:
+                            raise ValueError("G92/좌표 회전 상태가 바뀌었습니다. 시작 요청을 취소했습니다.")
+                        self.pending_signature=None;self.bridge.start_loaded();self.busy=False
+        except Exception as exc:
+            if self.bridge:
+                try:self.bridge.cancel_pending()
+                except Exception:pass
+            self.pending_signature=None;self.busy=False;self.last_machine=None;self.coords.set("X —    Y —    Z —")
+            self.machine_status.set("상태 읽기/명령 미확인 · "+str(exc))
+        self.after(400,self.tick)
+
+
 if __name__ == "__main__":
     mp.freeze_support()
     if "--apply-update" in sys.argv:
@@ -8974,5 +9991,8 @@ if __name__ == "__main__":
         index=sys.argv.index("--cleanup-update")
         if len(sys.argv)>index+1:cleanup_path=sys.argv[index+1]
     if cleanup_path:cleanup_update_file(cleanup_path)
-    App().mainloop()
+    application=App()
+    application.geometry("1600x1000")
+    application.enable_touch_mode()
+    application.mainloop()
 
