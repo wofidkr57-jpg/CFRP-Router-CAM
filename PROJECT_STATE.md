@@ -4,7 +4,7 @@
 - 목적: DXF/STEP 기반 CFRP 2D/2.5D 가공 경로와 Mach3 NC 생성.
 - 정본 작업 위치: 로컬 `Documents/CFRP-Router-CAM` (OneDrive 외부). `cfrp_router_cam.py`가 단일 소스 정본이며 ChatGPT 프로젝트 미러의 `sources/`는 읽기 전용이다.
 - 저장소: `wofidkr57-jpg/CFRP-Router-CAM`, 기존 공개 상태, 기본 브랜치 `main`.
-- 공개 배포 / 현재 소스: **V1.44 기계 프로파일 / 가공 셋업**, PR #26 병합 및 후속 GUI 보완 완료. 태그 `v1.44`는 `00f6ccf`, 자동 업데이트 매니페스트는 `ddcd034`에 반영했다.
+- 안정판 공개 배포: **V1.44 기계 프로파일 / 가공 셋업**, PR #26 병합 및 후속 GUI 보완 완료. 태그 `v1.44`는 `00f6ccf`, 자동 업데이트 매니페스트는 `ddcd034`에 반영했다. 현재 개발 소스는 아래 V1.45-preview.1이다.
 - Windows Actions `37725366675`의 검사·빌드·Defender·릴리스 완료와 공개 파일 다운로드 해시를 확인했다. 개인 OneDrive `ChatGPT_Projects/CFRP_Router_CAM/v1.44` 로컬 복사 완료, 서버 동기화 미확인.
 
 ## 현재 작업 — V1.45-preview.1 터치 가공 화면
@@ -28,6 +28,7 @@
 - Windows EXE 빌드 완료: 81,475,485 bytes, SHA-256 `94f63ccd4b6457bcf648dbd774aaf5904acb661f1f21e00483f0ec75c09499e6`. Win32 COM 런타임 모듈 import와 번들 포함 확인. 분리한 임시 폴더에서 EXE가 유지되고 버전·기본 설정·프로파일 생성까지 확인했다. 연결 명령은 보내지 않았다. 검사 종료 뒤 임시 폴더 정리의 접근 오류가 있었고 후속 삭제가 자동 승인 검토에서 차단되어 임시 파일은 보존했다.
 - 합성 예제 `sample_plate_3mm.step`: 80×50×3 mm, Ø4 관통홀 4개, 30×20×1 mm 포켓. 생성 후 앱 STEP 로더로 15면·두께 3 mm 재확인했다. 실제 생산용 NC는 포함하지 않는다.
 - 검증 로그는 Git 제외 `local-handoff/`에 유지한다. 별도 시험판 전달 위치는 개인 OneDrive `ChatGPT_Projects/CFRP_Router_CAM/v1.45-preview.1_20261027`이며 서버 동기화는 미확인이다.
+- EXE·합성 STEP을 해당 전달 폴더에 복사했다. 소스는 `feature/touch-mach3-workflow`에 커밋/푸시했고 원격 SHA 일치를 재조회했다. Draft PR [#28](https://github.com/wofidkr57-jpg/CFRP-Router-CAM/pull/28), base `fix/manual-settings-save`, OPEN/Draft 확인. PR에 적용되는 CI 작업은 없어 로컬 결과만 검증 근거로 삼는다. 배포 태그/안정판 매니페스트/기존 실행본은 변경하지 않았다.
 
 ### 다음 작업
 
