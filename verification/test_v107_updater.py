@@ -24,6 +24,27 @@ class UpdaterTests(unittest.TestCase):
         self.assertFalse(cam.newer_version("1.07", "1.7.0"))
         self.assertFalse(cam.newer_version("1.06", "1.07"))
 
+    def test_preview_suffix_does_not_hide_the_same_numeric_release(self):
+        self.assertEqual(cam.version_numbers("1.45-preview.1"), (1, 45))
+        self.assertTrue(cam.newer_version("1.45", "1.45-preview.1"))
+        self.assertTrue(cam.newer_version("1.45.0", "1.45-preview.99"))
+        self.assertTrue(cam.newer_version("1.46", "1.45-preview.99"))
+        self.assertFalse(cam.newer_version("1.44", "1.45-preview.1"))
+        self.assertFalse(cam.newer_version("1.45-preview.1", "1.45"))
+        self.assertFalse(cam.newer_version("1.45-preview.1", "1.45-preview.1"))
+
+    def test_manifest_keeps_release_only_validation_for_preview_installs(self):
+        data = {
+            "version": "1.45",
+            "download_url": cam.UPDATE_DOWNLOAD_PREFIX + "v1.45/CFRP_Router_CAM.exe",
+            "sha256": "a" * 64,
+        }
+        self.assertEqual(cam.validated_update_manifest(data, "1.45-preview.1")["version"], "1.45")
+        self.assertIsNone(cam.validated_update_manifest(data, "1.45"))
+        data["version"] = "1.45-preview.2"
+        with self.assertRaises(ValueError):
+            cam.validated_update_manifest(data, "1.45-preview.1")
+
     def test_manifest_accepts_only_newer_github_release(self):
         data = {
             "version": "999.0",
@@ -32,8 +53,8 @@ class UpdaterTests(unittest.TestCase):
             "message": "test",
         }
         self.assertEqual(cam.validated_update_manifest(data)["version"], "999.0")
-        data["version"] = cam.APP_VERSION
-        self.assertIsNone(cam.validated_update_manifest(data))
+        data["version"] = cam.APP_VERSION.split("-", 1)[0]
+        self.assertIsNone(cam.validated_update_manifest(data, data["version"]))
         data["version"] = "999.0"
         data["download_url"] = "https://example.com/update.exe"
         with self.assertRaises(ValueError):

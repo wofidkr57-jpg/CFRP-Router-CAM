@@ -3,7 +3,8 @@ $ErrorActionPreference = 'Stop'
 Push-Location $PSScriptRoot
 try {
     & $Python -m PyInstaller --noconfirm --onefile --windowed `
-        --name CFRP_Router_CAM --collect-all ezdxf --collect-all OCP --collect-all shapely cfrp_router_cam.py
+        --name CFRP_Router_CAM --collect-all ezdxf --collect-all OCP --collect-all shapely `
+        --hidden-import win32com.client --hidden-import pythoncom --hidden-import pywintypes cfrp_router_cam.py
     if ($LASTEXITCODE -ne 0) { throw "EXE build failed with exit code $LASTEXITCODE" }
 } finally {
     Pop-Location
