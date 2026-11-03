@@ -50,3 +50,8 @@
 
 ## V1.45 배포 진행 (2026-11-03)
 사용자 배포 승인. 내부 탭 및 이전 승인된 수동 설정 저장/연속 깊이 패스를 포함. Windows CI 검사/Defender/릴리스 및 매니페스트 검증 대기.
+
+## V1.45 정식 배포 완료 (2026-11-03)
+- main/tag v1.45 소스2da5748, 업데이트 매니페스트18e775b. Windows Actions41555202162 회귀/GUI/빌드/Defender/릴리스 전 단계 성공.
+- 공개 EXE2종 다운로드 SHA256 2b658f1f1411487fa23695c40bd4aa2fa38e3cc6b31a8b8e5d8d8590c138ac2b 일치. 소스 ZIP 태그 코드 일치 및 개인 설정/NC 제외 확인.
+- 검증기록 local-handoff/release-v1.45/verified.json 및 ci.log (Git 제외). 자동 업데이트 공개 완료. 사용자 실행본 교체/실가공은 미검증.
