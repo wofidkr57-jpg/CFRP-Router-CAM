@@ -1,6 +1,6 @@
 {
-  "version": "1.49",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.49/CFRP_Router_CAM.exe",
-  "sha256": "c7fc7a2472cfe51298fdce143d7739f3612eb083a18561a5919e5e7dbad671e2",
-  "message": "외곽 바깥면 진입/이탈, 중앙·안쪽 우선 순서와 지지 상실 경고를 추가했습니다."
+  "version": "1.50",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.50/CFRP_Router_CAM.exe",
+  "sha256": "1809447f9fa2b34c94812cc32227fbdf41ba2521b2022080dab404b2c21c22b7",
+  "message": "수동 시작점은 유지하고 자동 시작점은 탭 램프 5mm 전을 우선합니다. 간섭 시 10mm 전 또는 기존 바깥면 후보를 사용합니다."
 }
