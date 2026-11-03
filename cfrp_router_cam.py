@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.46"
+APP_VERSION = "1.47"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 PROFILES_FILENAME = "profiles.json"
@@ -2895,7 +2895,6 @@ def safe_auto_tabs(c: Contour, contours: Sequence[Contour], cfg: dict) -> List[f
     candidates = auto_tabs(c, max(count * 4, 16), flat, ramp)
     accepted = []
     for center in candidates:
-        if any(min(abs(center-v), total-abs(center-v)) < 2*span+0.5 for v in accepted): continue
         valid = True
         for delta in (-span, 0, span):
             at = (center + delta) % total
@@ -2907,8 +2906,23 @@ def safe_auto_tabs(c: Contour, contours: Sequence[Contour], cfg: dict) -> List[f
             if point.distance(opposite) <= clearance + EPS or (neighboring is not None and point.distance(neighboring) <= clearance + EPS):
                 valid = False; break
         if valid: accepted.append(center)
-        if len(accepted) == count: break
-    return sorted(accepted)
+    # Do not stop at the first safe positions: candidates are sorted by arc
+    # length, so early truncation packs every tab near the contour start.
+    if not accepted: return []
+    def separation(a,b):
+        gap=abs(a-b)%total
+        return min(gap,total-gap)
+    preferred=auto_tabs(c,count,flat,ramp)
+    seed=min(accepted,key=lambda v:min(separation(v,p) for p in preferred))
+    selected=[seed]
+    remaining=[v for v in accepted if separation(v,seed)>EPS]
+    while remaining and len(selected)<count:
+        best=max(remaining,key=lambda v:(min(separation(v,p) for p in selected),
+                                        -min(separation(v,p) for p in preferred)))
+        if min(separation(best,p) for p in selected)<2*span+0.5: break
+        selected.append(best)
+        remaining=[v for v in remaining if separation(v,best)>EPS]
+    return sorted(selected)
 
 
 def fmt(v: float) -> str:

@@ -20,6 +20,16 @@ class InnerTabs(unittest.TestCase):
  def test_exact_two_mm_web_excluded(self):
   c=self.box();surround=cam.Contour([(-4,-4),(24,-4),(24,24),(-4,24)])
   self.assertEqual(cam.safe_auto_tabs(c,[c,surround],self.settings()),[])
+ def test_rectangle_tabs_span_all_sides(self):
+  c=self.box(40,20);s=self.settings();s['inner_tab_count']=4
+  tabs=cam.safe_auto_tabs(c,[c],s);self.assertEqual(len(tabs),4)
+  gaps=[(tabs[(i+1)%4]-tabs[i])%c.length for i in range(4)]
+  self.assertGreaterEqual(min(gaps),20.)
+  points=[cam.point_at(c.points,v,True)[0] for v in tabs]
+  self.assertTrue(any(y==0 for x,y in points));self.assertTrue(any(y==20 for x,y in points))
+ def test_two_tabs_opposite(self):
+  c=self.box();tabs=cam.safe_auto_tabs(c,[c],self.settings())
+  self.assertAlmostEqual(abs(tabs[1]-tabs[0]),c.length/2)
  def test_manual_tabs_retained(self):
   c=self.box(30,4);c.tabs=[15.];s=self.settings(stock=2.,tab_remain=.3,lead=0.,tool_change_enabled=False)
   self.assertIn('tabs=1',cam.generate_gcode([c],s))
