@@ -31,6 +31,28 @@ with tempfile.TemporaryDirectory() as tmp:
         # The schema also restores projected pockets without the source STEP.
         pocket=cam.Contour([(0.,0.),(20.,0.),(20.,20.)],role='pocket',operation='pocket',pocket_holes=[[(1.,1.),(2.,1.),(2.,2.)]],pocket_max_depth=1.)
         assert cam.decode_job_value(json.loads(json.dumps(cam.asdict(pocket))),cam.Contour)==pocket
+        # Actual pre-V1.45 schema, including nested contour collections.
+        legacy=copy.deepcopy(document)
+        def strip_provenance(obj):
+            if isinstance(obj,dict):
+                obj.pop('tabs_auto',None)
+                for v in obj.values():strip_provenance(v)
+            elif isinstance(obj,list):
+                for v in obj:strip_provenance(v)
+        strip_provenance(legacy)
+        legacy['vars'].pop('inner_tabs_enabled');legacy['vars'].pop('inner_tab_count')
+        legacy_path=Path(tmp)/'legacy.cfrpcam'
+        legacy_path.write_text(json.dumps(legacy),encoding='utf-8');legacy_bytes=legacy_path.read_bytes()
+        with mock.patch.object(cam.filedialog,'askopenfilename',return_value=str(legacy_path)):
+            assert app.open_job()
+        assert legacy_path.read_bytes()==legacy_bytes
+        assert not app.vars['inner_tabs_enabled'].get() and app.vars['inner_tab_count'].get()==2
+        assert any(c.tabs==[10.0,20.0] for c in app.contours)
+        assert all(not c.tabs_auto for c in app.contours)
+        invalid=copy.deepcopy(legacy);invalid['state']['contours'][0]['unexpected_field']=1
+        try:app.decode_job(invalid)
+        except ValueError:pass
+        else:raise AssertionError('Unknown fields must remain rejected')
         app.update();app.destroy();app=cam.App();app.vars['feed'].set(999);app.gcode='STALE';app.gcode_signature='STALE'
         with mock.patch.object(cam.filedialog,'askopenfilename',return_value=path):assert app.open_job()
         assert json.loads(app.job_snapshot())==json.loads(expected), [(k,json.loads(expected)[k],json.loads(app.job_snapshot())[k]) for k in json.loads(expected) if json.loads(expected)[k]!=json.loads(app.job_snapshot())[k]]

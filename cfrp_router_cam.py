@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.45"
+APP_VERSION = "1.46"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 PROFILES_FILENAME = "profiles.json"
@@ -712,6 +712,9 @@ def decode_job_value(value, kind):
         return [decode_job_value(v,args[0]) for v in value]
     if is_dataclass(kind):
         hints=get_type_hints(kind)
+        # V1.44 and older have no automatic-tab provenance. Preserve stored tabs.
+        if kind is Contour and isinstance(value,dict) and "tabs_auto" not in value:
+            value={**value,"tabs_auto":False}
         if not isinstance(value,dict) or set(value)!=set(hints):raise ValueError("Invalid project fields")
         return kind(**{k:decode_job_value(v,hints[k]) for k,v in value.items()})
     if kind is float:
@@ -6882,6 +6885,8 @@ class App(tk.Tk):
         data["vars"].setdefault("outer_order_mode",OUTER_ORDER_CHOICES[0])
         data["vars"].setdefault("depth_first_order",False)
         data["vars"].setdefault("arc_fit_enabled",False)
+        data["vars"].setdefault("inner_tabs_enabled",False)
+        data["vars"].setdefault("inner_tab_count",2)
         outer_order_mode(data["vars"]["outer_order_mode"])
         if set(data["vars"])!=set(self.vars):raise ValueError("작업 설정 항목이 현재 버전과 맞지 않습니다.")
         for k,v in data["vars"].items():
