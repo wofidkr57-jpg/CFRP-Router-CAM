@@ -46,6 +46,11 @@ class OuterSupportTests(unittest.TestCase):
     c=rect(70,30,20,40,'R');s=settings(climb=climb,wall_finish=finish,onion_skin_enabled=finish)
     code=cam.generate_gcode([c],s)
     self.assertTrue(cam.parse_gcode_moves(code))
+ def test_shallow_outer_keeps_its_original_phase(self):
+  shallow=rect(5,5,10,10,'SHALLOW');shallow.target_depth=1.
+  center=rect(40,40,10,10,'CENTER');edge=rect(80,80,10,10,'EDGE')
+  seq,_=cam.support_outer_sequence([shallow,edge,center],settings())
+  self.assertEqual([c.object_name for c in seq],['SHALLOW','CENTER','EDGE'])
  def test_inputs_preserved(self):
   c=rect(70,30,20,40,'R');c.start_s=12;c.tabs=[10.,50.];before=copy.deepcopy(c)
   cam.generate_gcode([c],settings());self.assertEqual(c,before)

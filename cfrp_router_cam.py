@@ -2632,7 +2632,8 @@ def support_outer_sequence(ordered, cfg):
     of clamp retention. A U-shaped enclosure need not fully contain its guest.
     """
     from shapely.geometry import Polygon
-    outer=[c for c in ordered if c.closed and c.role=="outer" and c.operation=="profile"]
+    outer=[c for c in ordered if c.closed and c.role=="outer" and c.operation=="profile"
+           and (c.target_depth is None or c.target_depth>=float(cfg.get("stock",0))-EPS)]
     prefix=[c for c in ordered if not any(c is o for o in outer)]
     if not outer:return list(ordered),[]
     center=sheet_center_from_config(cfg)
@@ -6520,10 +6521,10 @@ class App(tk.Tk):
 
     def preview_support_order(self,ordered):
         try:
-            cfg={k:self.vars[k].get() for k in ('sheet_w','sheet_h')}
+            cfg={k:self.vars[k].get() for k in ('sheet_w','sheet_h','stock')}
             sheet_center_from_config(cfg)
         except (ValueError,tk.TclError):return ordered
-        key=(tuple((id(c),c.role,c.operation,tuple(c.points)) for c in ordered),cfg['sheet_w'],cfg['sheet_h'])
+        key=(tuple((id(c),c.role,c.operation,c.target_depth,tuple(c.points)) for c in ordered),cfg['sheet_w'],cfg['sheet_h'],cfg['stock'])
         if getattr(self,'support_order_cache_key',None)!=key:
             self.support_order_cache=support_outer_sequence(ordered,cfg)[0]
             self.support_order_cache_key=key
