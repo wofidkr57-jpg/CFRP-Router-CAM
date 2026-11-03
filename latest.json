@@ -1,6 +1,6 @@
 {
-  "version": "1.44",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.44/CFRP_Router_CAM.exe",
-  "sha256": "29cfbb8c5ba5409a3f629362f101f6352cc3659ee76b548fa0e0668263b3a2e1",
-  "message": "기계별 START/END·주차·교체 매크로와 가공 셋업을 이름별로 저장하고 상단에서 선택할 수 있습니다. 설정 탭에서 저장·새 이름 저장·이름 변경·삭제를 지원합니다. 기존 작업은 저장 당시 설정을 유지합니다. 실제 가공 전 기계별 원점·Z 기준과 NC를 확인하세요."
+  "version": "1.45",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.45/CFRP_Router_CAM.exe",
+  "sha256": "2b658f1f1411487fa23695c40bd4aa2fa38e3cc6b31a8b8e5d8d8590c138ac2b",
+  "message": "내부 관통 탭과 내부/외곽 개수 분리, 자동 탭 잔여 소재 2mm 검사. 기본 설정은 저장 버튼으로 저장합니다. 실제 가공 전 NC를 확인하세요."
 }
