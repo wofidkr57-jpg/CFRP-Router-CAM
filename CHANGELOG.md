@@ -275,3 +275,7 @@
 
 - Introduced verified GitHub updates and portable settings compatibility.
 
+
+## Unreleased - internal profile tabs
+- Opt-in internal through-profile tabs with separate internal/external counts.
+- Automatic placement excludes narrow areas and estimated remaining webs <=2mm, including cutter width; manual tabs remain unchanged.

@@ -69,7 +69,7 @@ PROFILE_VAR_KEYS = {
               "stock", "extra", "safe_z", "safe_z_auto", "lead", "approach_z", "path_tolerance",
               "passes", "arc_fit_enabled", "preflight_enabled", "preflight_z", "preflight_feed",
               "pocket_stay_down", "step_pockets", "pocket_stepover", "pocket_stepdown", "pocket_finish",
-              "tool_wear_enabled", "tool_wear_loss_per_10m", "tool_wear_min_d", "tab_count",
+              "tool_wear_enabled", "tool_wear_loss_per_10m", "tool_wear_min_d", "tab_count", "inner_tabs_enabled", "inner_tab_count",
               "tab_flat", "tab_remain", "tab_ramp", "tab_shape", "z_origin", "climb", "full_depth",
               "rapid_optimize", "depth_first_order", "outer_order_mode", "m8_enabled", "wall_finish",
               "onion_skin_enabled", "onion_split", "onion_split_percent", "finish_scope", "onion_skin",
@@ -661,6 +661,7 @@ class Contour:
     # Distinguish an intentional zero-tab choice from a newly-created contour
     # whose automatic tabs have not been populated yet.
     tabs_cleared: bool = False
+    tabs_auto: bool = False
     operation: str = "profile"
     pocket_holes: List[List[Point]] = field(default_factory=list)
     pocket_stock: List[Point] = field(default_factory=list)
@@ -2860,6 +2861,53 @@ def auto_tabs(contour: Contour, count: int, flat: float, ramp: float) -> List[fl
     return sorted(selected)
 
 
+def tabs_allowed(c: Contour, cfg: dict) -> bool:
+    return (c.closed and c.operation == "profile" and
+            (c.target_depth is None or c.target_depth >= float(cfg.get("stock",0))-EPS) and
+            ((c.role == "outer" and c.tabs_enabled) or
+             (c.role == "inner" and cfg.get("inner_tabs_enabled", False))))
+
+
+def safe_auto_tabs(c: Contour, contours: Sequence[Contour], cfg: dict) -> List[float]:
+    """Conservative local web check on nominal boundaries, including cutter width.
+
+    Only automatic tabs are filtered. A 2mm-or-thinner web is rejected.
+    The local arc containing the tab is excluded from the opposite-wall test.
+    """
+    from shapely.geometry import LineString
+    from shapely.ops import substring, unary_union
+    if not tabs_allowed(c, cfg): return []
+    count = int(cfg.get("inner_tab_count", 2) if c.role == "inner" else cfg.get("tab_count", 0))
+    if count <= 0: return []
+    flat, ramp = float(cfg["tab_flat"]), float(cfg["tab_ramp"])
+    span = flat / 2 + ramp
+    clearance = 2.0 + float(cfg["tool_d"]) + max(abs(float(cfg.get("inner_size_adjust",0))), abs(float(cfg.get("outer_size_adjust",0))))
+    ring = LineString(c.points + [c.points[0]])
+    total = ring.length
+    local = clearance + span + 0.01
+    if total <= 2 * local: return []
+    others = [LineString(o.points + [o.points[0]]) for o in contours
+              if o is not c and o.enabled and o.closed and len(o.points) >= 3]
+    neighboring = unary_union(others) if others else None
+    candidates = auto_tabs(c, max(count * 4, 16), flat, ramp)
+    accepted = []
+    for center in candidates:
+        if any(min(abs(center-v), total-abs(center-v)) < 2*span+0.5 for v in accepted): continue
+        valid = True
+        for delta in (-span, 0, span):
+            at = (center + delta) % total
+            point = ring.interpolate(at)
+            lo, hi = at-local, at+local
+            if lo < 0: opposite = substring(ring, hi, total+lo)
+            elif hi > total: opposite = substring(ring, hi-total, lo)
+            else: opposite = unary_union([substring(ring, 0, lo), substring(ring, hi, total)])
+            if point.distance(opposite) <= clearance + EPS or (neighboring is not None and point.distance(neighboring) <= clearance + EPS):
+                valid = False; break
+        if valid: accepted.append(center)
+        if len(accepted) == count: break
+    return sorted(accepted)
+
+
 def fmt(v: float) -> str:
     s = f"{v:.4f}".rstrip("0").rstrip(".")
     return "0" if s in ("-0", "") else s
@@ -3482,6 +3530,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
            f"(OUTER_ORDER_CENTER_SOURCE_Y_MM: {fmt(center[1])})"] if center is not None else []),
         f"(COOLANT_AIR_M8: {nc_yes_no(cfg.get('m8_enabled'))})",
         f"(TAB_COUNT_PER_OUTER: {int(cfg.get('tab_count',0))})",
+        f"(INNER_TABS: {bool(cfg.get('inner_tabs_enabled',False))}; COUNT: {int(cfg.get('inner_tab_count',2))}; AUTO_MIN_WEB_MM: 2)",
         f"(TAB_LENGTH_MM: {fmt(float(cfg.get('tab_flat',0.0)))})",
         f"(TAB_REMAINING_MM: {fmt(float(cfg.get('tab_remain',0.0)))})",
         f"(TAB_RAMP_MM: {fmt(float(cfg.get('tab_ramp',0.0)))})",
@@ -3673,8 +3722,8 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     def resolved_tab_source(c:Contour)->List[float]:
         """Return stored/automatic tabs unless the user explicitly chose zero."""
         if cfg.get("onion_split"):return []
-        if not c.tabs_enabled or c.tabs_cleared:return []
-        return list(c.tabs) if c.tabs else auto_tabs(c,cfg["tab_count"],cfg["tab_flat"],cfg["tab_ramp"])
+        if not tabs_allowed(c,cfg) or c.tabs_cleared:return []
+        return list(c.tabs) if c.tabs and not c.tabs_auto else safe_auto_tabs(c,contours,cfg)
 
     finish_feed=cfg["feed"]*cfg["finish_feed_pct"]/100.0
     def emit_finish_task(task,progress_value:Optional[float]=None,progress_message:str=""):
@@ -3745,7 +3794,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
         elif rapid_optimize and len(pts)>=2 and dist(current_xy,pts[-1])<dist(current_xy,pts[0]):
             pts.reverse()
         tabs=[];source_tabs=[]
-        if c.closed and c.role=="outer" and c.tabs_enabled and target>=stock-EPS:
+        if tabs_allowed(c,cfg) and target>=stock-EPS:
             source_tabs=resolved_tab_source(c)
             tabs=[nearest_path_distance(pts,point_at(c.points,s,True)[0],True)[1] for s in source_tabs]
         wall_finish=wall_finish_for(c,target,stock,cfg);use_onion=onion_skin_for(c,target,stock,cfg)
@@ -3760,7 +3809,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             rough_target=rough_target_for(target,stock,cfg,use_onion)
             rough_depths=[machine_z(rough_target*i/passes) for i in range(1,passes+1)]
             rough_tabs=[]
-            if c.role=="outer" and tabs and not use_onion:
+            if tabs and not use_onion:
                 rough_tabs=[nearest_path_distance(rough,point_at(c.points,s,True)[0],True)[1] for s in source_tabs]
             if stage!="finish":
                 emit_phase(c,rough,rough_depths,rough_tabs,cfg["feed"],
@@ -5784,7 +5833,10 @@ class App(tk.Tk):
             ttk.Entry(controls,width=12,textvariable=self.var(key,val)).grid(row=r,column=1,padx=5);r+=1
         ttk.Separator(controls).grid(row=r,columnspan=2,sticky="ew",pady=(7,5));r+=1
         ttk.Label(controls,text="탭 설정 / 배치").grid(row=r,columnspan=2,sticky="w");r+=1
+        ttk.Checkbutton(controls,text="내부 관통 윤곽 탭 사용",variable=self.var("inner_tabs_enabled",False,tk.BooleanVar)).grid(row=r,columnspan=2,sticky="w");r+=1
+        ttk.Label(controls,text="자동 탭: 좁은 곳 / 남는 살 2mm 이하 제외").grid(row=r,columnspan=2,sticky="w");r+=1
         for label,key,val,cls in (("탭 개수/외곽","tab_count",3,tk.IntVar),
+                                  ("탭 개수/내부","inner_tab_count",2,tk.IntVar),
                                   ("마이크로탭 길이 (mm)","tab_flat",1.0,tk.DoubleVar),
                                   ("탭 잔여두께 (mm)","tab_remain",0.20,tk.DoubleVar),
                                   ("탭 ramp (mm)","tab_ramp",0.35,tk.DoubleVar)):
@@ -5798,7 +5850,7 @@ class App(tk.Tk):
         self.manual_btn=ttk.Button(controls,text="수동 탭 추가: OFF",command=self.toggle_manual)
         self.manual_btn.grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
         ttk.Button(controls,text="수동 탭 모두 지우기",command=self.clear_tabs).grid(row=r,columnspan=2,sticky="ew",pady=2);r+=1
-        ttk.Label(controls,text="미리보기에서 외곽선을 클릭해\n수동 탭을 추가합니다.",foreground="#91a0b8").grid(row=r,columnspan=2,sticky="w",pady=5);r+=1
+        ttk.Label(controls,text="미리보기에서 탭을 넣을 윤곽선을 클릭해\n수동 탭을 추가합니다.",foreground="#91a0b8").grid(row=r,columnspan=2,sticky="w",pady=5);r+=1
         ttk.Separator(controls).grid(row=r,columnspan=2,sticky="ew",pady=(5,7));r+=1
         ttk.Label(controls, text="Z축 원점").grid(row=r, column=0, sticky="w")
         self.var("z_origin", "Top", tk.StringVar)
@@ -6323,7 +6375,7 @@ class App(tk.Tk):
                 raise ValueError("치수 보정의 절댓값은 예상 최소 공구 지름보다 작아야 합니다.")
         if cfg["passes"] < 1:
             raise ValueError("패스 수는 1 이상이어야 합니다.")
-        if (cfg["lead"] < 0 or cfg["tab_count"] < 0 or cfg["tab_flat"] < 0 or
+        if (cfg["lead"] < 0 or cfg["tab_count"] < 0 or cfg.get("inner_tab_count",2) < 0 or cfg["tab_flat"] < 0 or
                 cfg["tab_ramp"] < 0):
             raise ValueError("Lead, 탭 개수, 탭 길이와 ramp는 음수가 될 수 없습니다.")
         if cfg["extra"] < 0 or cfg["tab_remain"] < 0 or cfg["tab_remain"] >= cfg["stock"]:
@@ -6349,14 +6401,14 @@ class App(tk.Tk):
         machining_keys=("inner_size_adjust","outer_size_adjust","tool_d","tool_wear_enabled","tool_wear_loss_per_10m","tool_wear_min_d",
                         "rpm","feed","plunge","stock","extra","safe_z","safe_z_auto","approach_z","lead","passes",
                         "path_tolerance","arc_fit_enabled","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
-                        "tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
+                        "tab_count","inner_tabs_enabled","inner_tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
                         "full_depth","rapid_optimize","outer_order_mode","depth_first_order","sheet_w","sheet_h","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim",
                         "machine_home_enabled","machine_park_x","machine_park_y","machine_park_z",
                         "start_code","end_code","onion_split","onion_split_percent","onion_start_code","onion_end_code",
                         "tool_change_enabled","tool_change_limit_m","tool_change_macro","tool_change_return_z","tool_change_dwell")
         contour_key=tuple((tuple((round(x,7),round(y,7)) for x,y in c.points),c.closed,c.role,
-                           tuple(round(s,7) for s in c.tabs),c.layer,c.target_depth,c.tabs_enabled,
+                           tuple(round(s,7) for s in c.tabs),c.layer,c.target_depth,c.tabs_enabled,c.tabs_auto,
                            c.tabs_cleared,c.enabled,c.safety_excluded,round(c.start_s,7),c.cut_order,c.outer_cut_order,c.operation,repr(c.pocket_holes),repr(c.pocket_stock))
                           for c in self.contours)
         return hash((contour_key,tuple((key,repr(cfg.get(key))) for key in machining_keys)))
@@ -7742,7 +7794,8 @@ class App(tk.Tk):
         classify_contours(self.contours)
         for c in self.contours:
             if preserve_existing and (c.tabs or c.tabs_cleared):continue
-            c.tabs = auto_tabs(c, cfg["tab_count"], cfg["tab_flat"], cfg["tab_ramp"]) if c.role == "outer" and c.tabs_enabled else []
+            c.tabs = safe_auto_tabs(c, self.contours, cfg)
+            c.tabs_auto = True
             c.tabs_cleared = False
         self.redraw()
 
@@ -7795,7 +7848,7 @@ class App(tk.Tk):
         self.selected.enabled = self.sel_enabled.get()
         self.selected.safety_excluded=self.sel_safety_excluded.get()
         classify_contours(self.contours)
-        if not self.selected.tabs_enabled or self.selected.role!="outer":
+        if not tabs_allowed(self.selected,self.config()):
             self.selected.tabs = []
             if self.selected.role!="outer":self.selected.tabs_cleared=False
         order_text=str(self.selected.cut_order) if self.selected.cut_order is not None else "자동"
@@ -8749,10 +8802,10 @@ class App(tk.Tk):
                 else:
                     self.join_selected_lines(self.join_first, best[1])
             elif self.manual_mode:
-                if best[1].closed and best[1].role == "outer" and best[1].tabs_enabled:
+                if tabs_allowed(best[1],self.config()):
                     self.push_undo("수동 탭 추가")
                     self.manual_mode=False;self.manual_btn.configure(text="수동 탭 추가: OFF")
-                    best[1].tabs.append(best[2]);best[1].tabs.sort();best[1].tabs_cleared=False;self.redraw()
+                    best[1].tabs_auto=False;best[1].tabs.append(best[2]);best[1].tabs.sort();best[1].tabs_cleared=False;self.redraw()
                     self.status.set(f"수동 탭 추가: {len(best[1].tabs)}개")
             else:
                 additive=bool(event.state & (0x0001|0x0004))
