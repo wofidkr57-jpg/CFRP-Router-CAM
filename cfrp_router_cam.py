@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.49"
+APP_VERSION = "1.50"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 PROFILES_FILENAME = "profiles.json"
@@ -2754,12 +2754,36 @@ def checked_outer_lead(c,route,cfg,contours,tool_d):
 
 
 def outer_start_route(c,route,cfg,contours,tool_d):
+    # Explicit user starts take priority; retain cutter-clearance validation.
+    if c.start_s>EPS:
+        p=point_at(c.points,c.start_s,True)[0]
+        candidate=rotate_closed_path(route,nearest_path_distance(route,p,True)[1])
+        if checked_outer_lead(c,candidate,cfg,contours,tool_d) is not None:return candidate
+        raise ValueError(f"{c.object_name or c.layer}: 지정 시작점의 진입/이탈 공간을 확인하세요.")
     tabs=[]
     if tabs_allowed(c,cfg) and not c.tabs_cleared and not cfg.get('onion_split'):
         tabs=list(c.tabs) if c.tabs and not c.tabs_auto else safe_auto_tabs(c,contours,cfg)
     tab_points=[point_at(c.points,t,True)[0] for t in tabs]
-    exclusion=float(cfg.get('tab_flat',0))/2+float(cfg.get('tab_ramp',0))+tool_d/2+max(float(cfg['lead']),tool_d/2)
-    for _,_,s,_ in outer_boundary_candidates(route,cfg):
+    span=float(cfg.get('tab_flat',0))/2+float(cfg.get('tab_ramp',0))
+    exclusion=span+tool_d/2+max(float(cfg['lead']),tool_d/2)
+    candidates=[]
+    if tab_points:
+        from shapely.geometry import Polygon,Point as SP
+        hull=Polygon(route).convex_hull.boundary
+        total=path_length(route,True)
+        cx,cy=sheet_center_from_config(cfg);w,h=cx*2,cy*2
+        # Distances follow the actual cutting direction and compensated path.
+        # Reach the beginning of the tab ramp after 5mm; try 10mm if blocked.
+        for gap in (5.,10.):
+            for p in tab_points:
+                s=(nearest_path_distance(route,p,True)[1]-span-gap)%total
+                q=point_at(route,s,True)[0]
+                if hull.distance(SP(q))>.02:continue
+                edge=min(abs(q[0]),abs(w-q[0]),abs(q[1]),abs(h-q[1]))
+                candidates.append((gap,edge,s))
+    starts=[s for _,_,s in sorted(candidates)]
+    starts.extend(s for _,_,s,_ in outer_boundary_candidates(route,cfg))
+    for s in starts:
         candidate=rotate_closed_path(route,s)
         if any(dist(candidate[0],p)<exclusion for p in tab_points):continue
         if checked_outer_lead(c,candidate,cfg,contours,tool_d) is not None:return candidate
@@ -3227,6 +3251,7 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
     if c.closed and len(c.points)>=3:
         route,_,_=compensated_route(c,tool_d,cfg.get("auto_trim",False),cfg=cfg);route_len=path_length(route,True)
         if cfg.get("outer_safe_strategy") and c.role=="outer":
+            route=reverse_if_needed(route,not cfg['climb'])
             route=outer_start_route(c,route,cfg,cfg.get("_outer_context",[c]),tool_d)
             plan=checked_outer_lead(c,route,cfg,cfg.get("_outer_context",[c]),tool_d)
         else:plan=lead_plan(c,route,cfg["lead"])
@@ -6044,7 +6069,7 @@ class App(tk.Tk):
         self.outer_order_combo=ttk.Combobox(controls,width=24,state="readonly",textvariable=self.vars["outer_order_mode"],values=OUTER_ORDER_CHOICES)
         self.outer_order_combo.grid(row=r,columnspan=2,sticky="ew");r+=1
         self.outer_order_combo.bind("<<ComboboxSelected>>",lambda event:self.redraw())
-        ttk.Label(controls,text="안전 모드: 수동 시작점/외곽순번보다 우선\n시작 위치는 G-code 생성 시 확정",foreground="#91a0b8",wraplength=240).grid(row=r,columnspan=2,sticky="w",pady=(1,3));r+=1
+        ttk.Label(controls,text="수동 시작점 우선 · 자동은 탭 5mm 전\n중앙/안쪽 순서는 수동 순번보다 우선",foreground="#91a0b8",wraplength=240).grid(row=r,columnspan=2,sticky="w",pady=(1,3));r+=1
         ttk.Checkbutton(controls, text="Full-depth 1 pass", variable=self.vars["full_depth"]).grid(row=r, columnspan=2, sticky="w"); r += 1
         self.var("m8_enabled",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="절삭유/에어 사용 (M8 ON → M9 OFF)",variable=self.vars["m8_enabled"]).grid(row=r,columnspan=2,sticky="w",pady=(2,1));r+=1
@@ -8851,7 +8876,7 @@ class App(tk.Tk):
             for s in c.tabs:
                 p,_,_=point_at(c.points,s,c.closed); x,y=self.transform(p)
                 self.canvas.create_oval(x-5,y-5,x+5,y+5,fill="#ff9f1c",outline="",tags=(group_tag,) if group_tag else ())
-            if c.closed and c.start_s > EPS and not (c.role=="outer" and self.vars["outer_safe_strategy"].get()):
+            if c.closed and c.start_s > EPS:
                 p,_,_=point_at(c.points,c.start_s,True); x,y=self.transform(p)
                 direction=start_cut_direction(c,self.vars["climb"].get())
                 if direction is None:

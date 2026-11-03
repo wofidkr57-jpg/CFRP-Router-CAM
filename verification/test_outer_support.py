@@ -51,6 +51,25 @@ class OuterSupportTests(unittest.TestCase):
   center=rect(40,40,10,10,'CENTER');edge=rect(80,80,10,10,'EDGE')
   seq,_=cam.support_outer_sequence([shallow,edge,center],settings())
   self.assertEqual([c.object_name for c in seq],['SHALLOW','CENTER','EDGE'])
+ def test_tab_start_gap_follows_both_cut_directions(self):
+  for climb in (True,False):
+   c=rect(70,30,20,40,'R');c.tabs=[40.];s=settings(climb=climb,tab_count=1)
+   route=cam._gcode_route_worker((1,c,s,2.,.2,2.))[2]
+   r=cam.outer_start_route(c,route,s,[c],2)
+   tab=cam.nearest_path_distance(r,cam.point_at(c.points,40.,True)[0],True)[1]
+   self.assertAlmostEqual(tab-s['tab_flat']/2-s['tab_ramp'],5.,places=6)
+   code=cam.generate_gcode([c],s)
+   self.assertIn('tabs=1',code)
+ def test_manual_start_retained_in_automatic_mode(self):
+  c=rect(70,30,20,40,'R');c.tabs=[40.];c.start_s=10.;s=settings(tab_count=1)
+  route=cam._gcode_route_worker((1,c,s,2.,.2,2.))[2]
+  expected=cam.point_at(route,cam.nearest_path_distance(route,cam.point_at(c.points,10.,True)[0],True)[1],True)[0]
+  self.assertEqual(cam.outer_start_route(c,route,s,[c],2)[0],expected)
+ def test_cleared_tabs_do_not_change_start(self):
+  c=rect(70,30,20,40,'R');c.tabs=[40.];c.tabs_cleared=True;s=settings(tab_count=1)
+  route=cam._gcode_route_worker((1,c,s,2.,.2,2.))[2]
+  r=cam.outer_start_route(c,route,s,[c],2);c.tabs=[]
+  self.assertEqual(r,cam.outer_start_route(c,route,s,[c],2))
  def test_inputs_preserved(self):
   c=rect(70,30,20,40,'R');c.start_s=12;c.tabs=[10.,50.];before=copy.deepcopy(c)
   cam.generate_gcode([c],settings());self.assertEqual(c,before)
