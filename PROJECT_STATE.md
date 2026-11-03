@@ -1,5 +1,14 @@
 # CFRP Router CAM 프로젝트 상태
 
+## 현재 배포 — V1.49 (2026-11-03)
+- 소스 태그 `v1.49` / `990e2f6`, 업데이트 매니페스트 `e4d6140`. Actions `41569831044` 전체 회귀184개·GUI·Windows 빌드·Defender·릴리스 성공.
+- 공개 EXE2종 SHA256 `c7fc7a2472cfe51298fdce143d7739f3612eb083a18561a5919e5e7dbad671e2` 일치. 소스ZIP71개 파일이 태그와 일치, 개인 프로파일/작업/NC 미포함.
+- 사용자 CNC 폴더에 `CFRP_Router_CAM_V1.49.exe` 복사/읽기 해시 확인. 사용 중인 V1.48/일반 EXE와 프로파일은 유지. 사용하지 않는 V1.46/1.47 EXE는 같은 폴더 `old`로 이동하고 해시 보존 확인. OneDrive 서버 동기화/신규 EXE 사용자 실행/실가공 미검증.
+- 새 옵션 기본 ON: 관통 외곽 중앙·안쪽 우선, 바깥면 진입/이탈 및 공구 폭/탭 검사, 소재 지지 상실 후보 경고. OFF 시 기존 수동 순번/시작점. 단차와 내부 가공 단계 보존. 실제 클램프/탭 강도 판정은 포함하지 않음.
+- 검증 근거는 Git 제외 `local-handoff/release-v1.49/verified.json`, `ci.log`, `local-handoff/v149-tests.log`.
+
+아래는 이전 작업·배포 기록이며 현재 상태는 위 항목을 기준으로 한다.
+
 - 기준일: 2026-10-13
 - 목적: DXF/STEP 기반 CFRP 2D/2.5D 가공 경로와 Mach3 NC 생성.
 - 정본 작업 위치: 로컬 `Documents/CFRP-Router-CAM` (OneDrive 외부). `cfrp_router_cam.py`가 단일 소스 정본이며 ChatGPT 프로젝트 미러의 `sources/`는 읽기 전용이다.
