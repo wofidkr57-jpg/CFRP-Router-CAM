@@ -1,6 +1,6 @@
 {
-  "version": "1.45",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.45/CFRP_Router_CAM.exe",
-  "sha256": "2b658f1f1411487fa23695c40bd4aa2fa38e3cc6b31a8b8e5d8d8590c138ac2b",
-  "message": "내부 관통 탭과 내부/외곽 개수 분리, 자동 탭 잔여 소재 2mm 검사. 기본 설정은 저장 버튼으로 저장합니다. 실제 가공 전 NC를 확인하세요."
+  "version": "1.46",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.46/CFRP_Router_CAM.exe",
+  "sha256": "bb517f646ea342cb2fea5f3f9340e380c9a7ca20e08f7e84082082fd9f3a99e1",
+  "message": "구버전 작업 파일 열기 오류를 수정했습니다. 기존 탭과 설정을 보존하며 내부 탭은 기본 OFF로 읽습니다."
 }
