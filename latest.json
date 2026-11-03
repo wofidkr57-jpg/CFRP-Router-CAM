@@ -1,6 +1,6 @@
 {
-  "version": "1.47",
-  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.47/CFRP_Router_CAM.exe",
-  "sha256": "ac0b5af3292ac04f1e1cab60324b342e8901f9364ad776b1218203eef4609e94",
-  "message": "자동 탭이 한쪽에 몰리는 문제를 수정했습니다. 기존 작업에서 자동 탭 다시 배치를 누르세요. 수동 탭 재배치에 주의하세요."
+  "version": "1.48",
+  "download_url": "https://github.com/wofidkr57-jpg/CFRP-Router-CAM/releases/download/v1.48/CFRP_Router_CAM.exe",
+  "sha256": "475ef13479bbe142a5fa143c72e53c9aeccce0d280f3fae919d5fbd8b1d3dba8",
+  "message": "기존 프로파일 목록이 표시되지 않는 호환성 오류를 수정했습니다. 기존 프로파일 원본과 설정을 보존합니다."
 }
