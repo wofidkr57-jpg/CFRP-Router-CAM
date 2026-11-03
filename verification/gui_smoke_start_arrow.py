@@ -13,6 +13,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cam.App.executable_dir = lambda self: tmp
     cam.App.appdata_settings_path = lambda self: str(Path(tmp) / "fallback.json")
     app = cam.App()
+    app.vars["outer_safe_strategy"].set(False)
     try:
         app.set_single_part([cam.Contour([(0, 0), (40, 0), (40, 20), (0, 20)])], "square.dxf")
         app.contours[0].start_s = 10.

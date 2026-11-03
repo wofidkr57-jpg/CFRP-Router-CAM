@@ -40,7 +40,7 @@ with tempfile.TemporaryDirectory() as tmp:
             elif isinstance(obj,list):
                 for v in obj:strip_provenance(v)
         strip_provenance(legacy)
-        legacy['vars'].pop('inner_tabs_enabled');legacy['vars'].pop('inner_tab_count')
+        legacy['vars'].pop('inner_tabs_enabled');legacy['vars'].pop('inner_tab_count');legacy['vars'].pop('outer_safe_strategy')
         legacy_path=Path(tmp)/'legacy.cfrpcam'
         legacy_path.write_text(json.dumps(legacy),encoding='utf-8');legacy_bytes=legacy_path.read_bytes()
         with mock.patch.object(cam.filedialog,'askopenfilename',return_value=str(legacy_path)):

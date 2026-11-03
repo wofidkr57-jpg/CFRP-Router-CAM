@@ -15,6 +15,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cam.App.executable_dir = lambda self: tmp
     cam.App.appdata_settings_path = lambda self: str(Path(tmp) / "fallback.json")
     app = cam.App()
+    app.vars["outer_safe_strategy"].set(False)
     try:
         contours = []
         for i in range(5):

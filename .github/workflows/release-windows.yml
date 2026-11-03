@@ -110,6 +110,8 @@ jobs:
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_shortcuts.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
+          python verification/gui_smoke_outer_support.py
+          if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_outer_order.py
           if ($LASTEXITCODE -ne 0) { throw "GUI validation failed." }
           python verification/gui_smoke_multi_outer_drag.py
@@ -188,7 +190,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "기존 프로파일 목록이 표시되지 않는 호환성 오류를 수정했습니다. 기존 프로파일 원본과 설정을 보존합니다."
+            message = "외곽 바깥면 진입/이탈, 중앙·안쪽 우선 순서와 지지 상실 경고를 추가했습니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 

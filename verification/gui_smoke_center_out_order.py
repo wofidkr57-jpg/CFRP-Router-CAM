@@ -11,6 +11,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cam.App.executable_dir=lambda self:tmp
     cam.App.appdata_settings_path=lambda self:str(Path(tmp)/'fallback.json')
     app=cam.App()
+    app.vars["outer_safe_strategy"].set(False)
     try:
         app.update();cs=array()
         for c in cs:c.points=[(x+40,y+40) for x,y in c.points]
@@ -72,7 +73,8 @@ with tempfile.TemporaryDirectory() as tmp:
         # Settings and job files preserve the choice and sheet dimensions, including opposite-language enums.
         app.save_settings();doc=json.loads(json.dumps(app.job_document()));path=Path(tmp)/'roundtrip.cfrpcam'
         path.write_text(json.dumps(doc),encoding='utf-8')
-        app.destroy();app=cam.App();app.update()
+        app.destroy();app=cam.App()
+        app.vars["outer_safe_strategy"].set(False);app.update()
         assert cam.outer_order_mode(app.vars['outer_order_mode'].get())=='center_ccw'
         with mock.patch.object(cam.filedialog,'askopenfilename',return_value=str(path)):assert app.open_job()
         assert cam.outer_order_mode(app.config()['outer_order_mode'])=='center_ccw'
@@ -86,7 +88,8 @@ with tempfile.TemporaryDirectory() as tmp:
         except ValueError:pass
         else:raise AssertionError('invalid mode accepted')
         app.vars['outer_order_mode'].set('중앙 → 바깥 (시계)');app.save_settings();app.destroy()
-        os.environ['CFRP_CAM_LANGUAGE']='ko';app=cam.App();app.update()
+        os.environ['CFRP_CAM_LANGUAGE']='ko';app=cam.App()
+        app.vars["outer_safe_strategy"].set(False);app.update()
         assert cam.outer_order_mode(app.vars['outer_order_mode'].get())=='center_cw'
         assert app.vars['outer_order_mode'].get()=='중앙 → 바깥 (시계)'
         print('CENTER_OUT_ORDER_GUI_OK',json.dumps(results))

@@ -9,6 +9,7 @@ with tempfile.TemporaryDirectory() as tmp:
     cam.App.executable_dir=lambda self:tmp
     cam.App.appdata_settings_path=lambda self:str(Path(tmp)/'fallback.json')
     app=cam.App()
+    app.vars["outer_safe_strategy"].set(False)
     try:
         app.example();app.vars['array_qty'].set(2);app.toggle_manual_array();app.toggle_manual_array();app.update()
         outer=[c for c in app.contours if c.role=='outer'];first=outer[-1]

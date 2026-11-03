@@ -49,6 +49,7 @@ with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"CFRP_CAM
             for payload in old_library["setup"].values():
                 payload["vars"].pop("inner_tabs_enabled",None)
                 payload["vars"].pop("inner_tab_count",None)
+                payload["vars"].pop("outer_safe_strategy",None)
             old_bytes=json.dumps(old_library).encode("utf-8")
             (root/"profiles.json").write_bytes(old_bytes)
             app.load_profiles()

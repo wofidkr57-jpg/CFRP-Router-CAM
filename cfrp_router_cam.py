@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.48"
+APP_VERSION = "1.49"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 PROFILES_FILENAME = "profiles.json"
@@ -71,7 +71,7 @@ PROFILE_VAR_KEYS = {
               "pocket_stay_down", "step_pockets", "pocket_stepover", "pocket_stepdown", "pocket_finish",
               "tool_wear_enabled", "tool_wear_loss_per_10m", "tool_wear_min_d", "tab_count", "inner_tabs_enabled", "inner_tab_count",
               "tab_flat", "tab_remain", "tab_ramp", "tab_shape", "z_origin", "climb", "full_depth",
-              "rapid_optimize", "depth_first_order", "outer_order_mode", "m8_enabled", "wall_finish",
+              "rapid_optimize", "depth_first_order", "outer_order_mode", "outer_safe_strategy", "m8_enabled", "wall_finish",
               "onion_skin_enabled", "onion_split", "onion_split_percent", "finish_scope", "onion_skin",
               "finish_allowance", "finish_feed_pct", "tool_change_enabled", "tool_change_limit_m"),
 }
@@ -2625,6 +2625,146 @@ def center_out_outer_sequence(contours:Sequence[Contour],clockwise:bool=True,lay
     return [contours[i] for i in sorted(range(len(contours)),key=key)]
 
 
+def support_outer_sequence(ordered, cfg):
+    """Centre-first with inner-part-before-surrounding-part dependencies.
+
+    Convex-envelope relationships are conservative nesting hints, not proof
+    of clamp retention. A U-shaped enclosure need not fully contain its guest.
+    """
+    from shapely.geometry import Polygon
+    outer=[c for c in ordered if c.closed and c.role=="outer" and c.operation=="profile"]
+    prefix=[c for c in ordered if not any(c is o for o in outer)]
+    if not outer:return list(ordered),[]
+    center=sheet_center_from_config(cfg)
+    polygons={id(c):Polygon(c.points).buffer(0) for c in outer}
+    needs={id(c):set() for c in outer};pairs=[]
+    for host in outer:
+        hp=polygons[id(host)];envelope=hp.convex_hull
+        for guest in outer:
+            if guest is host:continue
+            gp=polygons[id(guest)]
+            if gp.is_empty or hp.is_empty:continue
+            # True nested parts and open U-shaped surrounds. Require most of
+            # the guest envelope inside, avoiding mere nearby bounding boxes.
+            overlap=envelope.intersection(gp).area
+            inside=hp.covers(gp) and hp.area>gp.area+EPS
+            cavity=(hp.intersection(gp).area<=EPS and envelope.covers(gp.representative_point()) and overlap>gp.area*.5)
+            if inside or cavity:
+                needs[id(host)].add(id(guest));pairs.append((guest,host))
+    def key(c):
+        b=polygons[id(c)].bounds or (0.,0.,0.,0.)
+        return (dist(((b[0]+b[2])/2,(b[1]+b[3])/2),center),ordered.index(c))
+    pending=list(outer);done=set();result=[];cycles=[]
+    while pending:
+        ready=[c for c in pending if needs[id(c)]<=done]
+        if not ready:
+            cycles=list(pending);ready=pending
+        chosen=min(ready,key=key);result.append(chosen);done.add(id(chosen));pending.remove(chosen)
+    return prefix+result,[(a,b,"enclosure") for a,b in pairs]+[(c,c,"cycle") for c in cycles]
+
+
+def planned_contours(contours,cfg,start_point=(0.,0.)):
+    ordered=ordered_contours(contours,bool(cfg.get("rapid_optimize",True)),start_point,
+                             cfg.get("outer_order_mode","nearest"),ordering_sheet_center(cfg),
+                             bool(cfg.get("depth_first_order",False)))
+    return support_outer_sequence(ordered,cfg)[0] if cfg.get("outer_safe_strategy",False) else ordered
+
+
+def support_disconnect_warnings(sequence,cfg):
+    """2D stock connectivity after through cuts; tabs/clamps are not assumed.
+
+    A warning is conservative: it predicts loss of connection to the sheet
+    perimeter, not actual motion. Open cuts and partial-depth features cannot
+    reliably establish connectivity and are not simulated here.
+    """
+    from shapely.geometry import Polygon,LineString,box
+    from shapely.ops import unary_union
+    w,h=2*sheet_center_from_config(cfg)[0],2*sheet_center_from_config(cfg)[1]
+    stock=box(0,0,w,h);edge=stock.boundary;material=stock
+    outers=[c for c in sequence if c.closed and c.role=="outer" and c.operation=="profile"]
+    solids={id(c):Polygon(c.points).buffer(0) for c in outers}
+    inners=[Polygon(c.points).buffer(0) for c in sequence if c.closed and c.role=="inner" and c.operation=="profile"]
+    probes={}
+    for c in outers:
+        solid=solids[id(c)]
+        holes=[p for p in inners if solid.covers(p)]
+        if holes:solid=solid.difference(unary_union(holes))
+        if not solid.is_empty:probes[id(c)]=solid.representative_point()
+    pending=list(outers);warnings=[];seen=set()
+    for c in sequence:
+        if not c.closed or c.operation!="profile" or (c.target_depth is not None and c.target_depth<float(cfg['stock'])-EPS):continue
+        route,_,_=compensated_route(c,cfg['tool_d'],cfg.get('auto_trim',False),cfg=cfg)
+        kerf=LineString(route+[route[0]]).buffer(float(cfg['tool_d'])/2)
+        material=material.difference(kerf)
+        if c in pending:pending.remove(c)
+        pieces=list(material.geoms) if hasattr(material,'geoms') else [material]
+        anchored=[p for p in pieces if p.intersection(edge).length>EPS]
+        for other in pending:
+            point=probes.get(id(other))
+            if point is not None and id(other) not in seen and not any(p.covers(point) for p in anchored):
+                warnings.append((other,c,"disconnect"));seen.add(id(other))
+    return warnings
+
+
+def outer_boundary_candidates(route,cfg):
+    from shapely.geometry import Polygon,Point as SP
+    hull=Polygon(route).convex_hull.boundary
+    cx,cy=sheet_center_from_config(cfg);w,h=cx*2,cy*2
+    candidates=[];run=0.
+    for i,a in enumerate(route):
+        b=route[(i+1)%len(route)];length=dist(a,b)
+        if length<=EPS:continue
+        for fraction in (.5,.25,.75,.125,.875):
+            mid=(a[0]+(b[0]-a[0])*fraction,a[1]+(b[1]-a[1])*fraction)
+            if hull.distance(SP(mid))<=.02:
+                edge=min(abs(mid[0]),abs(w-mid[0]),abs(mid[1]),abs(h-mid[1]))
+                candidates.append((edge,-length+abs(fraction-.5),run+length*fraction,mid))
+        run+=length
+    return sorted(candidates)
+
+
+def checked_outer_lead(c,route,cfg,contours,tool_d):
+    from shapely.geometry import Polygon,LineString
+    length=max(float(cfg['lead']),float(tool_d)/2)
+    p0,p1=route[:2]
+    tx,ty=p1[0]-p0[0],p1[1]-p0[1];ln=math.hypot(tx,ty)
+    if ln<=EPS:return None
+    tx,ty=tx/ln,ty/ln;nx,ny=-ty,tx
+    tolerance=abs(float(cfg.get('outer_size_adjust',0)))/2+.03
+    obstacles=[Polygon(c.points).buffer(-tolerance)]
+    for other in contours:
+        if other is c or not other.enabled or other.role!='outer' or not other.closed:continue
+        op=Polygon(other.points).buffer(0)
+        for h in contours:
+            if h.enabled and h.closed and h.role=='inner':
+                hole=Polygon(h.points).buffer(0)
+                if op.covers(hole):op=op.difference(hole)
+        obstacles.append(op.buffer(-.03))
+    # Try both sides: centre-only validation can select an arc whose cutter
+    # edge crosses the finished part even though its centre stays outside.
+    for radius in (length,length*.75,length*.5):
+        for side in (1.,-1.):
+            center=(p0[0]+side*nx*radius,p0[1]+side*ny*radius)
+            entry=(center[0]-tx*radius,center[1]-ty*radius)
+            plan=LeadPlan(entry,'arc-outside',center,clockwise=side<0)
+            sweep=LineString(lead_arc_points(plan,p0,48)).buffer(tool_d/2)
+            if all(sweep.intersection(obstacle).area<=.001 for obstacle in obstacles):return plan
+    return None
+
+
+def outer_start_route(c,route,cfg,contours,tool_d):
+    tabs=[]
+    if tabs_allowed(c,cfg) and not c.tabs_cleared and not cfg.get('onion_split'):
+        tabs=list(c.tabs) if c.tabs and not c.tabs_auto else safe_auto_tabs(c,contours,cfg)
+    tab_points=[point_at(c.points,t,True)[0] for t in tabs]
+    exclusion=float(cfg.get('tab_flat',0))/2+float(cfg.get('tab_ramp',0))+tool_d/2+max(float(cfg['lead']),tool_d/2)
+    for _,_,s,_ in outer_boundary_candidates(route,cfg):
+        candidate=rotate_closed_path(route,s)
+        if any(dist(candidate[0],p)<exclusion for p in tab_points):continue
+        if checked_outer_lead(c,candidate,cfg,contours,tool_d) is not None:return candidate
+    raise ValueError(f"{c.object_name or c.layer} #{c.instance_id}: 바깥면 진입/이탈 공간이 없습니다. 간격 또는 배치를 조정하세요.")
+
+
 def ordered_contours(contours: Sequence[Contour],rapid_optimize:bool=True,
                      start_point:Point=(0.0,0.0),outer_order="nearest",
                      sheet_center:Optional[Point]=None,depth_first:bool=False) -> List[Contour]:
@@ -3085,7 +3225,10 @@ def contour_cut_metrics(c:Contour,cfg:dict,stock:float,extra:float,tool_d:float
     target=min(max(c.target_depth if c.target_depth is not None else stock+extra,.01),stock+extra)
     if c.closed and len(c.points)>=3:
         route,_,_=compensated_route(c,tool_d,cfg.get("auto_trim",False),cfg=cfg);route_len=path_length(route,True)
-        plan=lead_plan(c,route,cfg["lead"])
+        if cfg.get("outer_safe_strategy") and c.role=="outer":
+            route=outer_start_route(c,route,cfg,cfg.get("_outer_context",[c]),tool_d)
+            plan=checked_outer_lead(c,route,cfg,cfg.get("_outer_context",[c]),tool_d)
+        else:plan=lead_plan(c,route,cfg["lead"])
         lead_one=(math.pi*.5*dist(plan.entry,plan.center)) if plan.center is not None else dist(plan.entry,route[0])
     else:
         route=list(c.points);route_len=c.length;lead_one=0.0
@@ -3546,6 +3689,7 @@ def gcode_settings_header(cfg:dict,active:Sequence[Contour],origin:Point,
            f"(OUTER_ORDER_CENTER_SOURCE_X_MM: {fmt(center[0])})",
            f"(OUTER_ORDER_CENTER_SOURCE_Y_MM: {fmt(center[1])})"] if center is not None else []),
         f"(COOLANT_AIR_M8: {nc_yes_no(cfg.get('m8_enabled'))})",
+        f"(OUTER_SAFE_STRATEGY: {bool(cfg.get('outer_safe_strategy',False))}; CENTRE/ENCLOSED FIRST; OUTWARD START/END)",
         f"(TAB_COUNT_PER_OUTER: {int(cfg.get('tab_count',0))})",
         f"(INNER_TABS: {bool(cfg.get('inner_tabs_enabled',False))}; COUNT: {int(cfg.get('inner_tab_count',2))}; AUTO_MIN_WEB_MM: 2)",
         f"(TAB_LENGTH_MM: {fmt(float(cfg.get('tab_flat',0.0)))})",
@@ -3633,9 +3777,9 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     override=cfg.get("_xy_origin_override")
     origin_x,origin_y=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
     rapid_optimize=bool(cfg.get("rapid_optimize",True))
-    ordered=ordered_contours(active,rapid_optimize,(origin_x,origin_y),cfg.get("outer_order_mode","nearest"),
-                             sheet_center=ordering_sheet_center(cfg),depth_first=bool(cfg.get("depth_first_order",False)))
+    ordered=planned_contours(active,cfg,(origin_x,origin_y))
     if stage=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
+    if cfg.get("outer_safe_strategy"):cfg["_outer_context"]=active
     change_indices,wear_plan,tool_loads=tool_replacement_plan(ordered,cfg,stock,extra)
     pocket_errors=pocket_job_issues(contours,cfg,{id(c):d for c,(d,_) in zip(ordered,wear_plan)})
     if pocket_errors:raise ValueError("\n".join(pocket_errors))
@@ -3686,10 +3830,13 @@ def generate_gcode(contours: List[Contour], cfg: dict,
     out.extend(preflight_gcode(active,cfg,(origin_x,origin_y)))
     current_xy:Point=(origin_x,origin_y)
     def emit_phase(c:Contour,route:List[Point],depths:Sequence[float],tab_distances:Sequence[float],
-                   feed:float,label:str,sink:Optional[List[str]]=None)->str:
+                   feed:float,label:str,sink:Optional[List[str]]=None,lead_tool_d:Optional[float]=None)->str:
         nonlocal current_xy,returning_from_change
         dst=out if sink is None else sink
         plan=lead_plan(c,route,cfg["lead"]) if c.closed else LeadPlan(route[0],"none")
+        if cfg.get("outer_safe_strategy") and c.closed and c.role=="outer":
+            plan=checked_outer_lead(c,route,cfg,active,float(lead_tool_d if lead_tool_d is not None else effective_d))
+            if plan is None:raise ValueError(f"{c.object_name or c.layer}: 바깥면 진입/이탈 공간을 확인하세요.")
         shifted=[(p[0]-origin_x,p[1]-origin_y) for p in route]
         lead=(plan.entry[0]-origin_x,plan.entry[1]-origin_y)
         center=None if plan.center is None else (plan.center[0]-origin_x,plan.center[1]-origin_y)
@@ -3727,7 +3874,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
                 dst.extend(cut_xyz_lines(xyz,feed,tolerance,arc_fit))
             else:dst.extend(cut_xyz_lines([(x,y,start_z) for x,y in shifted],feed,tolerance,arc_fit))
             if pi!=len(depths) and not c.closed:dst.extend((f"G0 Z{fmt(safe_machine_z)}",f"G0 X{fmt(lead[0])} Y{fmt(lead[1])}"))
-        if c.closed and cfg["lead"]>0:
+        if c.closed and (cfg["lead"]>0 or (cfg.get("outer_safe_strategy") and c.role=="outer")):
             if center is not None:
                 code="G3" if plan.clockwise else "G2"
                 dst.append(f"{code} X{fmt(lead[0])} Y{fmt(lead[1])} I{fmt(center[0]-p0[0])} J{fmt(center[1]-p0[1])} F{fmt(feed)}")
@@ -3744,17 +3891,17 @@ def generate_gcode(contours: List[Contour], cfg: dict,
 
     finish_feed=cfg["feed"]*cfg["finish_feed_pct"]/100.0
     def emit_finish_task(task,progress_value:Optional[float]=None,progress_message:str=""):
-        ci,c,pts,target,tabs,order_note,object_note,trimmed,actual_allowance,wall_finish,use_onion=task
+        ci,c,pts,target,tabs,order_note,object_note,trimmed,actual_allowance,wall_finish,use_onion,finish_tool_d=task
         if progress_value is not None:report(progress_value,progress_message)
         out.append(f"(Finish contour {ci}: {c.role}, order={order_note}, layer={nc_ascii_text(c.layer)}, depth={fmt(target)}, allowance={fmt(actual_allowance)}, tabs={len(tabs)}, trimmed={trimmed}{nc_ascii_text(object_note)})")
-        if rapid_optimize and c.start_s<=EPS:
+        if rapid_optimize and c.start_s<=EPS and not (cfg.get("outer_safe_strategy") and c.role=="outer"):
             pts=rotate_closed_path(pts,nearest_path_distance(pts,current_xy,True)[1])
             if c.role=="outer":
                 source_tabs=resolved_tab_source(c)
                 tabs=[nearest_path_distance(pts,point_at(c.points,s,True)[0],True)[1] for s in source_tabs]
         if wall_finish:label="microtab outer finish" if c.role=="outer" else "inner wall finish"
         else:label="onion-skin cleanup"
-        emit_phase(c,pts,[machine_z(target)],tabs,finish_feed,label+" - nominal wall/full depth")
+        emit_phase(c,pts,[machine_z(target)],tabs,finish_feed,label+" - nominal wall/full depth",lead_tool_d=finish_tool_d)
 
     prepared_routes=prepare_gcode_routes(
         ordered,cfg,stock,extra,lambda value,message:report(18+value*.20,message),wear_plan=wear_plan)
@@ -3803,7 +3950,9 @@ def generate_gcode(contours: List[Contour], cfg: dict,
             out.append(f"G0 Z{fmt(safe_machine_z)}")
             continue
         if c.closed:
-            if c.start_s>EPS:
+            if cfg.get("outer_safe_strategy") and c.role=="outer":
+                pts=outer_start_route(c,pts,cfg,active,effective_d)
+            elif c.start_s>EPS:
                 start_point=point_at(c.points,c.start_s,True)[0]
                 pts=rotate_closed_path(pts,nearest_path_distance(pts,start_point,True)[1])
             elif rapid_optimize:
@@ -3832,7 +3981,7 @@ def generate_gcode(contours: List[Contour], cfg: dict,
                 emit_phase(c,rough,rough_depths,rough_tabs,cfg["feed"],
                            f"rough - axial remain {fmt(max(0.0,target-rough_target))} mm, radial remain {fmt(actual_allowance)} mm")
             if stage=="rough":continue
-            finish_task=(ci,c,pts,target,tabs,order_note,object_note,removed_count,actual_allowance,wall_finish,use_onion)
+            finish_task=(ci,c,pts,target,tabs,order_note,object_note,removed_count,actual_allowance,wall_finish,use_onion,effective_d)
             # Completing each internal wall now preserves the safe holes-first
             # order.  Only outer finishing/onion cleanup is deferred.
             if c.role=="inner" or (stage=="finish" and cfg.get("tool_change_enabled")):emit_finish_task(finish_task)
@@ -3864,9 +4013,9 @@ def machining_report(contours: List[Contour], cfg: dict,
     active=[x for x in contours if x.enabled]
     override=cfg.get("_xy_origin_override")
     origin=(float(override[0]),float(override[1])) if override is not None else work_origin_for_contours(active,cfg)
-    ordered=ordered_contours(active,bool(cfg.get("rapid_optimize",True)),origin,cfg.get("outer_order_mode","nearest"),
-                             sheet_center=ordering_sheet_center(cfg),depth_first=bool(cfg.get("depth_first_order",False)))
+    ordered=planned_contours(active,cfg,origin)
     if cfg.get("_machining_stage")=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
+    if cfg.get("outer_safe_strategy"):cfg["_outer_context"]=active
     _,plan,_=tool_replacement_plan(ordered,cfg,stock,cfg["extra"])
     for report_index,(_,metrics) in enumerate(plan,1):
         if progress:progress(report_index/max(len(active),1)*100.0,f"가공 거리 계산 {report_index}/{len(active)}")
@@ -5888,11 +6037,13 @@ class App(tk.Tk):
         ttk.Checkbutton(controls,text="깊이 가공 우선 (보어 → 내경 → 외경)",
                         variable=self.vars["depth_first_order"],command=self.redraw).grid(row=r,columnspan=2,sticky="w");r+=1
         ttk.Label(controls,text="외곽 자동 가공 순서").grid(row=r,columnspan=2,sticky="w",pady=(4,0));r+=1
+        self.var("outer_safe_strategy",True,tk.BooleanVar)
+        ttk.Checkbutton(controls,text="외곽: 바깥면 시작 · 중앙/안쪽 우선",variable=self.vars["outer_safe_strategy"],command=self.redraw).grid(row=r,columnspan=2,sticky="w");r+=1
         self.var("outer_order_mode",OUTER_ORDER_CHOICES[0],tk.StringVar)
         self.outer_order_combo=ttk.Combobox(controls,width=24,state="readonly",textvariable=self.vars["outer_order_mode"],values=OUTER_ORDER_CHOICES)
         self.outer_order_combo.grid(row=r,columnspan=2,sticky="ew");r+=1
         self.outer_order_combo.bind("<<ComboboxSelected>>",lambda event:self.redraw())
-        ttk.Label(controls,text="판재 중앙 기준 · 절삭 방향 유지\n수동 순번 해제: 외곽 순서 자동",foreground="#91a0b8",wraplength=240).grid(row=r,columnspan=2,sticky="w",pady=(1,3));r+=1
+        ttk.Label(controls,text="안전 모드: 수동 시작점/외곽순번보다 우선\n시작 위치는 G-code 생성 시 확정",foreground="#91a0b8",wraplength=240).grid(row=r,columnspan=2,sticky="w",pady=(1,3));r+=1
         ttk.Checkbutton(controls, text="Full-depth 1 pass", variable=self.vars["full_depth"]).grid(row=r, columnspan=2, sticky="w"); r += 1
         self.var("m8_enabled",False,tk.BooleanVar)
         ttk.Checkbutton(controls,text="절삭유/에어 사용 (M8 ON → M9 OFF)",variable=self.vars["m8_enabled"]).grid(row=r,columnspan=2,sticky="w",pady=(2,1));r+=1
@@ -6367,6 +6518,17 @@ class App(tk.Tk):
         except (ValueError,tk.TclError):return "nearest",None  # Incomplete entry; config blocks NC generation.
         return mode,center
 
+    def preview_support_order(self,ordered):
+        try:
+            cfg={k:self.vars[k].get() for k in ('sheet_w','sheet_h')}
+            sheet_center_from_config(cfg)
+        except (ValueError,tk.TclError):return ordered
+        key=(tuple((id(c),c.role,c.operation,tuple(c.points)) for c in ordered),cfg['sheet_w'],cfg['sheet_h'])
+        if getattr(self,'support_order_cache_key',None)!=key:
+            self.support_order_cache=support_outer_sequence(ordered,cfg)[0]
+            self.support_order_cache_key=key
+        return self.support_order_cache
+
     def sheet_dimensions_changed(self,event=None):
         try:center=sheet_center_from_config({k:self.vars[k].get() for k in ("sheet_w","sheet_h")})
         except (ValueError,tk.TclError):return
@@ -6419,7 +6581,7 @@ class App(tk.Tk):
                         "rpm","feed","plunge","stock","extra","safe_z","safe_z_auto","approach_z","lead","passes",
                         "path_tolerance","arc_fit_enabled","pocket_stay_down","preflight_enabled","preflight_z","preflight_feed","pocket_stepover","pocket_stepdown","pocket_finish",
                         "tab_count","inner_tabs_enabled","inner_tab_count","tab_flat","tab_remain","tab_ramp","z_origin","xy_origin","climb",
-                        "full_depth","rapid_optimize","outer_order_mode","depth_first_order","sheet_w","sheet_h","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
+                        "full_depth","rapid_optimize","outer_order_mode","outer_safe_strategy","depth_first_order","sheet_w","sheet_h","m8_enabled","wall_finish","onion_skin_enabled","finish_scope","onion_skin",
                         "finish_allowance","finish_feed_pct","tab_shape","auto_trim",
                         "machine_home_enabled","machine_park_x","machine_park_y","machine_park_z",
                         "start_code","end_code","onion_split","onion_split_percent","onion_start_code","onion_end_code",
@@ -6462,6 +6624,7 @@ class App(tk.Tk):
             payload=copy.deepcopy(payload)
             payload["vars"].setdefault("inner_tabs_enabled",False)
             payload["vars"].setdefault("inner_tab_count",2)
+            payload["vars"].setdefault("outer_safe_strategy",True)
         if (not isinstance(payload,dict) or set(payload)!={"vars","codes"} or
                 not isinstance(payload["vars"],dict) or set(payload["vars"])!=set(PROFILE_VAR_KEYS[kind]) or
                 not isinstance(payload["codes"],dict) or set(payload["codes"])!=(set(PROFILE_CODE_ATTRS) if kind=="machine" else set())):
@@ -6907,6 +7070,7 @@ class App(tk.Tk):
         data["vars"].setdefault("arc_fit_enabled",False)
         data["vars"].setdefault("inner_tabs_enabled",False)
         data["vars"].setdefault("inner_tab_count",2)
+        data["vars"].setdefault("outer_safe_strategy",True)
         outer_order_mode(data["vars"]["outer_order_mode"])
         if set(data["vars"])!=set(self.vars):raise ValueError("작업 설정 항목이 현재 버전과 맞지 않습니다.")
         for k,v in data["vars"].items():
@@ -8116,7 +8280,9 @@ class App(tk.Tk):
         self.order_tree.delete(*self.order_tree.get_children())
         outer_mode,center=self.preview_outer_order_settings()
         active_order=ordered_contours(self.contours,bool(self.vars["rapid_optimize"].get()),outer_order=outer_mode,
-                                      sheet_center=center,depth_first=self.vars["depth_first_order"].get());actual={id(c):i for i,c in enumerate(active_order,1)}
+                                      sheet_center=center,depth_first=self.vars["depth_first_order"].get())
+        if self.vars["outer_safe_strategy"].get():active_order=self.preview_support_order(active_order)
+        actual={id(c):i for i,c in enumerate(active_order,1)}
         display=active_order+[c for c in self.contours if not c.enabled]
         if self.tree_sort_col:
             def sort_key(c):
@@ -8671,6 +8837,7 @@ class App(tk.Tk):
             for p in c.points + ([c.points[0]] if c.closed else []): xy.extend(self.transform(p))
             group_chosen=c.object_id and contour_group_key(c) in manual_keys
             color = "#42e695" if id(c) in selected_ids or group_chosen else ("#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d"))
+            if self.vars["outer_safe_strategy"].get() and id(c) in getattr(self,"support_risk_ids",set()):color="#ff5555"
             style={"fill":color,"width":3 if id(c) in selected_ids else 2}
             item=self.canvas.create_line(*xy,**style,tags=(group_tag,) if group_tag else ())
             normal="#666666" if not c.enabled else ("#4aa8ff" if c.role=="inner" else "#ffd84d")
@@ -8683,7 +8850,7 @@ class App(tk.Tk):
             for s in c.tabs:
                 p,_,_=point_at(c.points,s,c.closed); x,y=self.transform(p)
                 self.canvas.create_oval(x-5,y-5,x+5,y+5,fill="#ff9f1c",outline="",tags=(group_tag,) if group_tag else ())
-            if c.closed and c.start_s > EPS:
+            if c.closed and c.start_s > EPS and not (c.role=="outer" and self.vars["outer_safe_strategy"].get()):
                 p,_,_=point_at(c.points,c.start_s,True); x,y=self.transform(p)
                 direction=start_cut_direction(c,self.vars["climb"].get())
                 if direction is None:
@@ -8707,6 +8874,7 @@ class App(tk.Tk):
                 # collision checks and full toolpath planning wait for Generate.
                 ordered=ordered_contours(self.contours,rapid,outer_order=outer_mode,
                                          sheet_center=center,depth_first=depth_first)
+                if self.vars["outer_safe_strategy"].get():ordered=self.preview_support_order(ordered)
                 self.preview_order_cache=ordered
                 self.preview_order_cache_key=(tuple((id(c),c.enabled,c.cut_order,c.outer_cut_order,
                     round(c.start_s,6),c.points[0] if c.points else None) for c in self.contours),
@@ -8860,8 +9028,18 @@ class App(tk.Tk):
                 edge_issues,spacing_issues=self.manual_array_layout_issues()
                 if edge_issues or spacing_issues:
                     warnings.append(f"배치 여유 위반: 가장자리 {edge_issues}개, 간격/겹침 {spacing_issues}쌍")
-            sequence=ordered_contours(active,cfg.get("rapid_optimize",True),outer_order=cfg.get("outer_order_mode","nearest"),
-                                      sheet_center=ordering_sheet_center(cfg),depth_first=bool(cfg.get("depth_first_order",False)))
+            sequence=planned_contours(active,cfg)
+            if cfg.get("outer_safe_strategy"):
+                _,relations=support_outer_sequence(sequence,cfg)
+                relations+=support_disconnect_warnings(sequence,cfg)
+                self.support_risk_ids={id(c) for a,b,_ in relations for c in (a,b)}
+                self.redraw(refresh_tree=False)
+                def part_label(c):return f"{c.object_name or c.layer} #{c.instance_id}"
+                for a,b,reason in relations:
+                    if reason=="enclosure":warnings.append(f"안쪽 우선: {part_label(a)} → {part_label(b)} (감싸는 형상, 순서 보정)")
+                    elif reason=="cycle":warnings.append(f"순서만으로 해결 불가: {part_label(a)} — 배치/고정 확인")
+                    else:warnings.append(f"지지 상실 가능: {part_label(b)} 절단 후 {part_label(a)} — 탭/클램프 고정 확인")
+                if relations:warnings.append("빨간 윤곽이 점검 대상입니다. 연결 검사는 2D 관통 경로 기준이며 탭/클램프의 고정력은 미평가입니다.")
             first_outer=next((i for i,c in enumerate(sequence) if c.closed and c.role=="outer"),None)
             if first_outer is not None and any(c.role=="inner" for c in sequence[first_outer+1:]):
                 warnings.append("수동 순번 때문에 외곽이 일부 내부 형상보다 먼저 가공됩니다. 부품 고정을 확인하세요.")
@@ -8908,8 +9086,7 @@ class App(tk.Tk):
                 if job_cfg.get("tool_change_enabled"):
                     staged=stage_contours(active,job_cfg)
                     origin=job_cfg.get("_xy_origin_override") or work_origin_for_contours(staged,job_cfg)
-                    ordered=ordered_contours(staged,job_cfg.get("rapid_optimize",True),origin,job_cfg.get("outer_order_mode","nearest"),
-                                              sheet_center=ordering_sheet_center(job_cfg),depth_first=bool(job_cfg.get("depth_first_order",False)))
+                    ordered=planned_contours(staged,job_cfg,origin)
                     if job_cfg.get("_machining_stage")=="finish":ordered=sorted(ordered,key=lambda c:c.role=="outer")
                     cuts,_,loads=tool_replacement_plan(ordered,job_cfg,job_cfg["stock"],job_cfg["extra"])
                     distance_jobs.extend((f"{label} TOOL {i}",load) for i,load in enumerate(loads,1))
