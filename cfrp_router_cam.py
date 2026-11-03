@@ -58,7 +58,7 @@ TOOL_WEAR_WARNING_DISTANCE_M = 8.0
 TOOL_WEAR_STOP_DISTANCE_M = 10.0
 TIME_ESTIMATE_RAPID_MM_MIN = 3000.0
 TIME_ESTIMATE_MARGIN = 0.10
-APP_VERSION = "1.47"
+APP_VERSION = "1.48"
 JOB_AUTOSAVE_INTERVAL_MS = 5 * 60 * 1000
 SETTINGS_FILENAME = "settings.json"
 PROFILES_FILENAME = "profiles.json"
@@ -6456,6 +6456,12 @@ class App(tk.Tk):
         return self.validate_profile(kind,{"vars":values,"codes":codes})
 
     def validate_profile(self,kind,payload):
+        # Pre-V1.45 setup libraries lack only these new tab controls. Migrate
+        # a copy so loading cannot rewrite the user's original profile file.
+        if kind == "setup" and isinstance(payload,dict) and isinstance(payload.get("vars"),dict):
+            payload=copy.deepcopy(payload)
+            payload["vars"].setdefault("inner_tabs_enabled",False)
+            payload["vars"].setdefault("inner_tab_count",2)
         if (not isinstance(payload,dict) or set(payload)!={"vars","codes"} or
                 not isinstance(payload["vars"],dict) or set(payload["vars"])!=set(PROFILE_VAR_KEYS[kind]) or
                 not isinstance(payload["codes"],dict) or set(payload["codes"])!=(set(PROFILE_CODE_ATTRS) if kind=="machine" else set())):

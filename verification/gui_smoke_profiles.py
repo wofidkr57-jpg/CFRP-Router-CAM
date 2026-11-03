@@ -45,6 +45,23 @@ with tempfile.TemporaryDirectory() as tmp, mock.patch.dict(os.environ,{"CFRP_CAM
             app.update()
             assert app.profile_active=={"machine":"기존 기계","setup":"기존 가공 셋업"}
             assert tuple(app.profile_combos["machine"][0]["values"])==("기존 기계",)
+            old_library=json.loads((root/"profiles.json").read_text(encoding="utf-8"))
+            for payload in old_library["setup"].values():
+                payload["vars"].pop("inner_tabs_enabled",None)
+                payload["vars"].pop("inner_tab_count",None)
+            old_bytes=json.dumps(old_library).encode("utf-8")
+            (root/"profiles.json").write_bytes(old_bytes)
+            app.load_profiles()
+            assert not app._profiles_load_error
+            assert set(app.profiles["machine"])==set(old_library["machine"])
+            assert set(app.profiles["setup"])==set(old_library["setup"])
+            for name,payload in old_library["setup"].items():
+                result=app.profiles["setup"][name]
+                assert all(result["vars"][k]==v for k,v in payload["vars"].items())
+                assert result["codes"]==payload["codes"]
+                assert result["vars"]["inner_tabs_enabled"] is False
+                assert result["vars"]["inner_tab_count"]==2
+            assert (root/"profiles.json").read_bytes()==old_bytes
             app.geometry("980x700");app.update()
             for widget in app.profile_combos["machine"][0].master.winfo_children():
                 assert widget.winfo_viewable() and widget.winfo_x()+widget.winfo_width()<=widget.master.winfo_width()

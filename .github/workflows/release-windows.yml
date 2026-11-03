@@ -188,7 +188,7 @@ jobs:
             version = $version
             download_url = "https://github.com/${{ github.repository }}/releases/download/v${version}/CFRP_Router_CAM.exe"
             sha256 = $hash
-            message = "자동 탭이 한쪽에 몰리는 문제를 수정했습니다. 기존 작업에서 자동 탭 다시 배치를 누르세요. 수동 탭 재배치에 주의하세요."
+            message = "기존 프로파일 목록이 표시되지 않는 호환성 오류를 수정했습니다. 기존 프로파일 원본과 설정을 보존합니다."
           }
           $manifest | ConvertTo-Json | Set-Content latest.json -Encoding utf8
 
